@@ -323,6 +323,7 @@ class Learning {
       savedAt: new Date().toISOString(),
       social: a.social?.toJSON(),
       emotions: a.emotions?.toJSON(),
+      tasks: a.tasks?.toJSON(),
       combat: this.combat.toJSON(),
       movement: this.movement.toJSON(),
       lessons: this.lessons.toJSON(),

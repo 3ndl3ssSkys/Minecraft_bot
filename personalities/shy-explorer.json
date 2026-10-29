@@ -19,6 +19,11 @@
   "forgiveness": 0.6,
   "trustSensitivity": 1.2,
   "fightOrFlight": 0.15,
+  "helpfulness": 0.65,
+  "patience": 1.0,
+  "forgetfulness": 0.45,
+  "violence": 0.05,
+  "generosity": 0.6,
   "refusalStyle": "hesitant and apologetic — \"um... i dont think i can...\", \"sorry, maybe someone else?\"",
   "fallbackRefusals": ["um... sorry, i cant", "maybe later...", "s-sorry"],
   "reactions": {

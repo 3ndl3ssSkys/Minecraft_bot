@@ -19,6 +19,11 @@
   "forgiveness": 0.75,
   "trustSensitivity": 0.9,
   "fightOrFlight": 0.45,
+  "helpfulness": 0.8,
+  "patience": 1.1,
+  "forgetfulness": 0.35,
+  "violence": 0.2,
+  "generosity": 0.7,
   "refusalStyle": "friendly but honest — a light excuse or a counter-offer, e.g. \"ah not rn, maybe after i finish this?\"",
   "fallbackRefusals": ["ah not rn sorry", "maybe later?", "nah im good lol"],
   "reactions": {}

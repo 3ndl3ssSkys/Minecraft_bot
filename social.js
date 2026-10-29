@@ -3,7 +3,13 @@
 /**
  * social.js — how the bot feels about each player, and why.
  *
- * Every player gets a profile with a trust score (0..100, starting high).
+ * Every player gets two separate scores:
+ *
+ *   trust   (0..100, starts high) — are they safe and reliable? Moves with what they DO.
+ *   liking  (0..100, starts neutral) — do I enjoy them? Personal chemistry: fun to talk to,
+ *           shared interests, time spent together. Being polite doesn't make you likeable,
+ *           and a rude-but-funny friend can be well liked.
+ *
  * Trust moves with what they *do*, not just what they say:
  *
  *   - hitting the bot (worse with a weapon, worse when repeated, much worse
@@ -51,7 +57,7 @@ class SocialModel {
   }
 
   get cfg () { return this.agent.config.trust }
-  get obey () { return this.agent.config.obedience }
+  get likeCfg () { return this.agent.config.affinity }
 
   // -------------------------------------------------------------------------
   // Profiles & roles
@@ -65,6 +71,7 @@ class SocialModel {
       this.players[k] = {
         name,
         trust: this.cfg.initial,
+        affinity: this.role(name) === 'owner' ? this.likeCfg.ownerInitial : this.likeCfg.initial,
         firstSeen: now(),
         lastSeen: now(),
         hostileUntil: 0,
@@ -77,12 +84,13 @@ class SocialModel {
     }
     const p = this.players[k]
     p.name = name // keep latest capitalisation
+    if (!Number.isFinite(p.affinity)) p.affinity = this.role(name) === 'owner' ? this.likeCfg.ownerInitial : this.likeCfg.initial
     return p
   }
 
   t (name) {
     const k = this.key(name)
-    if (!this.transient.has(k)) this.transient.set(k, { hits: [], swingAt: 0, crouches: [], lastGreetAt: 0, lastRepeatPenaltyAt: 0, armedNearSince: 0, followingSince: 0, lookingSince: 0, lastBodyNoteAt: 0 })
+    if (!this.transient.has(k)) this.transient.set(k, { hits: [], swingAt: 0, crouches: [], lastGreetAt: 0, lastRepeatPenaltyAt: 0, armedNearSince: 0, followingSince: 0, lookingSince: 0, lastBodyNoteAt: 0, requests: [], togetherSince: 0 })
     return this.transient.get(k)
   }
 
@@ -96,11 +104,20 @@ class SocialModel {
 
   tier (trust) {
     if (trust >= 92) return 'close friend'
-    if (trust >= this.obey.trustedThreshold) return 'trusted friend'
+    if (trust >= this.cfg.trustedAbove) return 'trusted friend'
     if (trust >= 60) return 'friendly'
     if (trust >= this.cfg.waryBelow) return 'unsure about them'
     if (trust >= this.cfg.hostileBelow) return 'wary of them'
     return 'enemy'
+  }
+
+  likeTier (affinity) {
+    if (affinity >= 85) return 'one of your best friends'
+    if (affinity >= 70) return 'a good friend'
+    if (affinity >= 57) return 'you like them'
+    if (affinity >= 43) return 'no strong feelings'
+    if (affinity >= 28) return "you don't really like them"
+    return "you can't stand them"
   }
 
   isHostile (name) {
@@ -133,8 +150,7 @@ class SocialModel {
     p.trust = clamp(Math.round((p.trust + d) * 10) / 10, 0, 100)
     const applied = Math.round((p.trust - before) * 10) / 10
     if (incident) p.lastIncidentAt = now()
-    p.notes.push({ at: now(), text: reason, delta: applied })
-    if (p.notes.length > 15) p.notes.shift()
+    this.addNote(p, reason, applied, 'trust')
 
     const crossed = this.tier(before) !== this.tier(p.trust)
     if (!quiet) {
@@ -143,6 +159,42 @@ class SocialModel {
     }
     this.agent.learning?.markDirty()
     return p.trust
+  }
+
+  /** Change how much the bot likes someone (personal chemistry, not safety). */
+  adjustAffinity (name, delta, reason, { quiet = false } = {}) {
+    if (!name || !Number.isFinite(delta) || delta === 0) return null
+    const p = this.profile(name)
+    const before = p.affinity
+    p.affinity = clamp(Math.round((p.affinity + delta) * 10) / 10, 0, 100)
+    if (Math.abs(delta) >= 1 && reason) this.addNote(p, reason, Math.round((p.affinity - before) * 10) / 10, 'like')
+    if (!quiet && this.likeTier(before) !== this.likeTier(p.affinity)) {
+      this.agent.memory.addEvent('liking', `How you feel about ${name} changed: ${this.likeTier(p.affinity)} (${reason}).`)
+    }
+    if (Math.abs(delta) >= 1) this.agent.log.debug(`Liking ${name}: ${Math.round(before)} → ${Math.round(p.affinity)} (${reason})`)
+    this.agent.learning?.markDirty()
+    return p.affinity
+  }
+
+  /** History notes; the same thing again within 10 minutes is merged ("punched you (x3)"). */
+  addNote (p, text, delta, kind) {
+    const last = p.notes[p.notes.length - 1]
+    if (last && last.text === text && last.kind === kind && now() - last.at < 10 * 60000) {
+      last.times = (last.times || 1) + 1
+      last.delta = Math.round((last.delta + delta) * 10) / 10
+      last.at = now()
+      return
+    }
+    p.notes.push({ at: now(), text, delta, kind })
+    if (p.notes.length > 15) p.notes.shift()
+  }
+
+  /** People who constantly ask for things get on your nerves. */
+  noteRequest (name) {
+    const t = this.t(name)
+    t.requests = t.requests.filter((ts) => now() - ts < 30 * 60000)
+    t.requests.push(now())
+    if (t.requests.length > 3) this.adjustAffinity(name, -1, 'keeps asking you for things')
   }
 
   markHostile (name, minutes = this.cfg.hostileMemoryMinutes) {
@@ -204,7 +256,7 @@ class SocialModel {
     let delta = -(weapon ? pen.weaponHit : pen.fistHit)
     reasons.push(weapon ? `hit you with a ${item}` : 'punched you')
 
-    if (streak === 1 && !weapon && !lowHealth && p.trust >= this.obey.trustedThreshold) {
+    if (streak === 1 && !weapon && !lowHealth && (p.trust >= this.cfg.trustedAbove || p.affinity >= 70)) {
       // One punch from a friend is probably horseplay.
       delta = -0.5
       reasons[0] = 'punched you (maybe just messing around)'
@@ -226,6 +278,7 @@ class SocialModel {
       this.agent.emotions.stimulate({ anger: 0.2, fear: 0.25 }, `${name} attacked you when you were nearly dead`)
     }
     if (weapon && streak >= 2) this.markHostile(name)
+    if (delta <= -5) this.adjustAffinity(name, delta / 3, 'attacked you', { quiet: true })
 
     this.adjustTrust(name, delta, reasons.join(' '))
     this.agent.reactor?.trigger('attackedByPlayer', { player: name, item: item || 'fist', streak, trust: Math.round(p.trust) })
@@ -237,6 +290,7 @@ class SocialModel {
     this.markHostile(name, this.cfg.hostileMemoryMinutes * 2)
     const repeat = p.stats.killedMe > 1 ? ` (that's ${p.stats.killedMe} times now)` : ''
     this.adjustTrust(name, -this.cfg.penalties.killedMe, `killed you${repeat}`)
+    this.adjustAffinity(name, -10, 'killed you', { quiet: true })
     this.agent.emotions.stimulate({ anger: 0.45, sadness: 0.3, fear: 0.15 }, `${name} killed you`)
   }
 
@@ -255,6 +309,11 @@ class SocialModel {
     const p = this.profile(name)
     if (victim.type === 'player') {
       const victimName = victim.username
+      // Someone we promised to protect is being attacked: that's on us now.
+      if (this.agent.tasks?.isProtecting(victimName)) {
+        this.agent.protectAlert = { attacker: name, id: attacker.id, victim: victimName, at: now() }
+        this.agent.brain?.wake()
+      }
       if (this.isHostile(victimName) || this.isAttackingNow(victimName, 10000)) {
         // They're fighting someone who's been attacking us — that's help.
         p.stats.helped++
@@ -264,7 +323,11 @@ class SocialModel {
       const victimTrust = this.players[this.key(victimName)]?.trust ?? this.cfg.initial
       p.stats.harmedNearby++
       this.adjustTrust(name, -pen.harmedPlayerNearby * (0.5 + victimTrust / 100), `attacked ${victimName} right next to you`)
-      if (victimTrust >= this.obey.trustedThreshold) this.agent.emotions.stimulate({ anger: 0.15 }, `${name} attacked your friend ${victimName}`)
+      const victimLiking = this.players[this.key(victimName)]?.affinity ?? this.likeCfg.initial
+      if (victimTrust >= this.cfg.trustedAbove || victimLiking >= 70) {
+        this.agent.emotions.stimulate({ anger: 0.15 }, `${name} attacked your friend ${victimName}`)
+        this.adjustAffinity(name, -3, `attacked your friend ${victimName}`)
+      }
       this.agent.reactor?.trigger('harmNearby', { player: name, victim: victimName })
     } else if (PETS.has(victim.name)) {
       p.stats.harmedNearby++
@@ -304,6 +367,7 @@ class SocialModel {
     const value = (VALUABLE[item] ?? (this.agent.bot.registry.foodsByName[item] ? (this.agent.bot.food < 14 ? 1.5 : 0.7) : 0.3)) * count
     const delta = Math.min(12, this.cfg.rewards.gift + Math.sqrt(value) * 1.5)
     this.adjustTrust(name, delta, `gave you ${count} ${item}`, { incident: false })
+    this.adjustAffinity(name, Math.min(2, 0.5 + Math.sqrt(value) * 0.3), null, { quiet: true }) // nice, but gifts don't buy friendship
     this.agent.emotions.stimulate({ joy: Math.min(0.4, 0.12 + value / 40) }, `${name} gave you ${item}`)
     this.agent.reactor?.trigger('gift', { player: name, item, count })
 
@@ -326,6 +390,7 @@ class SocialModel {
       t.lastGreetAt = now()
       this.perceive(entity.username, 'happy', 'friendly greeting (crouch-spamming at you)', 'body')
       this.adjustTrust(entity.username, this.cfg.rewards.crouchGreeting, 'crouch-greeted you', { incident: false, quiet: true })
+      this.adjustAffinity(entity.username, 0.5, null, { quiet: true })
       this.agent.reactor?.trigger('crouchGreeting', { player: entity.username, entityId: entity.id })
     }
   }
@@ -348,6 +413,16 @@ class SocialModel {
       const p = this.profile(e.name)
       p.lastSeen = now()
       const t = this.t(e.name)
+      // Hanging out near each other without trouble slowly builds a bond.
+      if (e.distance < 16 && !this.isHostile(e.name)) {
+        if (!t.togetherSince) t.togetherSince = now()
+        if (now() - t.togetherSince >= 60000) {
+          this.adjustAffinity(e.name, this.likeCfg.perMinuteTogether, null, { quiet: true })
+          t.togetherSince = now()
+        }
+      } else {
+        t.togetherSince = 0
+      }
       const entity = bot.entities[e.id]
       if (!entity) continue
       const armed = Boolean(entity.heldItem && WEAPON.test(entity.heldItem.name))
@@ -405,6 +480,7 @@ class SocialModel {
       const effect = Math.min(lost * 0.5, this.cfg.rewards.apology * (this.agent.personality.forgiveness ?? 0.5) * 2 * 0.5 ** p.stats.apologies)
       p.stats.apologies++
       if (effect > 0.5) this.adjustTrust(name, effect, p.stats.apologies > 1 ? 'apologised again' : 'apologised', { incident: false })
+      if (p.stats.apologies === 1) this.adjustAffinity(name, 1, null, { quiet: true })
       this.agent.emotions.stimulate({ anger: -0.15 })
     } else {
       const impact = clamp(Number(a.trustImpact) || 0, -10, 4)
@@ -418,6 +494,10 @@ class SocialModel {
         this.agent.emotions.stimulate({ joy: 0.08 })
       }
     }
+
+    // Chemistry: did this character actually enjoy that? (not the same as politeness)
+    const like = clamp(Number(a.likeImpact) || 0, -5, 5)
+    if (like) this.adjustAffinity(name, like, like > 0 ? 'was fun to talk to' : 'got on your nerves', { quiet: Math.abs(like) < 2 })
 
     if (a.promise?.made && PROMISE_KINDS.includes(a.promise.kind)) this.addPromise(name, a.promise)
   }
@@ -451,12 +531,14 @@ class SocialModel {
     if (status === 'kept') {
       p.stats.promisesKept++
       this.adjustTrust(name, this.cfg.rewards.keptPromise, `kept their promise (${pr.description})`, { incident: false })
+      this.adjustAffinity(name, 2, null, { quiet: true })
       this.agent.emotions.stimulate({ joy: 0.15 }, `${name} kept their word`)
       this.agent.reactor?.trigger('promiseKept', { player: name, promise: pr.description })
     } else {
       p.stats.promisesBroken++
       const soft = status === 'expired' ? 0.5 : 1
       this.adjustTrust(name, -this.cfg.penalties.brokenPromise * soft, `broke their promise (${pr.description})`)
+      this.adjustAffinity(name, -2 * soft, null, { quiet: true })
       this.agent.emotions.stimulate({ sadness: 0.15 * soft, anger: 0.15 * soft }, `${name} broke a promise`)
       this.agent.reactor?.trigger('promiseBroken', { player: name, promise: pr.description })
     }
@@ -480,63 +562,15 @@ class SocialModel {
   }
 
   // -------------------------------------------------------------------------
-  // Following instructions
-  // -------------------------------------------------------------------------
-
-  /**
-   * Decide — before the LLM writes the reply — whether the bot will do what
-   * this player asks. The LLM then phrases the outcome naturally.
-   * @returns {{ outcome: 'comply'|'defer'|'refuse', chance: number, reason: string, role: string, trust: number }}
-   */
-  decideCompliance (name) {
-    const o = this.obey
-    const role = this.role(name)
-    const p = this.profile(name)
-    const trust = this.cfg.enabled ? p.trust : 100
-    const result = (outcome, chance, reason) => ({ outcome, chance: Math.round(chance * 100) / 100, reason, role, trust: Math.round(trust) })
-
-    if (role === 'owner' && o.ownerBypass) {
-      return Math.random() < o.chance.owner ? result('comply', o.chance.owner, '') : result('defer', o.chance.owner, 'you are in the middle of something')
-    }
-    if (o.whoCanInstruct === 'nobody') return result('refuse', 0, 'you do your own thing and do not take requests from anyone right now')
-    if (this.isHostile(name)) return result('refuse', 0, `you do not trust ${name} at all after what they did`)
-
-    const tierRole = role === 'admin' ? 'admin' : trust >= o.trustedThreshold ? 'trusted' : 'player'
-    const ranks = { player: 0, trusted: 1, admin: 2, owner: 3 }
-    const needed = { everyone: 0, trusted: 1, admins: 2, owners: 3 }[o.whoCanInstruct] ?? 0
-    const authorized = ranks[role === 'owner' ? 'owner' : tierRole] >= needed
-
-    const base = authorized ? o.chance[role === 'owner' ? 'owner' : tierRole] : o.favorChance
-    // Full chance at normal trust (initial), fading to zero at the hostile line.
-    const trustFactor = role === 'owner' ? 1 : clamp((trust - this.cfg.hostileBelow) / Math.max(1, this.cfg.initial - this.cfg.hostileBelow), 0, 1)
-    const mods = this.agent.emotions.modifiers()
-    const chance = clamp(base * trustFactor * mods.compliance, 0, 1)
-
-    const roll = Math.random()
-    if (roll < chance) return result('comply', chance, '')
-
-    let reason
-    if (!authorized) reason = `${name} isn't someone you take orders from — you only do favours for people you're close with`
-    else if (trust < this.cfg.waryBelow) reason = `you don't really trust ${name} (${this.tier(trust)})`
-    else if (this.agent.emotions.values.anger > 0.45) reason = "you're in a bad mood"
-    else if (this.agent.emotions.values.sadness > 0.45) reason = "you're not feeling up to it"
-    else if (this.agent.emotions.values.fear > 0.5) reason = "you're too on edge right now"
-    else reason = 'you have your own plans right now'
-
-    if (trust >= this.cfg.waryBelow && roll < chance + (1 - chance) * o.deferChance) return result('defer', chance, reason)
-    return result('refuse', chance, reason)
-  }
-
-  // -------------------------------------------------------------------------
   // Summaries for prompts
   // -------------------------------------------------------------------------
 
   relationshipLine (name, { notes = 4 } = {}) {
     const p = this.profile(name)
     const role = this.role(name)
-    const parts = [`${name}: trust ${Math.round(p.trust)}/100 (${this.tier(p.trust)})${role !== 'player' ? `, your ${role}` : ''}`]
+    const parts = [`${name}: trust ${Math.round(p.trust)}/100 (${this.tier(p.trust)}), liking ${Math.round(p.affinity)}/100 (${this.likeTier(p.affinity)})${role !== 'player' ? `, your ${role}` : ''}`]
     if (this.isHostile(name)) parts.push('they have been HOSTILE to you recently')
-    const recent = p.notes.slice(-notes).map((n) => `${n.text} (${minutesAgo(n.at)})`)
+    const recent = p.notes.slice(-notes).map((n) => `${n.text}${n.times > 1 ? ` (x${n.times})` : ''} (${minutesAgo(n.at)})`)
     if (recent.length) parts.push(`history: ${recent.join('; ')}`)
     if (p.perceived && now() - p.perceived.at < 10 * 60000) parts.push(`they seem ${describePerceived(p.perceived)}`)
     const open = p.promises.filter((x) => x.status === 'open')
@@ -549,7 +583,7 @@ class SocialModel {
   /** Short per-entity annotation merged into nearbyEntities. */
   annotate (name) {
     const p = this.profile(name)
-    const out = { trust: Math.round(p.trust), relationship: this.tier(p.trust) }
+    const out = { trust: Math.round(p.trust), liking: Math.round(p.affinity), relationship: `${this.tier(p.trust)}; ${this.likeTier(p.affinity)}` }
     const role = this.role(name)
     if (role !== 'player') out.role = role
     if (this.isHostile(name)) out.hostile = true
@@ -566,6 +600,11 @@ class SocialModel {
     p.trust = clamp(Number(value), 0, 100)
     if (p.trust >= this.cfg.hostileBelow) p.hostileUntil = 0
     p.notes.push({ at: now(), text: `trust set to ${p.trust} by an admin`, delta: 0 })
+    this.agent.learning?.markDirty()
+  }
+
+  setAffinity (name, value) {
+    this.profile(name).affinity = clamp(Number(value), 0, 100)
     this.agent.learning?.markDirty()
   }
 

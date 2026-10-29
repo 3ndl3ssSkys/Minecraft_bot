@@ -77,7 +77,10 @@
       "harmNearby": { "enabled": true, "chance": 0.6, "cooldownSec": 30, "perTarget": true, "style": "llm", "templates": ["{player} leave the {victim} alone", "hey, stop that"] },
       "crouchGreeting": { "enabled": true, "chance": 0.9, "cooldownSec": 60, "perTarget": true, "style": "gesture", "gesture": "crouch", "templates": ["o/ {player}"] },
       "wonFight": { "enabled": true, "chance": 0.5, "cooldownSec": 60, "style": "llm", "templates": ["gg", "ez"] },
-      "lostFight": { "enabled": true, "chance": 0.5, "cooldownSec": 60, "style": "template", "templates": ["nope, not today", "gotta heal"] }
+      "lostFight": { "enabled": true, "chance": 0.5, "cooldownSec": 60, "style": "template", "templates": ["nope, not today", "gotta heal"] },
+      "taskDone": { "enabled": true, "chance": 1, "cooldownSec": 0, "style": "llm", "templates": ["there you go {player}", "done!"] },
+      "taskPartial": { "enabled": true, "chance": 1, "cooldownSec": 0, "style": "llm", "templates": ["that's all i got time for {player}", "got you some, not all of it"] },
+      "taskAbandoned": { "enabled": true, "chance": 0.8, "cooldownSec": 0, "style": "llm", "templates": ["sorry {player}, couldn't do it", "gonna pass on that one after all"] }
     }
   },
   "behavior": {
@@ -99,20 +102,24 @@
     "disabledActions": [],
     "pathfinding": { "canDig": true, "allowParkour": true, "allowSprinting": true, "allow1by1towers": true, "thinkTimeoutMs": 10000, "baseTimeoutMs": 15000, "msPerBlock": 1200, "maxTimeoutMs": 180000 }
   },
-  "obedience": {
-    "whoCanInstruct": "everyone",
-    "chance": { "owner": 1, "admin": 0.9, "trusted": 0.7, "player": 0.45 },
-    "favorChance": 0.15,
-    "deferChance": 0.35,
-    "ownerBypass": true,
-    "applyToCommands": false,
-    "trustedThreshold": 80
+  "judgment": {
+    "ownerLoyalty": 0.3,
+    "randomness": 0.12,
+    "maxQueuedTasks": 4,
+    "forgetting": true,
+    "requestedFights": true
+  },
+  "affinity": {
+    "initial": 50,
+    "ownerInitial": 75,
+    "perMinuteTogether": 0.15
   },
   "trust": {
     "enabled": true,
     "initial": 75,
     "hostileBelow": 20,
     "waryBelow": 45,
+    "trustedAbove": 80,
     "recoveryPerHour": 6,
     "hostileMemoryMinutes": 5,
     "lowHealthThreshold": 8,
@@ -165,18 +172,18 @@
       "mode": "admin",
       "emotion": "admin",
       "trust": "admin",
+      "tasks": "admin",
       "settings": "admin",
       "get": "admin",
       "set": "admin",
       "reactions": "admin",
       "lessons": "admin",
-      "obey": "owner",
       "admin": "owner",
       "persona": "owner",
       "forget": "owner",
       "save": "owner"
     },
-    "ownerOnlySettings": ["obedience.", "trust.", "pvp.", "learning."]
+    "ownerOnlySettings": ["trust.", "pvp.", "learning."]
   },
   "perception": {
     "intervalMs": 2000,

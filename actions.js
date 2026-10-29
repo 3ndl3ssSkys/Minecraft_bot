@@ -316,6 +316,8 @@ function assertMayFightPlayer (ctx, name, sparring) {
   if (pvp.mode === 'always') return
   const provoked = ctx.social?.isHostile(name) || ctx.social?.isAttackingNow(name, 15000)
   if (provoked) return
+  // A fight the bot itself agreed to (someone asked, and it judged it worth it), or defending someone it promised to protect.
+  if (ctx.tasks?.mayFight(name)) return
   if (sparring && pvp.allowSparring) {
     const invited = (ctx.memory?.chat || []).some((c) => c.from?.toLowerCase() === lower && Date.now() - c.at < 180000 &&
       /\b(pvp|duel|spar|fight|1v1|battle)\b/i.test(c.text))
@@ -1292,9 +1294,10 @@ class ActionExecutor {
    * @param {object} [deps.social]   SocialModel (trust-aware PvP rules)
    * @param {object} [deps.learning] Learning (combat style selection & results)
    * @param {object} [deps.memory]   Memory (recent chat, e.g. duel invitations)
+   * @param {object} [deps.tasks]    TaskManager (fights the bot agreed to)
    */
-  constructor ({ bot, config, chat, log, notify, social, learning, memory }) {
-    Object.assign(this, { bot, config, chat, log, notify, social, learning, memory })
+  constructor ({ bot, config, chat, log, notify, social, learning, memory, tasks }) {
+    Object.assign(this, { bot, config, chat, log, notify, social, learning, memory, tasks })
     this.current = null // { name, args, startedAt, controller }
   }
 
@@ -1347,6 +1350,7 @@ class ActionExecutor {
       social: this.social,
       learning: this.learning,
       memory: this.memory,
+      tasks: this.tasks,
       signal: controller.signal
     }
 

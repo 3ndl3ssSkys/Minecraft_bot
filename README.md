@@ -5,9 +5,10 @@ An autonomous Minecraft Java Edition player built on **Mineflayer** + **mineflay
 On top of that it has an inner life:
 
 - **Feelings** rise and fall with what happens to it.
-- **Trust** in each player changes with what that player *does*.
+- **Trust** in each player (are they safe?) changes with what that player *does*.
+- **Liking** for each player (do I enjoy them?) grows from chemistry and time spent together, not from politeness.
 - **Learned experience** builds up over time: which fighting styles work, where it died, and short lessons.
-- **Its own free will** about following instructions.
+- **Its own judgment** about requests: it weighs what's asked, who's asking and what it would rather be doing. It sometimes does only part of a job, and sometimes forgets one.
 
 When it says no, it says it like a person, never like a bot.
 
@@ -63,19 +64,20 @@ You can also pin a version with `"server": { "version": "26.1" }`. If you're kic
 | `index.js` | Config, perception, the Ollama client, the decision loop, chat, reactions, commands, reconnects |
 | `actions.js` | The tool API the LLM can call (including the PvP combat engine), plus the `ActionExecutor` |
 | `emotions.js` | The emotion engine: six core feelings with decay, temperament and behaviour modifiers |
-| `social.js` | Per-player trust, intent reading, promises, body language, and the "will I do it?" roll |
+| `social.js` | Per-player trust and liking, intent reading, promises, body language |
+| `tasks.js` | Judging requests by task type, and running them: progress, patience, partial hand-overs, forgetting |
 | `learning.js` | Combat-style learning, danger zones, LLM-written lessons, and persistence |
 | `config.json` | All settings (every key has a default in code, so you can delete the ones you don't change) |
 | `personalities/*.json` | Presets: `friendly`, `grumpy-miner`, `shy-explorer`, `hype-builder` |
-| `data/brain.json` | Created at runtime: relationships, feelings, combat stats, lessons, danger zones, admins, in-game settings |
+| `data/brain.json` | Created at runtime: relationships, feelings, tasks, combat stats, lessons, danger zones, admins, in-game settings |
 
 ## How it thinks
 
 1. **Perceive.** Every 2s the bot builds a JSON snapshot. It includes:
    - its position, health, hunger and equipment (with durability), plus its inventory;
-   - nearby entities, with ids. Players also get their trust score, relationship, role, whether they're armed or hostile, and how they seem;
+   - nearby entities, with ids. Players also get their trust and liking scores, relationship, role, whether they're armed or hostile, and how they seem;
    - notable blocks, the block it's looking at, time and weather;
-   - its goal, feelings, pending requests and nearby danger zones;
+   - its goal, feelings, the task it's doing for someone (with progress and remaining patience), tasks it said it would do later, and nearby danger zones;
    - recent actions with results, events and chat.
 2. **Decide.** The snapshot goes to Ollama together with a summary of the people online and what it has learned. A JSON schema forces a reply like:
    ```json
@@ -98,7 +100,7 @@ Many things move them:
 - the LLM's own report of how it feels
 
 The dominant feeling becomes a label ("annoyed (6/10), also a bit scared — mostly because Steve hit you") that appears in every prompt. It also changes behaviour:
-- Anger and sadness lower the chance of following instructions.
+- Anger and sadness make it less willing to do favours.
 - Happiness makes it chattier; sadness and fear make it quieter.
 - Anger versus fear tips fight-or-flight.
 
@@ -139,41 +141,55 @@ Harsh incidents also mark the player **hostile** for a while (`trust.hostileMemo
 
 On 1.20+ servers the server reports exactly who caused each hit. On older versions the bot infers the attacker from nearby arm swings.
 
-Tiers: close friend (92+), trusted friend (80+), friendly (60+), unsure (45+), wary (20+), enemy.
+Trust tiers: close friend (92+), trusted friend (80+), friendly (60+), unsure (45+), wary (20+), enemy.
 
-## Following instructions (`obedience`)
+### Liking (`affinity`)
 
-When a player asks for something in chat, the bot **decides before replying** whether it will:
-- **comply** — it agrees and drops what it's doing;
-- **defer** — "after I finish this"; the request is saved and picked up later;
-- **refuse** — it says no.
+Trust is about **safety**; liking is about **chemistry**. Someone can be perfectly polite and still dull, and a rude-but-funny friend can be well liked. Strangers start at 50 ("no strong feelings"), and owners start at 75.
 
-The LLM then phrases that outcome naturally, in character.
+| Raises liking | Lowers liking |
+| --- | --- |
+| Messages *this personality* enjoys: funny, interesting, shared interests (the LLM rates `likeImpact`) | Boring, needy, bossy or annoying messages |
+| Time spent near each other without trouble (`affinity.perMinuteTogether`) | **Constantly asking for things** (more than 3 requests in 30 min) |
+| Doing things together: finishing a task for them, a kept promise, a first apology | Attacking it, killing it, attacking its friends, broken promises |
+| Gifts — a little; gifts don't buy friendship | Asking it to kill one of its friends |
 
-```
-chance = obedience.chance[role] × trust factor × mood factor
-```
+Liking tiers: best friend (85+), good friend (70+), likes them (57+), no strong feelings (43+), doesn't really like them (28+), can't stand them.
+
+## Requests (`judgment`)
+
+There is no obey-chance setting. When someone asks for something, the bot first works out *what* they're asking. The LLM classifies the request (kind, item, amount, target, effort, risk), and the bot makes its own estimate of the work: "a stack of diamonds" is huge, "10 logs" is small. Then it decides how it feels about **that particular request**:
+
+| Kind of request | What mostly decides it |
+| --- | --- |
+| Favours: gather, craft, give, come, follow, protect, build | **How much it likes the person**, then how much work it is, how risky, its mood, whether it's busy with someone else's task, and whether it needs to eat or heal first. Trust only matters when it's low ("I don't trust you"). Giving away valuable items also depends on `generosity`. |
+| "Go kill X" | **Whether it wants to**. It weighs: a grudge against X (they hurt or killed it, attacked its friends, are hostile); friendship with X (it refuses to kill friends, and *the person who asked* loses trust and liking for suggesting it); conflicts with earlier promises (it won't attack someone it promised to protect or is doing a job for); whether it would win (if outmatched it says "later"); its `violence` trait; whether it trusts the asker; and `pvp.mode` / `protectedPlayers` / `neverAttackOwners`. |
+| Duels with the asker ("1v1 me") | Liking and mood |
+
+The outcome is one of:
+- **do it** — it drops what it's doing (if the job isn't for someone else);
+- **do part of it** — "I can grab you 20 or so", for big jobs;
+- **later** — the task goes on its queue;
+- **no**.
+
+Only after deciding does the LLM write the reply, in character, from the decision and its reason. Refusals follow the personality's `refusalStyle` and mood: friendly "ah not rn, maybe after this?", grumpy "do it yourself kid", shy "um... sorry, i cant", hype "NAH im busy cooking". Assistant-speak ("I'm unable to assist…") is caught and replaced before it's sent.
+
+**Working on tasks:**
+- Accepted requests become tasks with progress. For item jobs, progress is measured from its inventory, and the hand-over (walking over and tossing the items) happens automatically when it has enough. *Come* and *follow* complete when done, and fights complete when won.
+- Each task gets a **patience budget**: the estimated time × how much it likes the person × the personality's `patience`. When patience runs out, or it decides it would rather do something else, or its own needs come first, it **wraps up**: it hands over what it has ("got you 4, that's all i had time for") or says it gave up.
+- **Forgetting:** "later" tasks slowly fade. They fade faster for people it likes less, when it has a lot on its plate, after dying and after fights, and with a more forgetful personality. A forgotten task disappears from its mind until the player brings it up; then it remembers ("oh shoot, i totally forgot") and puts it back on the list.
+- A newer request from the same person replaces their older one. Someone it likes a lot more can bump a job it hasn't really started yet.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `whoCanInstruct` | `everyone` | `everyone` / `trusted` / `admins` / `owners` / `nobody` |
-| `chance.owner` | 1.0 | owners (with `ownerBypass`, trust and mood don't affect them) |
-| `chance.admin` | 0.9 | admins |
-| `chance.trusted` | 0.7 | players with trust ≥ `trustedThreshold` (80) |
-| `chance.player` | 0.45 | everyone else |
-| `favorChance` | 0.15 | chance to do a favour for someone who isn't allowed to instruct |
-| `deferChance` | 0.35 | when not complying, chance of "later" rather than "no" |
-| `applyToCommands` | false | also roll for admins' `!come` / `!follow` / `!goal` |
+| `judgment.ownerLoyalty` | 0.3 | extra willingness for owners (still not automatic) |
+| `judgment.randomness` | 0.12 | human unpredictability |
+| `judgment.maxQueuedTasks` | 4 | more "later" promises than this, and the oldest slip |
+| `judgment.forgetting` | true | allow forgetting |
+| `judgment.requestedFights` | true | consider kill requests at all |
+| personality `helpfulness`, `patience`, `forgetfulness`, `violence`, `generosity` | | per-character temperament for all of the above |
 
-The trust factor is 1 at normal trust and falls to 0 at the hostile line, and hostile players always get 0. Anger and sadness lower the mood factor.
-
-Refusals depend on personality (`refusalStyle`) and mood:
-- *friendly*: "ah not rn, maybe after i finish this?"
-- *grumpy*: "do it yourself kid"
-- *shy*: "um... sorry, i cant"
-- *hype*: "NAH im busy cooking"
-
-Assistant-style phrasing ("I'm unable to assist…") is caught and replaced before it's sent.
+These live in `config.json` and the personality, not in game commands: nobody can dial up its obedience.
 
 ## Combat and learning (`pvp`, `learning`)
 
@@ -242,6 +258,11 @@ Set `"personality"` to a preset name from `personalities/`, or write one inline.
 
 ```json
 "temperament": { "joy": 0.15, "anger": 0.25, "fear": 0.05, "sadness": 0.1, "boredom": 0.15, "surprise": 0 },
+"helpfulness": 0.35,
+"patience": 0.8,
+"forgetfulness": 0.15,
+"violence": 0.5,
+"generosity": 0.25,
 "sensitivity": { "anger": 1.5, "fear": 0.6 },
 "forgiveness": 0.2,
 "trustSensitivity": 1.4,
@@ -303,26 +324,25 @@ When anyone else types `!stop`, it's treated as normal chat, so the bot just ans
 | --- | --- | --- |
 | `!status`, `!help` | admin | health, food, action, goal, feeling |
 | `!stop` `!pause` `!resume` | admin | control the brain |
-| `!come` `!follow` `!goal <text\|clear>` | admin | give it something to do |
+| `!come` `!follow` `!goal <text\|clear>` | admin | from an **owner**: done directly. From an **admin**: treated as a request and judged like any other. |
 | `!mode <silent\|respond\|unprompted\|both>` | admin | chat mode |
 | `!emotion` | admin | `!emotion` (show) · `!emotion angry 8` (set) · `!emotion lock happy` · `!emotion unlock` · `!emotion volatility 0.5` |
-| `!trust [player] [0-100\|reset]` | admin | view or set trust; no player = list |
+| `!trust [player] [0-100\|reset]` | admin | view a relationship (trust, liking, history), or set trust; no player = list |
+| `!tasks [clear]` | admin | what it's doing for whom, what it said it'd do later, and what it forgot |
 | `!set <key> <value\|reset>` / `!get <key>` / `!settings [reset]` | admin | change settings live (see below) |
 | `!lessons`, `!reactions on\|off` | admin | |
-| `!obey` | owner | `!obey` (show) · `!obey admin 0.8` · `!obey player 30%` · `!obey who admins` · `!obey favor 0.1` |
 | `!admin add\|remove <player>` | owner | |
 | `!persona <name>`, `!forget <player>`, `!save` | owner | |
 
 **Live settings** (`!set`) persist in `data/brain.json` and override `config.json` until reset:
 - **Chat:** `chat.mode`, `chat.respondTo`, `chat.unaddressedReplyChance`, `chat.unprompted.chance`, `chat.unprompted.intervalSeconds`, `chat.reactionsInRespondMode`, `chat.goalChangeInterrupts`
 - **Reactions:** `reactions.enabled`, `reactions.gestures`
-- **Obedience:** `obedience.*` (`whoCanInstruct`, `chance.owner/admin/trusted/player`, `favorChance`, `deferChance`, `ownerBypass`, `applyToCommands`, `trustedThreshold`)
 - **Emotions:** `emotions.enabled`, `emotions.volatility`, `emotions.decayPerMinute`, `emotions.lock`, `emotions.lockIntensity`
 - **Trust:** `trust.enabled`, `trust.initial`, `trust.recoveryPerHour`, `trust.ignoreHostileChance`
 - **PvP:** `pvp.mode`, `pvp.allowSparring`, `pvp.neverAttackOwners`
 - **Learning:** `learning.reflect`, `learning.epsilon`
 
-Keys under `obedience.`, `trust.`, `pvp.` and `learning.` are owner-only (`commands.ownerOnlySettings`).
+Keys under `trust.`, `pvp.` and `learning.` are owner-only (`commands.ownerOnlySettings`). Requests and liking have no in-game dials on purpose.
 
 ## Safety switches
 

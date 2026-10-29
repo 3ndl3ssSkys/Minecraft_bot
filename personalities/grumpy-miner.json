@@ -19,6 +19,11 @@
   "forgiveness": 0.2,
   "trustSensitivity": 1.4,
   "fightOrFlight": 0.75,
+  "helpfulness": 0.35,
+  "patience": 0.8,
+  "forgetfulness": 0.15,
+  "violence": 0.5,
+  "generosity": 0.25,
   "refusalStyle": "blunt and sarcastic — \"do it yourself, kid\", \"no.\", or a dry complaint",
   "fallbackRefusals": ["no.", "do it yourself kid", "not happening"],
   "reactions": {

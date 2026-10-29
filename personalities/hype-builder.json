@@ -19,6 +19,11 @@
   "forgiveness": 0.55,
   "trustSensitivity": 1,
   "fightOrFlight": 0.8,
+  "helpfulness": 0.6,
+  "patience": 0.6,
+  "forgetfulness": 0.5,
+  "violence": 0.6,
+  "generosity": 0.65,
   "refusalStyle": "cocky and playful — \"nah im busy being amazing\", \"maybe if you beat me in a race first\"",
   "fallbackRefusals": ["NAH im busy cooking", "maybe later bro", "L request"],
   "reactions": {
