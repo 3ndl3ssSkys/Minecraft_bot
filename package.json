@@ -1,0 +1,22 @@
+{
+  "name": "minecraft-llm-bot",
+  "version": "1.0.0",
+  "description": "Autonomous, personalizable Minecraft Java bot driven by a local LLM (Ollama + Qwen 2.5) using Mineflayer and mineflayer-pathfinder.",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js",
+    "start:debug": "BOT_DEBUG=1 node index.js",
+    "check": "node --check index.js && node --check actions.js"
+  },
+  "keywords": ["minecraft", "mineflayer", "bot", "llm", "ollama", "qwen", "ai-agent"],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "mineflayer": "^4.39.0",
+    "mineflayer-pathfinder": "^2.4.5",
+    "vec3": "^0.1.10"
+  }
+}
