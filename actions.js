@@ -274,6 +274,205 @@ async function equipBestWeapon (ctx) {
   return weapon || null
 }
 
+/** Put a shield in the off-hand if we have one and the slot is free. */
+async function equipShield (ctx) {
+  const { bot } = ctx
+  const offhand = bot.inventory.slots[bot.getEquipmentDestSlot('off-hand')]
+  if (offhand?.name === 'shield') return true
+  const shield = bot.inventory.items().find((i) => i.name === 'shield')
+  if (shield && !offhand) { await bot.equip(shield, 'off-hand'); return true }
+  return false
+}
+
+/**
+ * Attack cooldown (ms) for the held item on 1.9+ combat. Waiting for a full
+ * charge is what makes hits (and crits) actually do damage.
+ */
+function attackCooldown (bot) {
+  if (bot.registry.version['<']('1.9')) return 120 // old combat: just click fast
+  const n = bot.heldItem?.name || ''
+  if (n.endsWith('_sword')) return 625
+  if (n === 'trident') return 910
+  if (n === 'mace') return 1670
+  if (n.endsWith('_axe')) return /^(wooden|stone)_/.test(n) ? 1250 : n.startsWith('iron') ? 1110 : 1000
+  if (n.endsWith('_pickaxe')) return 830
+  if (n.endsWith('_shovel')) return 1000
+  if (n.endsWith('_hoe')) return 500
+  return 250
+}
+
+/** PvP permission rules (config.pvp + who the bot trusts). Throws NOT_ALLOWED. */
+function assertMayFightPlayer (ctx, name, sparring) {
+  const { config } = ctx
+  const pvp = config.pvp
+  const lower = String(name).toLowerCase()
+  if (config.behavior.protectedPlayers.some((p) => p.toLowerCase() === lower)) {
+    throw new ActionError('NOT_ALLOWED', `${name} is protected; you won't attack them.`)
+  }
+  if (pvp.neverAttackOwners && ctx.social?.role(name) === 'owner' && !sparring) {
+    throw new ActionError('NOT_ALLOWED', `${name} is your owner; you won't fight them unless it's a friendly spar.`)
+  }
+  if (pvp.mode === 'never') throw new ActionError('NOT_ALLOWED', 'Fighting players is turned off (pvp.mode = never).')
+  if (pvp.mode === 'always') return
+  const provoked = ctx.social?.isHostile(name) || ctx.social?.isAttackingNow(name, 15000)
+  if (provoked) return
+  if (sparring && pvp.allowSparring) {
+    const invited = (ctx.memory?.chat || []).some((c) => c.from?.toLowerCase() === lower && Date.now() - c.at < 180000 &&
+      /\b(pvp|duel|spar|fight|1v1|battle)\b/i.test(c.text))
+    if (invited) return
+    throw new ActionError('NOT_ALLOWED', `${name} hasn't asked you for a duel.`)
+  }
+  throw new ActionError('NOT_ALLOWED', `${name} hasn't attacked you. You only fight players who attack you (or who ask for a spar).`)
+}
+
+/**
+ * Melee combat loop, ~20 updates/second. Tactics are toggled by `style`:
+ *  - crit   : jump, then hit while falling (1.5x damage)
+ *  - wtap   : release forward right after a hit to reset sprint (extra knockback)
+ *  - strafe : circle left/right while in range so the opponent misses
+ *  - shield : raise an off-hand shield between swings while the opponent swings
+ *  - backOff: hit once, then step back out of reach (good vs creepers)
+ * Returns { outcome: 'win'|'fled'|'escaped'|'timeout', hitsLanded, hitsTaken, healthLost, durationMs }.
+ */
+async function fight (ctx, entity, style, maxSeconds) {
+  const { bot, signal } = ctx
+  const started = Date.now()
+  const startHealth = bot.health
+  const end = started + maxSeconds * 1000
+  const cooldown = attackCooldown(bot)
+  let hitsLanded = 0
+  let hitsTaken = 0
+  let lastAttack = 0
+  let targetSwingAt = 0
+  let jumping = false
+  let jumpAt = 0
+  let wtapUntil = 0
+  let backOffUntil = 0
+  let strafeDir = Math.random() < 0.5 ? 'left' : 'right'
+  let nextStrafeSwitch = 0
+  let shieldUp = false
+  let outcome = 'timeout'
+
+  const onHurt = (e) => {
+    if (e === entity && Date.now() - lastAttack < 400) hitsLanded++
+    if (e === bot.entity) hitsTaken++
+  }
+  const onSwing = (e) => { if (e === entity) targetSwingAt = Date.now() }
+  bot.on('entityHurt', onHurt)
+  bot.on('entitySwingArm', onSwing)
+  const hasShield = () => bot.inventory.slots[bot.getEquipmentDestSlot('off-hand')]?.name === 'shield'
+  const lowerShield = () => { if (shieldUp) { bot.deactivateItem(); shieldUp = false } }
+  const setStrafe = (dir) => {
+    bot.setControlState('left', dir === 'left')
+    bot.setControlState('right', dir === 'right')
+  }
+
+  try {
+    while (Date.now() < end) {
+      throwIfAborted(signal)
+      if (!entity.isValid || !bot.entities[entity.id]) { outcome = 'win'; break }
+      if (bot.health <= style.retreatHealth && bot.health < startHealth) { outcome = 'fled'; break }
+      const dist = bot.entity.position.distanceTo(entity.position)
+      if (dist > 24) { outcome = 'escaped'; break }
+
+      const now = Date.now()
+      const eye = entity.position.offset(0, (entity.height || 1.8) * 0.85, 0)
+      const ready = now - lastAttack >= cooldown
+
+      if (now < backOffUntil) {
+        // Hit-and-run: step back while the cooldown recharges.
+        lowerShield()
+        if (bot.pathfinder.goal) bot.pathfinder.setGoal(null)
+        await bot.lookAt(eye, true)
+        setStrafe(null)
+        bot.setControlState('forward', false)
+        bot.setControlState('sprint', false)
+        bot.setControlState('back', true)
+      } else if (dist > 3.4) {
+        // Close the distance with the pathfinder (handles terrain).
+        lowerShield()
+        setStrafe(null)
+        bot.setControlState('back', false)
+        if (!bot.pathfinder.goal) bot.pathfinder.setGoal(new goals.GoalFollow(entity, 2), true)
+      } else {
+        // In melee range: manual control.
+        if (bot.pathfinder.goal) bot.pathfinder.setGoal(null)
+        await bot.lookAt(eye, true)
+        bot.setControlState('back', false)
+        const wantForward = now >= wtapUntil && dist > 2.2
+        bot.setControlState('forward', wantForward)
+        bot.setControlState('sprint', wantForward)
+        if (style.strafe) {
+          if (now > nextStrafeSwitch) {
+            strafeDir = strafeDir === 'left' ? 'right' : 'left'
+            nextStrafeSwitch = now + 400 + Math.random() * 600
+          }
+          setStrafe(strafeDir)
+        } else {
+          setStrafe(null)
+        }
+
+        // Block between our swings while they're swinging at us.
+        if (style.shield && hasShield() && !ready && now - targetSwingAt < 600 && !shieldUp) {
+          bot.activateItem(true)
+          shieldUp = true
+        }
+
+        if (ready) {
+          // Start a jump for a critical hit; the hit lands on the way down.
+          if (style.crit && !jumping && bot.entity.onGround && !bot.entity.isInWater && cooldown >= 500) {
+            bot.setControlState('jump', true)
+            jumping = true
+            jumpAt = now
+          }
+          if (jumping && !bot.entity.onGround) bot.setControlState('jump', false)
+          const falling = jumping && !bot.entity.onGround && bot.entity.velocity.y < -0.05
+          if (!jumping || falling || now - jumpAt > 600) {
+            jumping = false
+            bot.setControlState('jump', false)
+            lowerShield()
+            if (dist <= 3.2) {
+              bot.attack(entity)
+              lastAttack = now
+              if (style.wtap) wtapUntil = now + 90
+              if (style.backOff) backOffUntil = now + Math.min(700, cooldown)
+            }
+          }
+        }
+      }
+      await abortableSleep(50, signal)
+    }
+  } finally {
+    bot.removeListener('entityHurt', onHurt)
+    bot.removeListener('entitySwingArm', onSwing)
+    lowerShield()
+    bot.pathfinder.setGoal(null)
+    bot.clearControlStates()
+  }
+  return { outcome, hitsLanded, hitsTaken, healthLost: Math.max(0, Math.round(startHealth - bot.health)), durationMs: Date.now() - started }
+}
+
+/** Find the nearest block matching any of `names` within range. */
+function findNearestBlock (bot, names, maxDistance = 32) {
+  const ids = names.map((n) => bot.registry.blocksByName[n]?.id).filter((id) => id !== undefined)
+  return ids.length ? bot.findBlock({ matching: ids, maxDistance }) : null
+}
+
+/** Walk until a block is within interaction reach. */
+async function goNextTo (ctx, block, label) {
+  const { bot } = ctx
+  if (bot.entity.position.distanceTo(block.position.offset(0.5, 0.5, 0.5)) <= 4) return
+  const dist = bot.entity.position.distanceTo(block.position)
+  await gotoGoal(ctx, new goals.GoalNear(block.position.x, block.position.y, block.position.z, 2), {
+    timeoutMs: travelTimeout(ctx, dist), label
+  })
+}
+
+const CONTAINERS = ['chest', 'trapped_chest', 'barrel']
+const FUELS = ['coal', 'charcoal', 'coal_block', 'blaze_rod', 'lava_bucket', 'dried_kelp_block']
+const FUEL_ITEMS_PER_UNIT = { coal: 8, charcoal: 8, coal_block: 80, blaze_rod: 12, lava_bucket: 100, dried_kelp_block: 20 }
+const KEEP_WHEN_STORING = /_sword$|_axe$|_pickaxe$|_shovel$|_hoe$|^shield$|^bow$|^crossbow$|^trident$|^mace$|_helmet$|_chestplate$|_leggings$|_boots$|^torch$|^fishing_rod$/
+
 /** Report if the item we were holding broke during an action. */
 function describeToolBreak (ctx, before) {
   if (!before || !before.maxDurability) return ''
@@ -551,56 +750,78 @@ const ACTIONS = {
   },
 
   attackTarget: {
-    description: 'Fight an entity by its id (from nearbyEntities) until it dies, flees out of range, or time runs out.',
-    params: { entityId: 'number', maxSeconds: 'number, optional (default 20)' },
+    description: 'Fight an entity by its id (from nearbyEntities) using real combat tactics (crits, sprint-resets, strafing, shield). ' +
+      'Picks the fighting style that has worked best before unless you pass one. Retreats and eats automatically if the fight goes badly.',
+    params: {
+      entityId: 'number',
+      maxSeconds: 'number, optional (default 25)',
+      style: 'optional: aggressive|balanced|cautious|hitAndRun',
+      sparring: 'optional boolean — a friendly duel the player asked for'
+    },
     async run (ctx, args) {
-      const { bot, signal, config } = ctx
+      const { bot, config } = ctx
       const id = Math.floor(argNumber(args, 'entityId'))
-      const maxSeconds = argNumber(args, 'maxSeconds', { min: 2, max: 60, def: 20 })
+      const maxSeconds = argNumber(args, 'maxSeconds', { min: 2, max: 90, def: 25 })
       const entity = bot.entities[id]
       if (!entity || !entity.isValid) throw new ActionError('NOT_FOUND', `No entity with id ${id} nearby.`)
       if (entity === bot.entity) throw new ActionError('INVALID_TARGET', 'You cannot attack yourself.')
-      if (entity.type === 'player') {
-        if (!config.behavior.allowPvp) throw new ActionError('NOT_ALLOWED', 'Attacking players is disabled in the config.')
-        if (config.behavior.protectedPlayers.map((p) => p.toLowerCase()).includes(entity.username?.toLowerCase())) {
-          throw new ActionError('NOT_ALLOWED', `${entity.username} is protected; you refuse to attack them.`)
-        }
-      }
       if (entity.name === 'item' || entity.type === 'projectile' || entity.type === 'orb') {
         throw new ActionError('INVALID_TARGET', `${entity.name} cannot be attacked.`)
       }
+      if (entity.type === 'player') assertMayFightPlayer(ctx, entity.username, Boolean(args?.sparring))
       const label = entity.username || entity.displayName || entity.name
       if (bot.entity.position.distanceTo(entity.position) > 32) throw new ActionError('TOO_FAR', `${label} is too far away to chase.`)
 
       if (config.behavior.autoEquipWeapon) await equipBestWeapon(ctx).catch(() => {})
+      await equipShield(ctx).catch(() => {})
       const weaponBefore = bot.heldItem
-      const cooldown = weaponBefore?.name?.endsWith('_axe') ? 1000 : config.behavior.attackCooldownMs
 
-      let hits = 0
-      let lastHit = 0
-      const end = Date.now() + maxSeconds * 1000
-      bot.pathfinder.setGoal(new goals.GoalFollow(entity, 2), true)
+      const key = entity.type === 'player' ? `player:${entity.username}` : entity.name
+      const style = ctx.learning
+        ? ctx.learning.combat.chooseStyle(key, { forced: args?.style })
+        : { name: 'balanced', crit: true, wtap: true, strafe: true, shield: true, retreatHealth: 7 }
+      ctx.log.info(`Fighting ${label} with style "${style.name}" (retreat at ${style.retreatHealth} hp)`)
+
+      let result
       try {
-        while (Date.now() < end) {
-          throwIfAborted(signal)
-          if (!entity.isValid || !bot.entities[id]) {
-            ctx.notify?.('killedMob', { mob: label })
-            return `Defeated ${label} after ${hits} hits.${describeToolBreak(ctx, weaponBefore)}`
-          }
-          const dist = bot.entity.position.distanceTo(entity.position)
-          if (dist > 24) return `${label} got away.`
-          if (dist <= 3.2 && Date.now() - lastHit >= cooldown) {
-            await bot.lookAt(entity.position.offset(0, entity.height * 0.8, 0), true)
-            bot.attack(entity)
-            hits++
-            lastHit = Date.now()
-          }
-          await abortableSleep(100, signal)
+        result = await fight(ctx, entity, style, maxSeconds)
+      } catch (err) {
+        // Died mid-fight: that's a loss worth learning from.
+        if (err.code === 'ABORTED' && bot.health <= 0) {
+          ctx.learning?.combat.record(key, style.name, 'loss', { hitsLanded: 0, hitsTaken: 0, healthLost: 20, durationMs: 0 })
+          ctx.notify?.('fightEnded', { key, label, style: style.name, outcome: 'loss', isPlayer: entity.type === 'player' })
         }
-      } finally {
-        bot.pathfinder.setGoal(null)
+        throw err
       }
-      throw new ActionError('TIMEOUT', `Fought ${label} for ${maxSeconds}s (${hits} hits) without killing it.`)
+
+      ctx.learning?.combat.record(key, style.name, result.outcome, result)
+      ctx.learning?.markDirty()
+      ctx.notify?.('fightEnded', { key, label, style: style.name, isPlayer: entity.type === 'player', ...result })
+      const broke = describeToolBreak(ctx, weaponBefore)
+      const stats = `${result.hitsLanded} hits landed, ${result.hitsTaken} taken, style ${style.name}`
+
+      switch (result.outcome) {
+        case 'win':
+          if (entity.type !== 'player') ctx.notify?.('killedMob', { mob: label })
+          return `Defeated ${label} (${stats}).${broke}`
+        case 'escaped':
+          return `${label} got away (${stats}).${broke}`
+        case 'fled': {
+          // Losing: get out, then try to heal.
+          let note = ''
+          try {
+            await ACTIONS.retreat.run(ctx, { entityId: id, distance: 18 })
+            await ACTIONS.eatFood.run(ctx, {})
+            note = ' Retreated and ate to recover.'
+          } catch (err) {
+            if (err.code === 'ABORTED') throw err
+            note = ` Retreated (${err.message})`
+          }
+          throw new ActionError('LOSING_FIGHT', `Health dropped to ${Math.round(bot.health)} fighting ${label}, so you backed off (${stats}).${note}${broke}`)
+        }
+        default:
+          throw new ActionError('TIMEOUT', `Fought ${label} for ${maxSeconds}s without finishing it (${stats}).${broke}`)
+      }
     }
   },
 
@@ -713,6 +934,236 @@ const ACTIONS = {
     }
   },
 
+  giveItem: {
+    description: 'Walk to a player and toss them items from your inventory (gifts, trades, sharing food with friends).',
+    params: { playerName: 'string', itemName: 'string', count: 'number, optional (default 1)' },
+    async run (ctx, args) {
+      const { bot } = ctx
+      const name = argString(args, 'playerName')
+      const itemName = argString(args, 'itemName')
+      const count = Math.floor(argNumber(args, 'count', { min: 1, max: 64 * 9, def: 1 }))
+      const entity = findPlayerEntity(bot, name)
+      if (!entity) throw new ActionError('NOT_FOUND', `Player "${name}" is not within render distance.`)
+      const item = findInventoryItem(bot, itemName)
+      if (!item) throw new ActionError('MISSING_ITEM', `No "${itemName}" in inventory.`)
+      const have = inventorySummary(bot)[item.name] || 0
+      const distance = bot.entity.position.distanceTo(entity.position)
+      assertTravelDistance(ctx, distance)
+      if (distance > 3) await gotoGoal(ctx, new goals.GoalFollow(entity, 2), { timeoutMs: travelTimeout(ctx, distance), label: name })
+      await bot.lookAt(entity.position.offset(0, 1.2, 0), true)
+      const n = Math.min(count, have)
+      try {
+        await bot.toss(item.type, null, n)
+      } catch (err) {
+        throw new ActionError('TOSS_FAILED', `Could not give ${item.name}: ${err.message}`)
+      }
+      ctx.notify?.('gaveItem', { player: entity.username, item: item.name, count: n })
+      return `Tossed ${n} ${item.name} to ${entity.username}.${n < count ? ` (you only had ${have})` : ''}`
+    }
+  },
+
+  sleepInBed: {
+    description: 'Sleep in a nearby bed (only works at night or during thunderstorms, with no monsters close).',
+    params: {},
+    async run (ctx) {
+      const { bot, signal } = ctx
+      if (bot.isSleeping) return 'Already in bed.'
+      const bed = bot.findBlock({ matching: (b) => bot.isABed(b), maxDistance: 32 })
+      if (!bed) throw new ActionError('NO_BED', 'No bed within 32 blocks. Craft one (3 wool + 3 planks) and place it.')
+      await goNextTo(ctx, bed, 'bed')
+      try {
+        await bot.sleep(bed)
+      } catch (err) {
+        throw new ActionError('CANT_SLEEP', `Can't sleep: ${err.message}`)
+      }
+      // Stay in bed until morning (or until interrupted).
+      await new Promise((resolve) => {
+        const done = () => { clearTimeout(timer); bot.removeListener('wake', done); signal.removeEventListener('abort', onAbort); resolve() }
+        const onAbort = () => { Promise.resolve().then(() => bot.wake()).catch(() => {}); done() }
+        const timer = setTimeout(done, 30000)
+        bot.once('wake', done)
+        signal.addEventListener('abort', onAbort, { once: true })
+      })
+      throwIfAborted(signal)
+      return bot.isSleeping ? 'Lying in bed, waiting for the others to sleep.' : 'Slept through the night.'
+    }
+  },
+
+  smeltItem: {
+    description: 'Smelt/cook items in a nearby furnace (ores → ingots, raw meat → cooked). Adds fuel if needed and collects whatever finishes while you wait. Call again later to collect the rest.',
+    params: { itemName: 'string, e.g. "raw_iron", "beef"', count: 'number, optional (default 8)', waitSeconds: 'number, optional (default 30)' },
+    async run (ctx, args) {
+      const { bot, signal } = ctx
+      const itemName = argString(args, 'itemName')
+      const count = Math.floor(argNumber(args, 'count', { min: 1, max: 64, def: 8 }))
+      const waitSeconds = argNumber(args, 'waitSeconds', { min: 0, max: 120, def: 30 })
+      const block = findNearestBlock(bot, ['furnace', 'smoker', 'blast_furnace'])
+      if (!block) throw new ActionError('NO_FURNACE', 'No furnace within 32 blocks. Craft one from 8 cobblestone and place it.')
+      await goNextTo(ctx, block, block.name)
+
+      const furnace = await bot.openFurnace(block)
+      let collected = 0
+      try {
+        if (furnace.outputItem()) { collected += furnace.outputItem().count; await furnace.takeOutput() }
+        const input = findInventoryItem(bot, itemName)
+        if (input) {
+          const n = Math.min(count, inventorySummary(bot)[input.name] || 0)
+          if (!furnace.fuelItem() || furnace.fuel < 0.2) {
+            const fuel = bot.inventory.items().find((i) => FUELS.includes(i.name)) ||
+              bot.inventory.items().find((i) => /_planks$|_log$|^stick$/.test(i.name) && i.name !== input.name)
+            if (!fuel) throw new ActionError('NO_FUEL', 'No fuel (coal, charcoal, planks or logs) in inventory.')
+            const perUnit = FUEL_ITEMS_PER_UNIT[fuel.name] ?? (fuel.name === 'stick' ? 0.5 : 1.5)
+            await furnace.putFuel(fuel.type, null, Math.min(fuel.count, Math.max(1, Math.ceil(n / perUnit))))
+          }
+          await furnace.putInput(input.type, null, n)
+        } else if (!collected && !furnace.inputItem()) {
+          throw new ActionError('MISSING_ITEM', `No "${itemName}" in inventory to smelt.`)
+        }
+        // Each item takes ~10s; collect as they finish.
+        const end = Date.now() + waitSeconds * 1000
+        while (Date.now() < end && (furnace.inputItem() || furnace.outputItem())) {
+          await abortableSleep(1000, signal)
+          const out = furnace.outputItem()
+          if (out) { collected += out.count; await furnace.takeOutput() }
+        }
+      } finally {
+        furnace.close()
+      }
+      return `Collected ${collected} smelted item(s).${collected < count ? ' The furnace is still working on the rest.' : ''}`
+    }
+  },
+
+  storeItems: {
+    description: 'Put items into a nearby chest or barrel. itemNames is a comma-separated list, or "all" (keeps tools, weapons, armor, torches and some food).',
+    params: { itemNames: 'string, e.g. "cobblestone, dirt" or "all"' },
+    async run (ctx, args) {
+      const { bot } = ctx
+      const spec = argString(args, 'itemNames', { def: 'all' })
+      const block = findNearestBlock(bot, CONTAINERS)
+      if (!block) throw new ActionError('NO_CHEST', 'No chest or barrel within 32 blocks.')
+      await goNextTo(ctx, block, block.name)
+      const wanted = spec.toLowerCase() === 'all' ? null : spec.split(',').map(normalizeName).filter(Boolean)
+      const foods = bot.registry.foodsByName
+      let keptFood = false
+      const toStore = bot.inventory.items().filter((i) => {
+        if (wanted) return wanted.some((w) => i.name === w || i.name.includes(w))
+        if (KEEP_WHEN_STORING.test(i.name)) return false
+        if (foods[i.name] && !keptFood) { keptFood = true; return false }
+        return true
+      })
+      if (!toStore.length) throw new ActionError('NOTHING_TO_STORE', 'Nothing matching to store.')
+      const container = await bot.openContainer(block)
+      const stored = {}
+      try {
+        for (const item of toStore) {
+          try {
+            await container.deposit(item.type, null, item.count)
+            stored[item.name] = (stored[item.name] || 0) + item.count
+          } catch (err) {
+            if (/full/i.test(err.message)) break
+          }
+        }
+      } finally {
+        container.close()
+      }
+      if (!Object.keys(stored).length) throw new ActionError('CHEST_FULL', 'The container is full.')
+      return `Stored ${Object.entries(stored).map(([k, v]) => `${v} ${k}`).join(', ')}.`
+    }
+  },
+
+  takeItems: {
+    description: 'Take items out of a nearby chest or barrel.',
+    params: { itemName: 'string', count: 'number, optional (default: all of it)' },
+    async run (ctx, args) {
+      const { bot } = ctx
+      const itemName = normalizeName(argString(args, 'itemName'))
+      const block = findNearestBlock(bot, CONTAINERS)
+      if (!block) throw new ActionError('NO_CHEST', 'No chest or barrel within 32 blocks.')
+      await goNextTo(ctx, block, block.name)
+      const container = await bot.openContainer(block)
+      try {
+        const items = container.containerItems()
+        const match = items.find((i) => i.name === itemName) || items.find((i) => i.name.includes(itemName))
+        if (!match) {
+          const contents = {}
+          for (const i of items) contents[i.name] = (contents[i.name] || 0) + i.count
+          throw new ActionError('NOT_FOUND', `No ${itemName} in the ${block.name}. It has: ${JSON.stringify(contents)}`)
+        }
+        const available = items.filter((i) => i.type === match.type).reduce((a, i) => a + i.count, 0)
+        const n = Math.min(available, Math.floor(argNumber(args, 'count', { min: 1, max: 64 * 27, def: available })))
+        await container.withdraw(match.type, null, n)
+        return `Took ${n} ${match.name}.`
+      } finally {
+        container.close()
+      }
+    }
+  },
+
+  activateBlock: {
+    description: 'Right-click a block: open/close doors, gates and trapdoors, flip levers, press buttons, ring bells.',
+    params: { x: 'number', y: 'number', z: 'number' },
+    async run (ctx, args) {
+      const { bot } = ctx
+      const pos = new Vec3(argNumber(args, 'x'), argNumber(args, 'y'), argNumber(args, 'z')).floored()
+      const block = bot.blockAt(pos)
+      if (!block || block.name === 'air') throw new ActionError('NOT_FOUND', `Nothing to use at ${fmtPos(pos)}.`)
+      if (!/door|gate|trapdoor|lever|button|bell|note_block|daylight_detector|repeater|comparator/.test(block.name)) {
+        throw new ActionError('NOT_INTERACTABLE', `${block.name} isn't something you toggle. Use smeltItem/storeItems/sleepInBed/craftItem for workstations.`)
+      }
+      assertTravelDistance(ctx, bot.entity.position.distanceTo(pos))
+      await goNextTo(ctx, block, block.name)
+      await bot.lookAt(pos.offset(0.5, 0.5, 0.5), true)
+      try {
+        await bot.activateBlock(block)
+      } catch (err) {
+        throw new ActionError('USE_FAILED', `Could not use ${block.name}: ${err.message}`)
+      }
+      return `Used ${block.name} at ${fmtPos(pos)}.`
+    }
+  },
+
+  fish: {
+    description: 'Fish in nearby water with a fishing rod for a while (food and loot).',
+    params: { seconds: 'number, optional (default 45, max 120)' },
+    async run (ctx, args) {
+      const { bot, signal } = ctx
+      const seconds = argNumber(args, 'seconds', { min: 10, max: 120, def: 45 })
+      const rod = bot.inventory.items().find((i) => i.name === 'fishing_rod')
+      if (!rod) throw new ActionError('MISSING_ITEM', 'You need a fishing_rod (3 sticks + 2 string).')
+      const water = findNearestBlock(bot, ['water'], 24)
+      if (!water) throw new ActionError('NO_WATER', 'No water within 24 blocks.')
+      const dist = bot.entity.position.distanceTo(water.position)
+      if (dist > 5) {
+        await gotoGoal(ctx, new goals.GoalNear(water.position.x, water.position.y + 1, water.position.z, 3), { timeoutMs: travelTimeout(ctx, dist), label: 'water' })
+      }
+      await bot.equip(rod, 'hand')
+      const before = bot.inventory.items().length
+      const counts = inventorySummary(bot)
+      const end = Date.now() + seconds * 1000
+      const onAbort = () => { try { bot.activateItem() } catch { /* reel in */ } }
+      signal.addEventListener('abort', onAbort, { once: true })
+      let catches = 0
+      try {
+        while (Date.now() < end) {
+          throwIfAborted(signal)
+          await bot.lookAt(water.position.offset(0.5, 0.5, 0.5), true)
+          const cast = bot.fish()
+          cast.catch(() => {}) // reeling in early rejects this; that's expected
+          const timeout = abortableSleep(Math.max(1000, end - Date.now()), signal).then(() => 'timeout')
+          const r = await Promise.race([cast.then(() => 'caught'), timeout]).catch((err) => { if (err.code === 'ABORTED') throw err; return 'failed' })
+          if (r === 'caught') catches++
+          else { onAbort(); break }
+        }
+      } finally {
+        signal.removeEventListener('abort', onAbort)
+      }
+      const after = inventorySummary(bot)
+      const gained = Object.entries(after).filter(([k, v]) => v > (counts[k] || 0)).map(([k, v]) => `${v - (counts[k] || 0)} ${k}`)
+      if (!catches && bot.inventory.items().length === before) throw new ActionError('NO_CATCH', 'Nothing bit.')
+      return `Caught ${catches} time(s): ${gained.join(', ') || 'nothing new'}.`
+    }
+  },
+
   emote: {
     description: 'Make a body-language gesture (greeting, celebrating, showing emotion).',
     params: { gesture: 'wave|jump|nod|shake_head|crouch|spin|look_around' },
@@ -818,7 +1269,8 @@ async function performGesture (bot, gesture, signal) {
       for (let i = 1; i <= 8; i++) { await bot.look(yaw + (i * Math.PI) / 4, pitch, true); await abortableSleep(80, signal) }
       break
     case 'look_around':
-      await bot.look(yaw + (Math.random() - 0.5) * 2.5, (Math.random() - 0.5) * 0.8, false)
+      // A smooth (unforced) look only resolves on physics ticks, which pause around death/respawn.
+      await Promise.race([bot.look(yaw + (Math.random() - 0.5) * 2.5, (Math.random() - 0.5) * 0.8, false), sleep(1500)])
       break
     default:
       throw new ActionError('INVALID_ARGS', `Unknown gesture "${gesture}". Use wave, jump, nod, shake_head, crouch, spin or look_around.`)
@@ -837,9 +1289,12 @@ class ActionExecutor {
    * @param {object} deps.chat     ChatManager (used by chatMessage)
    * @param {object} deps.log      logger
    * @param {function} [deps.notify] (eventName, data) => void — lets actions trigger reactions
+   * @param {object} [deps.social]   SocialModel (trust-aware PvP rules)
+   * @param {object} [deps.learning] Learning (combat style selection & results)
+   * @param {object} [deps.memory]   Memory (recent chat, e.g. duel invitations)
    */
-  constructor ({ bot, config, chat, log, notify }) {
-    Object.assign(this, { bot, config, chat, log, notify })
+  constructor ({ bot, config, chat, log, notify, social, learning, memory }) {
+    Object.assign(this, { bot, config, chat, log, notify, social, learning, memory })
     this.current = null // { name, args, startedAt, controller }
   }
 
@@ -889,6 +1344,9 @@ class ActionExecutor {
       chat: this.chat,
       log: this.log,
       notify: this.notify,
+      social: this.social,
+      learning: this.learning,
+      memory: this.memory,
       signal: controller.signal
     }
 

@@ -1,11 +1,20 @@
 # Minecraft LLM Bot
 
-An autonomous Minecraft Java Edition player built on **Mineflayer** + **mineflayer-pathfinder**, with decisions made by a local LLM (**Ollama** running **Qwen 2.5**). It explores, mines, crafts, fights, chats, and reacts to what happens in the world. Personality, chat behaviour and event reactions are all configurable.
+An autonomous Minecraft Java Edition player built on **Mineflayer** + **mineflayer-pathfinder**, with decisions made by a local LLM (**Ollama** running **Qwen 2.5**). It explores, mines, crafts, smelts, fights, chats, and reacts to what happens in the world.
+
+On top of that it has an inner life:
+
+- **Feelings** rise and fall with what happens to it.
+- **Trust** in each player changes with what that player *does*.
+- **Learned experience** builds up over time: which fighting styles work, where it died, and short lessons.
+- **Its own free will** about following instructions.
+
+When it says no, it says it like a person, never like a bot.
 
 ```
-Perception (every 2s) ──► state JSON ──► Ollama /api/chat ──► {thought, emotion, goal, action}
-        ▲                                                              │
-        └──────── result fed back into the next prompt ◄── ActionExecutor (one action at a time)
+Perception (every 2s) ──► state JSON + feelings + relationships + lessons ──► Ollama ──► {thought, emotion, goal, action}
+        ▲                                                                                      │
+        └──────────── result fed back into the next prompt ◄──── ActionExecutor (one action at a time)
 ```
 
 ## Quick start
@@ -18,7 +27,7 @@ Perception (every 2s) ──► state JSON ──► Ollama /api/chat ──► 
    ```bash
    npm install
    ```
-3. Edit `config.json`: set `server.host`, `server.port` and `server.username`. For a local test world, open a singleplayer world to LAN and use the port it prints.
+3. Edit `config.json`: set `server.host`, `server.port` and `server.username`, and put your username in `behavior.owners`.
 4. Run the bot:
    ```bash
    npm start
@@ -30,29 +39,169 @@ Perception (every 2s) ──► state JSON ──► Ollama /api/chat ──► 
 
 Environment variables override the config: `MC_HOST`, `MC_PORT`, `MC_USERNAME`, `MC_AUTH`, `MC_VERSION`, `OLLAMA_URL`, `OLLAMA_MODEL`, `BOT_PERSONALITY`, `BOT_CHAT_MODE`, and `BOT_DEBUG=1` for verbose logs.
 
-> **Model size:** `qwen2.5:7b` is a good default. `qwen2.5:3b` is faster on weak hardware but makes more mistakes; `qwen2.5:14b` plans noticeably better. Ollama 0.5+ is recommended for strict JSON-schema output. Older versions fall back to plain JSON mode automatically.
+> **Model size:** `qwen2.5:7b` is a good default. `qwen2.5:3b` is faster on weak hardware but makes more mistakes; `qwen2.5:14b` plans and role-plays noticeably better. Ollama 0.5+ is recommended for strict JSON-schema output.
+
+## Minecraft 26.3 and other newer versions
+
+Mineflayer currently supports Minecraft up to **26.1**. Neither the released packages nor PrismarineJS's development branch have 26.2 or 26.3 support yet. Mineflayer refuses to connect to anything newer. The bot handles this for you:
+
+1. Before connecting, it pings the server. If the server is newer than Mineflayer supports, it connects using the newest supported protocol (26.1) instead of failing (`server.viaFallback`, on by default).
+2. The server has to accept a 26.1 client. Pick one of these options:
+   - **Paper / Spigot / Fabric server:** install **ViaVersion** and a **ViaBackwards** release that supports 26.3. Players on newer clients are unaffected.
+   - **Vanilla server, or no plugins allowed:** run **[ViaProxy](https://github.com/ViaVersion/ViaProxy)** on the bot's machine. Set its target server to your server and the target version to 26.3, then point `server.host`/`server.port` at ViaProxy's listening address.
+3. When PrismarineJS adds native support, run this, and the bot will connect natively from then on:
+   ```bash
+   npm run update-mc
+   ```
+
+You can also pin a version with `"server": { "version": "26.1" }`. If you're kicked for "outdated client", the log tells you which of the above you need.
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
-| `index.js` | Config loading, perception, the Ollama client, the decision loop, chat, reactions, reconnects |
-| `actions.js` | The tool API the LLM can call, plus the `ActionExecutor` (validation, timeouts, cancellation) |
+| `index.js` | Config, perception, the Ollama client, the decision loop, chat, reactions, commands, reconnects |
+| `actions.js` | The tool API the LLM can call (including the PvP combat engine), plus the `ActionExecutor` |
+| `emotions.js` | The emotion engine: six core feelings with decay, temperament and behaviour modifiers |
+| `social.js` | Per-player trust, intent reading, promises, body language, and the "will I do it?" roll |
+| `learning.js` | Combat-style learning, danger zones, LLM-written lessons, and persistence |
 | `config.json` | All settings (every key has a default in code, so you can delete the ones you don't change) |
-| `personalities/*.json` | Personality presets: `friendly`, `grumpy-miner`, `shy-explorer`, `hype-builder` |
+| `personalities/*.json` | Presets: `friendly`, `grumpy-miner`, `shy-explorer`, `hype-builder` |
+| `data/brain.json` | Created at runtime: relationships, feelings, combat stats, lessons, danger zones, admins, in-game settings |
 
 ## How it thinks
 
-1. **Perceive.** Every `perception.intervalMs` (default 2s) the bot builds a JSON snapshot: position, health, hunger, equipment with durability, inventory, nearby entities (with ids), notable blocks nearby (ores, logs, crafting tables...) with the nearest coordinates and whether they are visible, the block it is looking at and standing on, time, weather, its current goal and mood, recent actions with their results, recent events, recent chat, and short hints ("It is dark: hostile mobs spawn").
-2. **Decide.** The state goes to `http://localhost:11434/api/chat`. A JSON schema makes the model reply with:
+1. **Perceive.** Every 2s the bot builds a JSON snapshot. It includes:
+   - its position, health, hunger and equipment (with durability), plus its inventory;
+   - nearby entities, with ids. Players also get their trust score, relationship, role, whether they're armed or hostile, and how they seem;
+   - notable blocks, the block it's looking at, time and weather;
+   - its goal, feelings, pending requests and nearby danger zones;
+   - recent actions with results, events and chat.
+2. **Decide.** The snapshot goes to Ollama together with a summary of the people online and what it has learned. A JSON schema forces a reply like:
    ```json
-   {"thought": "I need a pickaxe before I can mine stone.", "emotion": "determined", "emotionIntensity": 6,
-    "goal": "craft a wooden pickaxe", "action": {"name": "mineBlock", "args": {"blockType": "oak_log", "count": 3}}}
+   {"thought": "Steve killed me last time and he's got a sword out. Not going near him.", "emotion": "nervous",
+    "emotionIntensity": 7, "goal": "mine iron away from spawn", "action": {"name": "explore", "args": {"direction": "east"}}}
    ```
-3. **Act.** The action runs to completion or failure. The result (for example `NO_SUITABLE_TOOL: Mining stone by hand drops nothing`) is stored and shown in the next prompt so the model can adapt.
-4. **Throttle.** The loop waits at least `loop.minLlmIntervalMs` between decision calls. All LLM requests go through one priority queue (chat replies first, then reactions, then decisions, then small talk), so only one request is ever in flight.
+3. **Act.** Exactly one action runs to completion or failure. The result goes into the next prompt.
+4. **Throttle.** Decisions are at least `loop.minLlmIntervalMs` apart. Every LLM request goes through one priority queue, so only one is ever in flight. The order is: chat replies, then reactions, then decisions, then small talk, then reflection.
 
-**Reflexes** run without the LLM. They fight back when attacked, flee from creepers or when health is low, and eat when hungry. This saves LLM calls and reacts instantly.
+**Reflexes** run without the LLM: fight-or-flight against attacking players, keeping away from armed enemies, fighting back against mobs, fleeing creepers, and eating when hungry.
+
+## Feelings (`emotions`)
+
+The bot has six core feelings: joy, anger, fear, sadness, boredom and surprise. Events push them up, and they decay back to the personality's **temperament** at `emotions.decayPerMinute`.
+
+Many things move them:
+- getting hit, dying, low health, hunger, nightfall
+- gifts, kind words, insults, broken or kept promises
+- winning or losing fights, success or failure streaks, idling
+- the LLM's own report of how it feels
+
+The dominant feeling becomes a label ("annoyed (6/10), also a bit scared — mostly because Steve hit you") that appears in every prompt. It also changes behaviour:
+- Anger and sadness lower the chance of following instructions.
+- Happiness makes it chattier; sadness and fear make it quieter.
+- Anger versus fear tips fight-or-flight.
+
+| Setting | Meaning |
+| --- | --- |
+| `emotions.volatility` | 0 = stoic, 1 = normal, 2+ = dramatic |
+| `emotions.decayPerMinute` | how fast it calms down |
+| `emotions.lock` | force a feeling (e.g. `"angry"`), or `null` |
+| personality `temperament` / `sensitivity` | resting feelings, and per-feeling multipliers (e.g. a shy preset has `fear: 1.6`) |
+
+## Trust and relationships (`trust`)
+
+Every player starts at `trust.initial` (75/100, fairly high). Trust changes with **what they do**:
+
+| Lowers trust | Raises trust |
+| --- | --- |
+| Hitting the bot: a fist hit costs less than a weapon hit; a single punch from a friend is treated as horseplay | Gifts (tossing items it picks up), scaled by value |
+| **Repeated hits** (3+ in 20s) | **Keeping a promise** |
+| Hitting it **while it's nearly dead** | Helping it fight a mob or an attacker |
+| **Killing it** (more each time) | Apologising (less effective each time: "you said that last time") |
+| Hurting players, pets (wolves, cats, horses…) or villagers near it, scaled by how much it likes the victim | Kind messages, crouch-greetings |
+| Killing a player near it | Time: it slowly forgives, scaled by personality `forgiveness` |
+| **Breaking a promise** ("I'll bring you iron" and never doing it) | |
+| Threats and insults (the LLM rates each message) | |
+
+Harsh incidents also mark the player **hostile** for a while (`trust.hostileMemoryMinutes`). Hostile players get ignored sometimes (`trust.ignoreHostileChance`), and their requests are refused. The bot keeps its distance from them when they're armed and may fight back.
+
+**Promises** are pulled from chat by the LLM. The kinds are `give_item`, `come`, `stop_attacking`, `help` and `other`. Each has a deadline:
+- *Gift promises* are checked against what that player actually tosses.
+- *Come* promises are checked against where they are.
+- *Stop attacking* promises are broken by the next hit.
+- *Help* and *other* promises can't be verified. When they expire, the penalty is softer.
+
+**Reading people:**
+- From chat, the LLM tags each player's emotion and intent (friendly, joking, rude, threatening, apologetic, manipulative…).
+- From body language, it notices crouch-spam greetings, someone approaching armed, someone following it around, and someone staring at it.
+- These impressions are shown next to the player in every prompt.
+
+On 1.20+ servers the server reports exactly who caused each hit. On older versions the bot infers the attacker from nearby arm swings.
+
+Tiers: close friend (92+), trusted friend (80+), friendly (60+), unsure (45+), wary (20+), enemy.
+
+## Following instructions (`obedience`)
+
+When a player asks for something in chat, the bot **decides before replying** whether it will:
+- **comply** — it agrees and drops what it's doing;
+- **defer** — "after I finish this"; the request is saved and picked up later;
+- **refuse** — it says no.
+
+The LLM then phrases that outcome naturally, in character.
+
+```
+chance = obedience.chance[role] × trust factor × mood factor
+```
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `whoCanInstruct` | `everyone` | `everyone` / `trusted` / `admins` / `owners` / `nobody` |
+| `chance.owner` | 1.0 | owners (with `ownerBypass`, trust and mood don't affect them) |
+| `chance.admin` | 0.9 | admins |
+| `chance.trusted` | 0.7 | players with trust ≥ `trustedThreshold` (80) |
+| `chance.player` | 0.45 | everyone else |
+| `favorChance` | 0.15 | chance to do a favour for someone who isn't allowed to instruct |
+| `deferChance` | 0.35 | when not complying, chance of "later" rather than "no" |
+| `applyToCommands` | false | also roll for admins' `!come` / `!follow` / `!goal` |
+
+The trust factor is 1 at normal trust and falls to 0 at the hostile line, and hostile players always get 0. Anger and sadness lower the mood factor.
+
+Refusals depend on personality (`refusalStyle`) and mood:
+- *friendly*: "ah not rn, maybe after i finish this?"
+- *grumpy*: "do it yourself kid"
+- *shy*: "um... sorry, i cant"
+- *hype*: "NAH im busy cooking"
+
+Assistant-style phrasing ("I'm unable to assist…") is caught and replaced before it's sent.
+
+## Combat and learning (`pvp`, `learning`)
+
+`attackTarget` is a real melee engine that runs about 20 updates per second. Its tactics:
+- **critical hits** (jump, then hit on the way down);
+- **sprint-reset / w-tap** for extra knockback;
+- **strafing**;
+- **shield blocking** between swings while the opponent swings;
+- **hit-and-run**;
+- respecting the 1.9+ attack cooldown of each weapon.
+
+When the fight goes badly, it retreats and eats.
+
+It **learns which style works**. The styles are `aggressive`, `balanced`, `cautious` and `hitAndRun`. Stats are tracked per opponent (each mob type, each player, and players as a group). An epsilon-greedy bandit picks the best-known style and sometimes experiments (`learning.epsilon`). Retreat thresholds adapt: it backs off earlier against things that beat it, and stays in longer against things it beats easily.
+
+It also learns:
+- **Danger zones**: places where it died to lava, falls or drowning, or got stuck. The pathfinder routes around them, and they show up in the prompt.
+- **Movement**: repeated fall damage while moving switches risky parkour off for 20 minutes.
+- **Lessons**: after deaths, lost fights, fights with players and failure streaks, the LLM writes a one-line lesson ("Tester attacks without warning; keep distance when he has a sword out"). Lessons are deduplicated, reinforced when repeated, and shown in every decision prompt.
+
+PvP rules (`pvp.mode`):
+- `never`: it won't fight players.
+- `defensive` (default): it fights only players who attack it or are hostile.
+- `always`: it can fight anyone.
+
+Players can ask for a duel ("1v1 me"), and `allowSparring` lets the bot accept. `neverAttackOwners` and `behavior.protectedPlayers` always apply.
+
+Everything is saved to `data/brain.json` every 30s and on shutdown, so relationships and experience carry across sessions.
 
 ## Actions (tools)
 
@@ -62,49 +211,46 @@ Environment variables override the config: `MC_HOST`, `MC_PORT`, `MC_USERNAME`, 
 | `moveToPlayer` / `followPlayer` | `playerName, range? / durationSeconds?` |
 | `explore` | `distance?, direction?` |
 | `mineBlock` | `blockType, count?, maxDistance?`: finds the block, paths to it, equips the best tool, mines it, collects the drops |
-| `placeBlock` | `blockType, x, y, z`: finds a face to place against and avoids standing in the target cell |
-| `chatMessage` | `text` |
-| `equipItem` | `itemName, destination?`: armor slots are detected automatically |
-| `attackTarget` | `entityId, maxSeconds?` |
+| `placeBlock` | `blockType, x, y, z` |
+| `craftItem` | `itemName, count?`: uses a nearby crafting table automatically |
+| `smeltItem` | `itemName, count?, waitSeconds?`: furnace, smoker or blast furnace; adds fuel and collects output |
+| `storeItems` / `takeItems` | `itemNames` ("all" keeps tools, armor and some food) / `itemName, count?` with a chest or barrel |
+| `sleepInBed` | — |
+| `activateBlock` | `x, y, z`: doors, gates, trapdoors, levers, buttons, bells |
+| `fish` | `seconds?` |
+| `giveItem` | `playerName, itemName, count?`: walks over and tosses the items |
+| `equipItem` | `itemName, destination?` |
+| `attackTarget` | `entityId, maxSeconds?, style?, sparring?` |
 | `retreat` | `entityId, distance?` |
 | `eatFood` | `foodName?` |
 | `collectDrops` | `radius?` |
-| `craftItem` | `itemName, count?`: uses a nearby crafting table automatically |
+| `chatMessage` | `text` |
 | `emote` | `gesture`: wave, jump, nod, shake_head, crouch, spin, look_around |
 | `wait` | `seconds` |
 
-**Error handling:** every action is validated and has a distance-scaled timeout and a global hard timeout (`loop.maxActionMs`). Every action can be cancelled (on death, an owner command, taking damage, or a new task from chat). Pathfinding failures come back as clear codes: `NO_PATH`, `PATH_TIMEOUT`, `STUCK` (no movement for 8s), `PATH_INTERRUPTED`, `TOO_FAR`. Tools are handled carefully: nearly broken tools are swapped for a healthier one, blocks that need a proper tool are refused (`NO_SUITABLE_TOOL`), and a tool breaking mid-action is reported (and can trigger a reaction). Fuzzy names work, so `"log"`, `"Oak Log"` and `"minecraft:oak_log"` all resolve.
+Every action has its arguments checked, a timeout scaled to distance, and a global hard timeout. Every action can be cancelled.
 
-Use `behavior.enabledActions` (a whitelist) or `behavior.disabledActions` to limit what the LLM can do.
+Pathfinding failures come back as `NO_PATH`, `PATH_TIMEOUT`, `STUCK`, `PATH_INTERRUPTED` or `TOO_FAR`. Nearly broken tools are swapped for another tool, blocks that need a proper tool are refused, and tool breaks are reported.
+
+Use `behavior.enabledActions` / `disabledActions` to limit the tool list.
 
 ## Personalization
 
 ### Personality
 
-Set `"personality"` to a preset name from `personalities/`, or write the personality inline:
+Set `"personality"` to a preset name from `personalities/`, or write one inline. Beyond the description and speaking style, these fields shape its inner life:
 
 ```json
-"personality": {
-  "name": "Grimrock",
-  "nicknames": ["grim"],
-  "description": "A grumpy veteran miner who secretly cares.",
-  "traits": ["grumpy", "sarcastic"],
-  "speakingStyle": "terse and dry",
-  "quirks": ["calls everyone 'kid'"],
-  "likes": ["diamonds"], "dislikes": ["daylight"],
-  "ambitions": ["dig a huge mine"],
-  "chatTopics": ["complaining about something"],
-  "catchphrases": ["back to the mines"],
-  "lowercase": true,
-  "baselineMood": "annoyed",
-  "admitsBeingBot": true,
-  "reactions": { "death": { "templates": ["typical."] } }
-}
+"temperament": { "joy": 0.15, "anger": 0.25, "fear": 0.05, "sadness": 0.1, "boredom": 0.15, "surprise": 0 },
+"sensitivity": { "anger": 1.5, "fear": 0.6 },
+"forgiveness": 0.2,
+"trustSensitivity": 1.4,
+"fightOrFlight": 0.75,
+"refusalStyle": "blunt and sarcastic — \"do it yourself, kid\", \"no.\"",
+"fallbackRefusals": ["no.", "do it yourself kid"]
 ```
 
-`nicknames` (plus the username and `name`) are the words that count as talking to the bot. `ambitions` steer what it does when it has no task. `baselineMood` is the mood it drifts back to. With `admitsBeingBot`, it answers honestly if someone sincerely asks whether it is a bot. A preset's `reactions` block overrides the global reaction settings, so each personality can react in its own voice.
-
-To make your own preset, copy a file in `personalities/` and switch to it live with `!persona <name>`.
+`fightOrFlight` ranges from 0 (always runs) to 1 (always fights back). Mood, health and gear (yours vs theirs) also factor in. A preset's `reactions` block overrides reaction settings per event. Switch presets live with `!persona <name>`.
 
 ### Chat modes (`chat.mode`)
 
@@ -115,59 +261,81 @@ To make your own preset, copy a file in `personalities/` and switch to it live w
 | `unprompted` | no | **yes** | yes |
 | `both` | **yes** | **yes** | yes |
 
-In `respond` and `silent` modes, the `chatMessage` tool is removed from the LLM's tool list, so it cannot slip a message past the setting.
-
-Other chat options:
-- `respondTo`: `mentions` (default: name/nickname mentioned, a whisper, or a follow-up in an ongoing conversation), `everyone` (also chimes in on other chat with `unaddressedReplyChance`), or `whitelist`.
-- `ignore`: players the bot never replies to.
-- `replyDelayMs`, `typingCharsPerSecond`: human-like delays.
-- `minSecondsBetweenMessages`, `maxMessagesPerMinute`: anti-spam limits. Duplicate messages are dropped too.
-- `unprompted.intervalSeconds`, `chance`, `minSilenceSeconds`, `requirePlayersOnline`, `requirePlayersNearby`: control the small-talk timer.
-- `goalChangeInterrupts`: when a player asks for something and the bot agrees, it drops what it's doing and works on the request.
-
-The LLM decides whether to accept a task (in character). `behavior.obeyPlayers` controls who may give tasks at all: `everyone`, `owners` or `nobody`.
+Other options:
+- `respondTo`: `mentions`, `everyone` or `whitelist`.
+- `ignore`: players it never replies to.
+- `replyDelayMs` and `typingCharsPerSecond`: human-like delays.
+- `minSecondsBetweenMessages` and `maxMessagesPerMinute`: anti-spam limits.
+- `unprompted.*`: the small-talk timer. It is scaled by mood, so a happy bot chats more.
+- `goalChangeInterrupts`: an accepted request interrupts the current action.
 
 ### Event reactions (`reactions.events`)
 
-Each event has these settings:
-
 ```json
-"playerJoined": { "enabled": true, "chance": 0.7, "cooldownSec": 15, "perTarget": true,
-                  "style": "template", "gesture": "wave", "templates": ["hey {player}!", "welcome back {player}"] }
+"playerJoined": { "enabled": true, "chance": 0.7, "cooldownSec": 15, "perTarget": true, "style": "template",
+                  "templates": ["hey {player}!"], "templatesWary": ["oh. {player}."] }
 ```
 
-- `style`: `template` (a random template), `llm` (the model writes a reaction in character, falling back to a template if it fails), `gesture` (body language only), or `silent` (only remembered).
-- `gesture`: wave, jump, nod, shake_head, crouch, spin or look_around. It plays when the bot is idle.
-- `perTarget`: the cooldown applies per player instead of globally.
-- Placeholders: `{player}`, `{mob}`, `{item}`, `{level}`, `{health}`, `{food}`, `{cause}`, `{name}`.
+`style` can be:
+- `template`;
+- `llm` — written in character, with the bot's feelings and its relationship with that player;
+- `gesture`;
+- `silent`.
 
-Events: `spawn`, `playerJoined`, `playerLeft`, `playerNearby`, `death`, `hurt`, `lowHealth` (has a `threshold`), `hungry` (has a `threshold`), `playerDied`, `killedMob`, `hostileNearby`, `toolBroke`, `nightfall`, `daybreak`, `rainStart`, `levelUp`, `itemPickup`.
+`templatesWary` is used for players it doesn't trust, and friendly gestures are skipped for them.
 
-Every event is also written to the bot's memory, even when its reaction is disabled, so the decision loop knows what happened (for example "Steve died: Steve was blown up by Creeper").
+Events:
+- **General:** `spawn`, `playerJoined`, `playerLeft`, `playerNearby`, `death`, `hurt`, `lowHealth`, `hungry`, `playerDied`, `killedMob`, `hostileNearby`, `toolBroke`, `nightfall`, `daybreak`, `rainStart`, `levelUp`, `itemPickup`.
+- **Social:** `attackedByPlayer`, `killedByPlayer`, `gift`, `promiseKept`, `promiseBroken`, `harmNearby`, `crouchGreeting`, `wonFight`, `lostFight`.
 
-## Owner commands
+Placeholders: `{player} {mob} {item} {level} {health} {food} {cause} {victim} {promise} {name}`.
 
-Add your username to `behavior.owners`. Owners can type these in game; the terminal running the bot can always use them. Anything else typed in the terminal is said in chat.
+## Commands
 
-```
-!stop        stop the current action          !mode <silent|respond|unprompted|both>
-!pause       pause the brain                  !goal <text|clear>   set or clear the goal
-!resume      resume                           !come / !follow      come to / follow you
-!persona <name>   switch personality          !reactions <on|off>
-!status      health, food, action, goal, mood !help
-```
+Roles:
+- **Owners** (`behavior.owners`) can use everything.
+- **Admins** (`behavior.admins`, or added in game with `!admin add`) can use most commands.
+- The terminal running the bot counts as an owner.
+
+When anyone else types `!stop`, it's treated as normal chat, so the bot just answers them like a person would. Per-command roles are set in `commands.permissions`.
+
+| Command | Role | |
+| --- | --- | --- |
+| `!status`, `!help` | admin | health, food, action, goal, feeling |
+| `!stop` `!pause` `!resume` | admin | control the brain |
+| `!come` `!follow` `!goal <text\|clear>` | admin | give it something to do |
+| `!mode <silent\|respond\|unprompted\|both>` | admin | chat mode |
+| `!emotion` | admin | `!emotion` (show) · `!emotion angry 8` (set) · `!emotion lock happy` · `!emotion unlock` · `!emotion volatility 0.5` |
+| `!trust [player] [0-100\|reset]` | admin | view or set trust; no player = list |
+| `!set <key> <value\|reset>` / `!get <key>` / `!settings [reset]` | admin | change settings live (see below) |
+| `!lessons`, `!reactions on\|off` | admin | |
+| `!obey` | owner | `!obey` (show) · `!obey admin 0.8` · `!obey player 30%` · `!obey who admins` · `!obey favor 0.1` |
+| `!admin add\|remove <player>` | owner | |
+| `!persona <name>`, `!forget <player>`, `!save` | owner | |
+
+**Live settings** (`!set`) persist in `data/brain.json` and override `config.json` until reset:
+- **Chat:** `chat.mode`, `chat.respondTo`, `chat.unaddressedReplyChance`, `chat.unprompted.chance`, `chat.unprompted.intervalSeconds`, `chat.reactionsInRespondMode`, `chat.goalChangeInterrupts`
+- **Reactions:** `reactions.enabled`, `reactions.gestures`
+- **Obedience:** `obedience.*` (`whoCanInstruct`, `chance.owner/admin/trusted/player`, `favorChance`, `deferChance`, `ownerBypass`, `applyToCommands`, `trustedThreshold`)
+- **Emotions:** `emotions.enabled`, `emotions.volatility`, `emotions.decayPerMinute`, `emotions.lock`, `emotions.lockIntensity`
+- **Trust:** `trust.enabled`, `trust.initial`, `trust.recoveryPerHour`, `trust.ignoreHostileChance`
+- **PvP:** `pvp.mode`, `pvp.allowSparring`, `pvp.neverAttackOwners`
+- **Learning:** `learning.reflect`, `learning.epsilon`
+
+Keys under `obedience.`, `trust.`, `pvp.` and `learning.` are owner-only (`commands.ownerOnlySettings`).
 
 ## Safety switches
 
-- `behavior.allowPvp` (default `false`): the bot refuses to attack players. `protectedPlayers` are never attacked, even when PvP is on.
-- LLM chat output is sanitized: messages can't start with `/` (no server commands), and control characters and `§` codes are stripped.
-- The pathfinder will never dig through chests, barrels, furnaces or crafting tables.
+- `pvp.mode` defaults to `defensive`. `protectedPlayers` are never attacked, and owners aren't either unless they ask for a spar.
+- LLM chat output is sanitized: no leading `/` (no server commands), no control characters or `§` codes, and no assistant-speak.
+- The pathfinder never digs through chests, barrels, furnaces or crafting tables.
 - `behavior.maxTravelDistance` limits how far a single move can go.
 
 ## Troubleshooting
 
 - **"Cannot reach Ollama"**: start it with `ollama serve`, or set `llm.url` / `OLLAMA_URL`.
-- **Slow decisions**: use a smaller model, lower `llm.numCtx`, or raise `loop.minLlmIntervalMs`. Replies to players always jump ahead of decisions in the queue.
+- **"Server version … is not supported" / "Outdated client"**: see [Minecraft 26.3 and other newer versions](#minecraft-263-and-other-newer-versions).
+- **Slow decisions**: use a smaller model, lower `llm.numCtx`, or raise `loop.minLlmIntervalMs`.
 - **Kicked for spam**: raise `chat.minSecondsBetweenMessages` and lower `chat.maxMessagesPerMinute`.
-- **Online-mode servers**: set `"auth": "microsoft"` and use your account email as `username`. Mineflayer will prompt you to sign in.
-- **Version issues**: pin `server.version` (e.g. `"1.21.4"`) instead of auto-detecting.
+- **Online-mode servers**: set `"auth": "microsoft"` and use your account email as `username`.
+- **Start relationships over**: stop the bot and delete `data/brain.json`, or use `!forget <player>` / `!trust <player> reset`.

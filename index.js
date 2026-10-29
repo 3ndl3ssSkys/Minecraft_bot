@@ -24,8 +24,13 @@ const fs = require('fs')
 const path = require('path')
 const readline = require('readline')
 const mineflayer = require('mineflayer')
+const mc = require('minecraft-protocol')
+const minecraftData = require('minecraft-data')
 const { pathfinder, Movements } = require('mineflayer-pathfinder')
 const { ActionExecutor, performGesture, inventorySummary, durabilityLeft } = require('./actions')
+const { EmotionEngine, LABEL_TO_CORE } = require('./emotions')
+const { SocialModel, WEAPON, PROMISE_KINDS } = require('./social')
+const { Learning, COMBAT_STYLES } = require('./learning')
 
 // ===========================================================================
 // Logging
@@ -64,7 +69,10 @@ const DEFAULT_CONFIG = {
     port: 25565,
     username: 'Wanderer',
     auth: 'offline', // 'offline' or 'microsoft'
-    version: false, // false = auto-detect, or e.g. "1.21.4"
+    version: false, // false = auto-detect, or e.g. "26.1"
+    // If the server is newer than Mineflayer supports (e.g. 26.3), connect as the newest supported
+    // version instead. The server then needs ViaBackwards, or the bot must go through ViaProxy.
+    viaFallback: true,
     reconnect: true,
     reconnectDelayMs: 10000,
     maxReconnectDelayMs: 120000
@@ -110,7 +118,7 @@ const DEFAULT_CONFIG = {
     globalCooldownSec: 6,
     events: {
       spawn: { enabled: true, chance: 1, cooldownSec: 0, style: 'llm', gesture: 'wave', templates: ['hey everyone!', 'hi all'] },
-      playerJoined: { enabled: true, chance: 0.7, cooldownSec: 15, perTarget: true, style: 'template', templates: ['hey {player}!', 'welcome back {player}', 'o/ {player}'] },
+      playerJoined: { enabled: true, chance: 0.7, cooldownSec: 15, perTarget: true, style: 'template', templates: ['hey {player}!', 'welcome back {player}', 'o/ {player}'], templatesWary: ['oh. {player}.', 'great, {player} is back'] },
       playerLeft: { enabled: true, chance: 0.4, cooldownSec: 30, style: 'template', templates: ['cya {player}', 'bye {player}!'] },
       playerNearby: { enabled: true, chance: 0.6, cooldownSec: 180, perTarget: true, style: 'gesture', gesture: 'wave', templates: ['oh hey {player}'] },
       death: { enabled: true, chance: 1, cooldownSec: 10, style: 'llm', templates: ['noooo', 'ugh. died.'] },
@@ -125,16 +133,24 @@ const DEFAULT_CONFIG = {
       daybreak: { enabled: true, chance: 0.4, cooldownSec: 600, style: 'template', templates: ['morning!'] },
       rainStart: { enabled: true, chance: 0.3, cooldownSec: 600, style: 'template', templates: ['ugh, rain'] },
       levelUp: { enabled: true, chance: 0.5, cooldownSec: 60, style: 'template', templates: ['level {level}!'] },
-      itemPickup: { enabled: false, chance: 0.1, cooldownSec: 120, style: 'template', templates: ['ooh, {item}'] }
+      itemPickup: { enabled: false, chance: 0.1, cooldownSec: 120, style: 'template', templates: ['ooh, {item}'] },
+      attackedByPlayer: { enabled: true, chance: 0.8, cooldownSec: 12, perTarget: true, style: 'llm', templates: ['hey! {player} stop', 'dude what', 'why are you hitting me'] },
+      killedByPlayer: { enabled: true, chance: 1, cooldownSec: 10, style: 'llm', templates: ['really {player}?', 'wow. thanks {player}'] },
+      gift: { enabled: true, chance: 0.9, cooldownSec: 20, perTarget: true, style: 'llm', gesture: 'nod', templates: ['thanks {player}!', 'ty {player}'] },
+      promiseKept: { enabled: true, chance: 0.8, cooldownSec: 30, style: 'template', templates: ['appreciate it {player}', 'knew i could count on you {player}'] },
+      promiseBroken: { enabled: true, chance: 0.7, cooldownSec: 120, style: 'llm', templates: ['guess {player} forgot...', "{player} you said you'd {promise}"] },
+      harmNearby: { enabled: true, chance: 0.6, cooldownSec: 30, perTarget: true, style: 'llm', templates: ['{player} leave the {victim} alone', 'hey, stop that'] },
+      crouchGreeting: { enabled: true, chance: 0.9, cooldownSec: 60, perTarget: true, style: 'gesture', gesture: 'crouch', templates: ['o/ {player}'] },
+      wonFight: { enabled: true, chance: 0.5, cooldownSec: 60, style: 'llm', templates: ['gg', 'ez'] },
+      lostFight: { enabled: true, chance: 0.5, cooldownSec: 60, style: 'template', templates: ['nope, not today', 'gotta heal'] }
     }
   },
   behavior: {
-    owners: [], // usernames allowed to use !commands in-game (the console always can)
+    owners: [], // full control: every !command, and requests are always followed (see obedience.ownerBypass)
+    admins: [], // most !commands; requests follow obedience.chance.admin (owners can add more with !admin add)
     commandPrefix: '!',
-    obeyPlayers: 'everyone', // who may give the bot tasks via chat: 'everyone' | 'owners' | 'nobody'
     startingGoal: '',
-    allowPvp: false,
-    protectedPlayers: [],
+    protectedPlayers: [], // never attacked, no matter what
     selfDefense: true,
     autoEat: true,
     autoEatBelow: 14,
@@ -142,7 +158,6 @@ const DEFAULT_CONFIG = {
     interruptOnDamage: true,
     autoEquipWeapon: true,
     autoCollectDrops: true,
-    attackCooldownMs: 650,
     minToolDurability: 3,
     maxTravelDistance: 128,
     enabledActions: [], // non-empty = whitelist of actions the LLM may use
@@ -157,6 +172,58 @@ const DEFAULT_CONFIG = {
       msPerBlock: 1200,
       maxTimeoutMs: 180000
     }
+  },
+  // How likely the bot is to actually do what someone asks in chat, and who may ask.
+  obedience: {
+    whoCanInstruct: 'everyone', // 'everyone' | 'trusted' | 'admins' | 'owners' | 'nobody'
+    chance: { owner: 1.0, admin: 0.9, trusted: 0.7, player: 0.45 }, // base chance by role, then scaled by trust & mood
+    favorChance: 0.15, // chance to help someone who isn't allowed to instruct (a favour)
+    deferChance: 0.35, // when not complying right away, chance to say "later" instead of "no"
+    ownerBypass: true, // owners use chance.owner exactly, unaffected by trust or mood
+    applyToCommands: false, // also roll the dice for admins' !come / !follow / !goal
+    trustedThreshold: 80 // trust needed to count as "trusted" (above the starting trust, so it's earned)
+  },
+  trust: {
+    enabled: true,
+    initial: 75, // everyone starts fairly trusted
+    hostileBelow: 20,
+    waryBelow: 45,
+    recoveryPerHour: 6, // forgiveness over time (scaled by personality.forgiveness)
+    hostileMemoryMinutes: 5, // how long an attacker stays "hostile" after an incident
+    lowHealthThreshold: 8, // hitting the bot at or below this health counts as extra malicious
+    protectRadius: 12, // harm to players/pets/villagers within this range counts against the attacker
+    ignoreHostileChance: 0.4, // chance to just ignore chat from someone hostile
+    penalties: { weaponHit: 4, fistHit: 1.5, repeatedHits: 8, hitWhileLow: 6, killedMe: 35, harmedPlayerNearby: 4, harmedPet: 6, harmedVillager: 3, harmedAnimal: 0, killedPlayerNearby: 10, brokenPromise: 10 },
+    rewards: { gift: 3, keptPromise: 6, helpedFight: 2, apology: 6, crouchGreeting: 0.5 }
+  },
+  emotions: {
+    enabled: true,
+    volatility: 1.0, // how strongly events move feelings (0 = stoic, 2 = dramatic)
+    decayPerMinute: 0.2, // how fast feelings return to the personality's temperament
+    lock: null, // force one emotion label (set with !emotion lock <label>)
+    lockIntensity: 6
+  },
+  pvp: {
+    mode: 'defensive', // 'never' | 'defensive' (fight players who attack it) | 'always'
+    allowSparring: true, // accept friendly duels when a player asks ("1v1 me")
+    neverAttackOwners: true
+  },
+  learning: {
+    enabled: true,
+    file: 'data/brain.json', // relationships, combat stats, lessons, danger zones, in-game settings
+    epsilon: 0.2, // how often to try a non-best fighting style (exploration)
+    reflect: true, // ask the LLM for a lesson after notable experiences
+    maxLessons: 25
+  },
+  commands: {
+    // Minimum role per !command. 'admin' commands also work for owners.
+    permissions: {
+      help: 'admin', status: 'admin', stop: 'admin', pause: 'admin', resume: 'admin', come: 'admin', follow: 'admin',
+      goal: 'admin', mode: 'admin', emotion: 'admin', trust: 'admin', settings: 'admin', get: 'admin', set: 'admin',
+      reactions: 'admin', lessons: 'admin', obey: 'owner', admin: 'owner', persona: 'owner', forget: 'owner', save: 'owner'
+    },
+    // Settings under these prefixes can only be changed by owners, even with !set.
+    ownerOnlySettings: ['obedience.', 'trust.', 'pvp.', 'learning.']
   },
   perception: {
     intervalMs: 2000,
@@ -199,6 +266,14 @@ const DEFAULT_PERSONALITY = {
   lowercase: false,
   baselineMood: 'calm',
   admitsBeingBot: true, // if sincerely asked, be honest about being an AI
+  // Resting feelings (0..1) and how strongly each kind of event moves them.
+  temperament: { joy: 0.35, anger: 0.05, fear: 0.1, sadness: 0.05, boredom: 0.15, surprise: 0 },
+  sensitivity: {}, // e.g. { "anger": 1.5, "fear": 0.7 }
+  forgiveness: 0.5, // 0 = holds grudges forever, 1 = forgives fast
+  trustSensitivity: 1, // multiplier on trust lost from bad behaviour
+  fightOrFlight: 0.5, // 0 = always runs from attackers, 1 = always fights back
+  refusalStyle: 'casual — a quick excuse, a joke, or a plain "nah" depending on mood',
+  fallbackRefusals: ['nah', 'maybe later', 'not rn', "i'm good"],
   reactions: {} // per-event overrides, e.g. { "death": { "templates": ["..."] } }
 }
 
@@ -266,6 +341,12 @@ function loadConfig (log) {
   if (env.BOT_PERSONALITY) config.personality = env.BOT_PERSONALITY
   if (env.BOT_CHAT_MODE) config.chat.mode = env.BOT_CHAT_MODE
 
+  // Backwards compatibility with older config files.
+  if (user.behavior?.allowPvp === true && !user.pvp?.mode) config.pvp.mode = 'always'
+  if (user.behavior?.obeyPlayers && !user.obedience?.whoCanInstruct) {
+    config.obedience.whoCanInstruct = { everyone: 'everyone', owners: 'owners', nobody: 'nobody' }[user.behavior.obeyPlayers] || 'everyone'
+  }
+
   if (!CHAT_MODES.includes(config.chat.mode)) {
     log.warn(`Unknown chat.mode "${config.chat.mode}", falling back to "respond".`)
     config.chat.mode = 'respond'
@@ -286,7 +367,7 @@ class Memory {
     this.actions = [] // { at, source, action, args, ok, code, message, thought }
     this.goal = config.behavior.startingGoal || ''
     this.goalSource = this.goal ? 'config' : ''
-    this.mood = { emotion: 'calm', intensity: 3, at: Date.now() }
+    this.pendingRequests = [] // { from, task, at } — things the bot agreed to do "later"
     this.lastSelfChatAt = 0
     this.lastTalkedWith = new Map() // username -> timestamp
   }
@@ -320,17 +401,10 @@ class Memory {
     this.goalSource = this.goal ? source : ''
   }
 
-  setMood (emotion, intensity = 5) {
-    if (!emotion) return
-    this.mood = { emotion: String(emotion).toLowerCase(), intensity: clampInt(intensity, 1, 10, 5), at: Date.now() }
-  }
-
-  /** Mood fades back to the personality baseline after a couple of minutes. */
-  currentMood (baseline = 'calm') {
-    const age = Date.now() - this.mood.at
-    if (age > 180000) return { emotion: baseline, intensity: 3 }
-    const fade = Math.floor(age / 60000)
-    return { emotion: this.mood.emotion, intensity: Math.max(1, this.mood.intensity - fade) }
+  addPendingRequest (from, task) {
+    this.pendingRequests = this.pendingRequests.filter((r) => Date.now() - r.at < 30 * 60000)
+    this.pendingRequests.push({ from, task: String(task).slice(0, 160), at: Date.now() })
+    if (this.pendingRequests.length > 5) this.pendingRequests.shift()
   }
 
   /** Number of consecutive failed actions (used to nudge the LLM to change approach). */
@@ -378,7 +452,9 @@ const itemLabel = (item) => {
 }
 
 class Perception {
-  constructor (bot, config) {
+  constructor (agent) {
+    this.agent = agent
+    const { bot, config } = agent
     this.bot = bot
     this.config = config
     const reg = bot.registry
@@ -401,7 +477,12 @@ class Perception {
       .map(({ e, kind, d }) => {
         const out = { id: e.id, kind, name: e.username || e.name, distance: Math.round(d * 10) / 10, position: pos3(e.position) }
         if (kind === 'item') out.item = safe(() => e.getDroppedItem()?.name)
-        if (kind === 'player') out.holding = e.heldItem?.name || null
+        if (kind === 'player') {
+          out.holding = e.heldItem?.name || null
+          if (out.holding && WEAPON.test(out.holding)) out.armed = true
+          if (e.crouching) out.crouching = true
+          Object.assign(out, this.agent.social.annotate(e.username))
+        }
         return out
       })
   }
@@ -466,11 +547,15 @@ class Perception {
     if (state.self.health <= 8) h.push('Your health is low; avoid fights and eat to regenerate.')
     if (state.inventory.freeSlots <= 2) h.push('Your inventory is almost full.')
     if (state.nearbyEntities.some((e) => e.kind === 'hostile' && e.distance < 8)) h.push('A hostile mob is close!')
+    const enemy = state.nearbyEntities.find((e) => e.kind === 'player' && e.hostile && e.distance < 16)
+    if (enemy) h.push(`${enemy.name} has been hostile to you and is ${enemy.distance} blocks away${enemy.armed ? ', armed' : ''}.`)
+    if (this.agent.memory.pendingRequests.length) h.push('You still have requests you promised to do later (status.pendingRequests).')
     return h
   }
 
-  snapshot (memory, executor, personality) {
+  snapshot () {
     const { bot, config } = this
+    const { memory, executor, emotions, learning } = this.agent
     const e = bot.entity
     const cursor = safe(() => bot.blockAtCursor(5))
     const below = bot.blockAt(e.position.offset(0, -0.5, 0))
@@ -509,7 +594,9 @@ class Perception {
         currentAction: executor.current ? executor.current.name : null,
         goal: memory.goal || null,
         goalSetBy: memory.goalSource || null,
-        mood: memory.currentMood(personality.baselineMood)
+        feelings: emotions.describe(),
+        pendingRequests: memory.pendingRequests.map((r) => `${r.from}: ${r.task} (${ago(r.at)})`),
+        dangerZonesNearby: learning.movement.nearbyDangers(e.position)
       },
       recentActions: memory.actions.slice(-recent).map((a) => ({
         when: ago(a.at), action: a.action, args: a.args, ok: a.ok, ...(a.code ? { code: a.code } : {}), result: a.message
@@ -531,7 +618,7 @@ function safe (fn) {
 // Ollama client — one request at a time, priority ordered, with retries
 // ===========================================================================
 
-const PRIORITY = { reply: 0, reaction: 1, decision: 2, smalltalk: 3 }
+const PRIORITY = { reply: 0, reaction: 1, decision: 2, smalltalk: 3, reflect: 4 }
 
 class OllamaClient {
   constructor (config, log) {
@@ -677,16 +764,35 @@ function decisionSchema (toolNames) {
   }
 }
 
+const PLAYER_EMOTIONS = ['happy', 'friendly', 'excited', 'neutral', 'bored', 'sad', 'annoyed', 'angry', 'scared', 'joking', 'sarcastic', 'unknown']
+const PLAYER_INTENTS = ['friendly', 'joking', 'neutral', 'asking_for_help', 'request', 'trading', 'rude', 'threatening', 'apologetic', 'manipulative']
+
 const REPLY_SCHEMA = {
   type: 'object',
   properties: {
     reply: { type: 'string', description: 'Your chat reply, or "" to stay silent.' },
     emotion: { type: 'string', enum: EMOTIONS },
     emotionIntensity: { type: 'integer', minimum: 1, maximum: 10 },
-    acceptTask: { type: 'boolean', description: 'true if the player asked you to do something and you agree to do it.' },
-    newGoal: { type: 'string', description: 'If acceptTask, the concrete goal, e.g. "collect 10 oak logs for Steve". Otherwise "".' }
+    isRequest: { type: 'boolean', description: 'true if they asked you to do something in the game.' },
+    task: { type: 'string', description: 'If isRequest: the concrete task, e.g. "collect 10 oak logs for Steve". Otherwise "".' },
+    playerEmotion: { type: 'string', enum: PLAYER_EMOTIONS },
+    playerIntent: { type: 'string', enum: PLAYER_INTENTS },
+    trustImpact: { type: 'integer', minimum: -10, maximum: 4 },
+    promise: {
+      type: 'object',
+      description: 'Did THEY promise you something?',
+      properties: {
+        made: { type: 'boolean' },
+        kind: { type: 'string', enum: PROMISE_KINDS },
+        description: { type: 'string' },
+        item: { type: 'string' },
+        count: { type: 'integer' },
+        withinMinutes: { type: 'integer' }
+      },
+      required: ['made', 'kind', 'description', 'item', 'count', 'withinMinutes']
+    }
   },
-  required: ['reply', 'emotion', 'emotionIntensity', 'acceptTask', 'newGoal']
+  required: ['reply', 'emotion', 'emotionIntensity', 'isRequest', 'task', 'playerEmotion', 'playerIntent', 'trustImpact', 'promise']
 }
 
 const MESSAGE_SCHEMA = {
@@ -714,8 +820,14 @@ function personaBlock (p, botName) {
   lines.push(p.admitsBeingBot
     ? 'Stay in character as a player. If someone sincerely asks whether you are a bot or an AI, be honest about it (casually, in character).'
     : 'Stay in character as a player and do not bring up being an AI.')
+  lines.push(HUMAN_VOICE)
   return lines.join('\n')
 }
+
+/** Shared rule: sound like a person, especially when saying no. */
+const HUMAN_VOICE = 'You talk like a real person in game chat, never like an assistant or a bot: no "I cannot", "I am unable to", ' +
+  '"I\'m not allowed", "as an AI", "my instructions". When you don\'t want to do something you say it the way people do — an excuse, a joke, ' +
+  'a counter-offer, a blunt "nah", or calling someone out — coloured by your mood and how you feel about that person.'
 
 function chatPolicy (mode) {
   switch (mode) {
@@ -735,7 +847,11 @@ function buildDecisionPrompt (agent, toolDocs) {
 - Use exact coordinates, block names and entity ids from the state. Never invent ids or coordinates you have not seen.
 - Read recentActions: if an action failed, understand the error code and try something different instead of repeating it.
 - If a player asked you for something and you agreed (see status.goal / recentChat), prioritise it.
-- Survive: eat when hungry, avoid lava and deep falls, fight or flee from hostile mobs, be careful at night.
+- Survive: eat when hungry, avoid lava, deep falls and status.dangerZonesNearby, fight or flee from hostile mobs, be careful at night.
+- Use the game's systems: smelt ores and cook food (smeltItem), store loot in chests, sleep in a bed at night, open doors, fish.
+- People: each player in nearbyEntities has your trust in them and how they seem. Be generous with friends (giveItem, help them), polite but guarded with strangers, and keep your distance from people who hurt you. You may fight players who attack you; never attack someone just because you dislike them. Accept a duel only when a player asks for one (attackTarget with sparring: true).
+- Your feelings (status.feelings) should colour how you play: scared → careful, angry → blunt and aggressive, happy → social and generous, bored → go do something new.
+- Requests you agreed to do later are in status.pendingRequests — get to them when you can.
 - ${chatPolicy(config.chat.mode)}
 - Keep "thought" to one or two sentences. "emotion" is how you genuinely feel right now as this character.
 
@@ -815,13 +931,20 @@ class ChatManager {
     return msg
   }
 
-  async deliver (text, category, { whisperTo } = {}) {
+  async deliver (text, category, { whisperTo, fallback } = {}) {
     const { bot, log, memory } = this.agent
     if (!this.allows(category)) { log.debug(`chat (${category}) blocked by mode "${this.cfg.mode}": ${text}`); return null }
     if (!bot?.entity) return null
 
-    const msg = this.sanitize(text)
+    let msg = this.sanitize(text)
     if (!msg) return null
+    if (category !== 'system' && ROBOTIC.test(msg)) {
+      // Small models slip into assistant-speak when refusing; swap in a human line instead.
+      const lines = fallback || this.agent.personality.fallbackRefusals || []
+      log.debug(`robotic phrasing replaced: ${msg}`)
+      if (!lines.length || category !== 'reply') return null
+      msg = this.sanitize(pick(lines))
+    }
 
     const now = Date.now()
     this.sentTimes = this.sentTimes.filter((t) => now - t < 60000)
@@ -863,6 +986,9 @@ class ChatManager {
   }
 }
 
+/** Assistant-style phrasing that no real player would type. */
+const ROBOTIC = /\b(as an ai|language model|i('m| am) (unable|not able|not permitted|not allowed) to|i (cannot|can't) (comply|assist|fulfill|help with that)|i must (decline|refuse)|my (programming|instructions|guidelines)|i apologi[sz]e,? but)\b/i
+
 function escapeRegex (s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
@@ -884,9 +1010,14 @@ class ChatResponder {
 
   get cfg () { return this.agent.config.chat }
 
-  isOwner (username) {
-    if (username === '@console') return true
-    return this.agent.config.behavior.owners.map((o) => o.toLowerCase()).includes(String(username).toLowerCase())
+  /** owner > admin > player, with the console counting as an owner. */
+  roleRank (username) {
+    return { player: 0, admin: 1, owner: 2 }[this.agent.social.role(username)]
+  }
+
+  canUseCommand (username, cmd) {
+    const needed = this.agent.config.commands.permissions[cmd] || 'owner'
+    return this.roleRank(username) >= { admin: 1, owner: 2 }[needed]
   }
 
   isAddressed (username, message, whisper) {
@@ -905,21 +1036,32 @@ class ChatResponder {
     if (this.cfg.ignore.map((i) => i.toLowerCase()).includes(username.toLowerCase())) return
     memory.addChat(username, message, { whisper })
 
+    // !commands from people allowed to use them. Everyone else's "!stop" is just chat.
     const prefix = config.behavior.commandPrefix
-    if (prefix && message.startsWith(prefix) && this.isOwner(username)) {
-      this.handleCommand(username, message.slice(prefix.length).trim(), whisper).catch((err) => log.warn(`Command failed: ${err.message}`))
-      return
+    if (prefix && message.startsWith(prefix)) {
+      const cmd = message.slice(prefix.length).trim().split(/\s+/)[0]?.toLowerCase() || 'help'
+      if (this.roleRank(username) > 0 && this.canUseCommand(username, cmd)) {
+        this.handleCommand(username, message.slice(prefix.length).trim(), whisper).catch((err) => log.warn(`Command failed: ${err.message}`))
+        return
+      }
     }
 
     if (!this.agent.chat.allows('reply')) return
     const addressed = this.isAddressed(username, message, whisper)
     let respond = false
     switch (this.cfg.respondTo) {
-      case 'everyone': respond = addressed || Math.random() < this.cfg.unaddressedReplyChance; break
+      case 'everyone': respond = addressed || Math.random() < this.cfg.unaddressedReplyChance * this.agent.emotions.modifiers().talkativeness; break
       case 'whitelist': respond = addressed && this.cfg.whitelist.map((w) => w.toLowerCase()).includes(username.toLowerCase()); break
       default: respond = addressed
     }
     if (!respond) return
+
+    // A real person sometimes just ignores someone who's been attacking them.
+    const social = this.agent.social
+    if (social.isHostile(username) && social.role(username) !== 'owner' && Math.random() < config.trust.ignoreHostileChance) {
+      memory.addEvent('ignored', `You ignored ${username}'s message.`)
+      return
+    }
 
     this.lookAtSpeaker(username)
     this.pending.push({ username, message, whisper })
@@ -938,28 +1080,48 @@ class ChatResponder {
     }
   }
 
+  /** What the bot will do *if* the message turns out to be a request, phrased for the LLM. */
+  complianceDirective (speaker, c) {
+    switch (c.outcome) {
+      case 'comply':
+        return `If ${speaker} is asking you to do something in the game, you'll do it: agree casually, set isRequest=true and describe the concrete task.`
+      case 'defer':
+        return `If ${speaker} is asking you to do something, you'll do it, but later (${c.reason}). Say so naturally — e.g. after you finish what you're doing. Set isRequest=true and describe the task.`
+      default:
+        return `If ${speaker} is asking you to do something, you're NOT doing it (${c.reason}). Turn it down the way a real person would, matching your mood and how you feel about them — ` +
+          `${this.agent.personality.refusalStyle}. Don't explain rules or settings. Still set isRequest=true and describe what they wanted.`
+    }
+  }
+
   async flush () {
     const batch = this.pending.splice(0)
     if (batch.length === 0) return
     const agent = this.agent
-    const { bot, memory, personality, config, log } = agent
+    const { bot, memory, personality, social, emotions, log } = agent
     const speaker = batch[batch.length - 1].username
     const whisper = batch.every((b) => b.whisper)
-    const canObey = config.behavior.obeyPlayers === 'everyone' ||
-      (config.behavior.obeyPlayers === 'owners' && this.isOwner(speaker))
+    const compliance = social.decideCompliance(speaker)
+    const mods = emotions.modifiers()
 
+    const others = Object.keys(bot.players).filter((n) => n !== bot.username && n !== speaker).slice(0, 4)
     const history = memory.chat.slice(-12).map((c) => `${c.self ? `${bot.username} (you)` : c.from}${c.whisper ? ' (whisper)' : ''}: ${c.text}`).join('\n')
     const system = `${personaBlock(personality, bot.username)}
 
 You are reading Minecraft chat and replying as yourself. Write like a real player typing in game chat: short (usually under 15 words), casual, in character. No emojis, no markdown, no quotation marks, don't prefix your name.
+${mods.talkativeness < 0.6 ? "You're not in a chatty mood: keep it very short.\n" : ''}Let your current feelings and your history with this person show in your tone: warm with friends, cool or curt with people you don't trust, angry with people who hurt you.
 If the message doesn't need a reply (e.g. it's not really for you), set reply to "".
-${canObey
-    ? 'If the player asks you to do something in the game, decide in character whether to help. If you agree, set acceptTask=true and give a concrete newGoal.'
-    : 'You do not take orders from this player: politely or playfully decline tasks (acceptTask=false).'}
-Respond with ONLY JSON: {"reply": "...", "emotion": "<${EMOTIONS.join('|')}>", "emotionIntensity": 1-10, "acceptTask": true|false, "newGoal": "..."}`
+${this.complianceDirective(speaker, compliance)}
+
+Also read the other player:
+- playerEmotion / playerIntent: how they seem (banter between friends is "joking", not "rude").
+- trustImpact: how this message changes your trust in them: -10 serious threat or cruelty, -3 rude, 0 normal, +2 kind, +4 very kind or generous. Use 0 for ordinary chat.
+- promise: if THEY promise to do something for you (give you items, come to you, stop attacking you, help you), set made=true with kind (${PROMISE_KINDS.join('|')}), what they promised, item and count if any, and withinMinutes (your best guess). Otherwise made=false, kind "other", empty strings and 0s.
+Respond with ONLY JSON matching: {"reply","emotion","emotionIntensity","isRequest","task","playerEmotion","playerIntent","trustImpact","promise":{"made","kind","description","item","count","withinMinutes"}}`
 
     const user = `Your status: ${briefStatus(agent.perception?.latest)}
-Recent chat:
+How you feel: ${emotions.describe()}
+How you feel about ${speaker}: ${social.relationshipLine(speaker)}
+${others.length ? `Others online:\n${social.peopleSummary(others)}\n` : ''}Recent chat:
 ${history}
 
 Reply to ${speaker}'s latest message${batch.length > 1 ? 's' : ''}: ${batch.filter((b) => b.username === speaker).map((b) => `"${b.message}"`).join(' ')}`
@@ -967,31 +1129,64 @@ Reply to ${speaker}'s latest message${batch.length > 1 ? 's' : ''}: ${batch.filt
     const out = await agent.llm.chat([{ role: 'system', content: system }, { role: 'user', content: user }],
       { schema: REPLY_SCHEMA, priority: PRIORITY.reply, label: 'reply' })
 
-    memory.setMood(out.emotion, out.emotionIntensity)
+    emotions.fromLabel(out.emotion, out.emotionIntensity)
+    social.onChatAnalysis(speaker, out)
     memory.lastTalkedWith.set(speaker, Date.now())
-    if (out.reply) await agent.chat.send(out.reply, 'reply', { whisperTo: whisper && this.cfg.whisperReplies ? speaker : undefined })
+    // If the model slips into assistant-speak, the fallback line must match what we decided to do.
+    const fallback = out.isRequest && compliance.outcome !== 'refuse' ? ['sure', 'ok', 'yeah one sec'] : undefined
+    if (out.reply) await agent.chat.send(out.reply, 'reply', { whisperTo: whisper && this.cfg.whisperReplies ? speaker : undefined, fallback })
 
-    if (out.acceptTask && canObey && out.newGoal) {
-      log.info(`Accepted task from ${speaker}: ${out.newGoal}`)
-      memory.setGoal(out.newGoal, speaker)
-      memory.addEvent('task', `${speaker} asked you to: ${out.newGoal} (you agreed)`)
+    if (!out.isRequest || !out.task) return
+    const task = String(out.task).slice(0, 160)
+    log.info(`Request from ${speaker}: "${task}" → ${compliance.outcome} (chance ${compliance.chance}${compliance.reason ? `, ${compliance.reason}` : ''})`)
+    if (compliance.outcome === 'comply') {
+      memory.setGoal(task, speaker)
+      memory.addEvent('task', `${speaker} asked you to: ${task} (you agreed)`)
       agent.brain.onNewGoal()
+    } else if (compliance.outcome === 'defer') {
+      memory.addPendingRequest(speaker, task)
+      memory.addEvent('task', `${speaker} asked you to: ${task} (you said you'd do it later)`)
+    } else {
+      memory.addEvent('refused', `You turned down ${speaker}'s request: ${task}`)
     }
   }
 
-  /** Owner-only commands, e.g. "!mode silent". Also used by the console. */
+  /** Say something about a situation in character (used for refused commands, etc.). */
+  async sayNaturally (to, situation, whisper) {
+    const agent = this.agent
+    const out = await agent.llm.chat([
+      { role: 'system', content: `${personaBlock(agent.personality, agent.bot.username)}\n\nWrite ONE short in-character chat message (under 12 words). Respond with ONLY JSON: {"message": "...", "emotion": "<${EMOTIONS.join('|')}>", "emotionIntensity": 1-10}` },
+      { role: 'user', content: `${situation}\nHow you feel: ${agent.emotions.describe()}\nHow you feel about ${to}: ${agent.social.relationshipLine(to)}` }
+    ], { schema: MESSAGE_SCHEMA, priority: PRIORITY.reply, label: 'say' }).catch(() => ({ message: pick(agent.personality.fallbackRefusals || ['nah']) }))
+    if (out.message) await agent.chat.send(out.message, 'reply', { whisperTo: whisper ? to : undefined })
+  }
+
+  /** Owner/admin commands, e.g. "!mode silent". Also used by the console. */
   async handleCommand (username, text, whisper) {
     const agent = this.agent
-    const { memory, config, executor, brain, bot } = agent
-    const [cmd, ...rest] = text.split(/\s+/)
+    const { memory, config, executor, brain, bot, social, emotions } = agent
+    const [rawCmd, ...rest] = text.split(/\s+/)
+    const cmd = (rawCmd || 'help').toLowerCase()
     const arg = rest.join(' ')
     const reply = (msg) => {
       if (username === '@console') agent.log.info(msg)
       else agent.chat.send(msg, 'system', { whisperTo: whisper ? username : undefined })
     }
+    if (!this.canUseCommand(username, cmd)) return reply(`only ${config.commands.permissions[cmd] || 'owner'}s can use ${cmd}.`)
 
-    switch ((cmd || '').toLowerCase()) {
+    // Admin action commands can be subject to the same "will I actually do it?" roll as chat requests.
+    const rollFor = async (what) => {
+      if (!config.obedience.applyToCommands || social.role(username) === 'owner') return true
+      const c = social.decideCompliance(username)
+      if (c.outcome === 'comply') return true
+      await this.sayNaturally(username, `${username} told you to ${what}. You're ${c.outcome === 'defer' ? 'going to do it later, not now' : 'not doing it'} (${c.reason}).`, whisper)
+      if (c.outcome === 'defer') memory.addPendingRequest(username, what)
+      return false
+    }
+
+    switch (cmd) {
       case 'stop':
+        if (!(await rollFor('stop what you are doing'))) return
         executor.abort(`stopped by ${username}`)
         brain.clearForced()
         return reply('ok, stopping.')
@@ -1005,16 +1200,18 @@ Reply to ${speaker}'s latest message${batch.length > 1 ? 's' : ''}: ${batch.filt
         return reply('resuming.')
       case 'mode':
         if (!CHAT_MODES.includes(arg)) return reply(`chat mode is "${config.chat.mode}". options: ${CHAT_MODES.join(', ')}`)
-        config.chat.mode = arg
+        agent.applySetting('chat.mode', arg)
         return reply(`chat mode set to ${arg}.`)
       case 'goal':
         if (!arg) return reply(`goal: ${memory.goal || 'none'}`)
+        if (arg !== 'clear' && !(await rollFor(arg))) return
         memory.setGoal(arg === 'clear' ? '' : arg, username)
         brain.onNewGoal()
         return reply(arg === 'clear' ? 'goal cleared.' : `new goal: ${arg}`)
       case 'come':
       case 'follow': {
         if (username === '@console') return reply('the console has no position; use !goal instead.')
+        if (!(await rollFor(cmd === 'come' ? 'come to them' : 'follow them'))) return
         const name = cmd === 'come' ? 'moveToPlayer' : 'followPlayer'
         executor.abort(`${cmd} requested by ${username}`)
         brain.queueAction({ name, args: { playerName: username, durationSeconds: 60 } }, `${username} told me to ${cmd}`)
@@ -1028,17 +1225,190 @@ Reply to ${speaker}'s latest message${batch.length > 1 ? 's' : ''}: ${batch.filt
         return reply(`personality switched to ${arg}.`)
       }
       case 'reactions':
-        config.reactions.enabled = arg !== 'off'
+        agent.applySetting('reactions.enabled', arg !== 'off')
         return reply(`reactions ${config.reactions.enabled ? 'on' : 'off'}.`)
       case 'status': {
         const s = agent.perception?.latest
-        return reply(`hp ${Math.round(bot.health)} food ${bot.food} | doing ${executor.current?.name || 'nothing'} | goal: ${memory.goal || 'none'} | mood ${memory.currentMood().emotion}${s ? ` | at ${Math.floor(s.self.position.x)} ${Math.floor(s.self.position.y)} ${Math.floor(s.self.position.z)}` : ''}`)
+        return reply(`hp ${Math.round(bot.health)} food ${bot.food} | doing ${executor.current?.name || 'nothing'} | goal: ${memory.goal || 'none'} | feeling ${emotions.dominant().label}${s ? ` | at ${Math.floor(s.self.position.x)} ${Math.floor(s.self.position.y)} ${Math.floor(s.self.position.z)}` : ''}`)
       }
+
+      case 'emotion': {
+        // !emotion | !emotion <label> [1-10] | !emotion lock <label> [1-10] | !emotion unlock | !emotion volatility <0-3>
+        const [sub, a1, a2] = rest
+        if (!sub) return reply(`feeling ${emotions.describe()}${config.emotions.lock ? ' (locked)' : ''}`)
+        if (sub === 'unlock') { agent.applySetting('emotions.lock', null); return reply('emotions unlocked.') }
+        if (sub === 'volatility' || sub === 'decay') {
+          const key = sub === 'volatility' ? 'emotions.volatility' : 'emotions.decayPerMinute'
+          const r = agent.applySetting(key, a1, username)
+          return reply(r.ok ? `${key} = ${r.value}` : r.error)
+        }
+        const lock = sub === 'lock'
+        const label = (lock ? a1 : sub)?.toLowerCase()
+        const intensity = clampInt(lock ? a2 : a1, 1, 10, 7)
+        if (!LABEL_TO_CORE[label]) return reply(`emotions: ${Object.keys(LABEL_TO_CORE).join(', ')}`)
+        if (lock) {
+          agent.applySetting('emotions.lock', label)
+          agent.applySetting('emotions.lockIntensity', intensity)
+          return reply(`emotion locked to ${label} (${intensity}/10).`)
+        }
+        emotions.setTo(label, intensity)
+        return reply(`now feeling ${label}.`)
+      }
+
+      case 'trust': {
+        // !trust | !trust <player> | !trust <player> <0-100> | !trust <player> reset
+        const [who, value] = rest
+        if (!who) {
+          const known = Object.values(social.players).sort((a, b) => a.trust - b.trust).slice(0, 6)
+          return reply(known.length ? known.map((p) => `${p.name}:${Math.round(p.trust)}`).join(' ') : 'no one known yet.')
+        }
+        if (value === undefined) return reply(social.relationshipLine(who, { notes: 3 }).slice(0, 240))
+        if (value === 'reset') { social.setTrust(who, config.trust.initial); return reply(`${who}'s trust reset to ${config.trust.initial}.`) }
+        if (!Number.isFinite(Number(value))) return reply('usage: trust <player> <0-100|reset>')
+        social.setTrust(who, Number(value))
+        return reply(`${who}'s trust set to ${Math.round(social.profile(who).trust)}.`)
+      }
+      case 'forget':
+        if (!arg) return reply('usage: forget <player>')
+        social.forget(arg)
+        return reply(`forgot everything about ${arg}.`)
+
+      case 'obey': {
+        // !obey | !obey <owner|admin|trusted|player|favor|defer> <0-1> | !obey who <everyone|trusted|admins|owners|nobody>
+        const [what, value] = rest
+        const o = config.obedience
+        if (!what) return reply(`who: ${o.whoCanInstruct} | owner ${o.chance.owner} admin ${o.chance.admin} trusted ${o.chance.trusted} player ${o.chance.player} favor ${o.favorChance} defer ${o.deferChance}`)
+        const key = what === 'who' ? 'obedience.whoCanInstruct'
+          : what === 'favor' ? 'obedience.favorChance'
+            : what === 'defer' ? 'obedience.deferChance'
+              : `obedience.chance.${what}`
+        const r = agent.applySetting(key, value, username)
+        return reply(r.ok ? `${key} = ${r.value}` : r.error)
+      }
+
+      case 'admin': {
+        const [sub, who] = rest
+        if (sub === 'add' && who) { agent.setAdmin(who, true); return reply(`${who} is now an admin.`) }
+        if (sub === 'remove' && who) { agent.setAdmin(who, false); return reply(`${who} is no longer an admin.`) }
+        const all = [...config.behavior.admins, ...agent.runtimeAdmins]
+        return reply(`admins: ${all.join(', ') || 'none'} | usage: admin add|remove <player>`)
+      }
+
+      case 'set': {
+        const [key, ...v] = rest
+        if (!key) return reply(`usage: set <key> <value>. keys: ${Object.keys(SETTABLE).join(', ')}`.slice(0, 250))
+        if (v[0] === 'reset') { const r = agent.resetSetting(key, username); return reply(r.ok ? `${key} reset to ${JSON.stringify(r.value)}` : r.error) }
+        const r = agent.applySetting(key, v.join(' '), username)
+        return reply(r.ok ? `${key} = ${JSON.stringify(r.value)}` : r.error)
+      }
+      case 'get': {
+        if (!SETTABLE[arg]) return reply(`unknown key. keys: ${Object.keys(SETTABLE).join(', ')}`.slice(0, 250))
+        return reply(`${arg} = ${JSON.stringify(getPath(config, arg))}`)
+      }
+      case 'settings': {
+        if (rest[0] === 'reset') {
+          for (const k of Object.keys(agent.settingOverrides)) agent.resetSetting(k, username)
+          return reply('all in-game settings reset to config.json values.')
+        }
+        const o = agent.settingOverrides
+        return reply(Object.keys(o).length ? `changed in game: ${Object.entries(o).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ')}`.slice(0, 250) : 'no in-game changes; using config.json.')
+      }
+      case 'lessons': {
+        const l = agent.learning.lessons.top(5)
+        const combat = agent.learning.combat.summary(3)
+        return reply([...l, ...combat].join(' | ').slice(0, 250) || 'nothing learned yet.')
+      }
+      case 'save':
+        agent.learning.save()
+        return reply('saved.')
+
       case 'help':
       default:
-        return reply('commands: stop, pause, resume, mode <silent|respond|unprompted|both>, goal <text|clear>, come, follow, persona <name>, reactions <on|off>, status')
+        return reply('commands: status stop pause resume come follow goal mode emotion trust obey admin set get settings persona reactions lessons forget save')
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// In-game settings (!set / !obey / !emotion): what may change and how values parse
+// ---------------------------------------------------------------------------
+
+const num = (min, max) => ({ type: 'number', min, max })
+const BOOL = { type: 'boolean' }
+const oneOf = (...values) => ({ type: 'enum', values })
+
+const SETTABLE = {
+  'chat.mode': oneOf(...CHAT_MODES),
+  'chat.respondTo': oneOf('mentions', 'everyone', 'whitelist'),
+  'chat.unaddressedReplyChance': num(0, 1),
+  'chat.unprompted.chance': num(0, 1),
+  'chat.unprompted.intervalSeconds': num(10, 3600),
+  'chat.reactionsInRespondMode': BOOL,
+  'chat.goalChangeInterrupts': BOOL,
+  'reactions.enabled': BOOL,
+  'reactions.gestures': BOOL,
+  'obedience.whoCanInstruct': oneOf('everyone', 'trusted', 'admins', 'owners', 'nobody'),
+  'obedience.chance.owner': num(0, 1),
+  'obedience.chance.admin': num(0, 1),
+  'obedience.chance.trusted': num(0, 1),
+  'obedience.chance.player': num(0, 1),
+  'obedience.favorChance': num(0, 1),
+  'obedience.deferChance': num(0, 1),
+  'obedience.ownerBypass': BOOL,
+  'obedience.applyToCommands': BOOL,
+  'obedience.trustedThreshold': num(0, 100),
+  'emotions.enabled': BOOL,
+  'emotions.volatility': num(0, 3),
+  'emotions.decayPerMinute': num(0, 1),
+  'emotions.lock': { type: 'enum', values: [null, ...Object.keys(LABEL_TO_CORE)] },
+  'emotions.lockIntensity': num(1, 10),
+  'trust.enabled': BOOL,
+  'trust.initial': num(0, 100),
+  'trust.recoveryPerHour': num(0, 100),
+  'trust.ignoreHostileChance': num(0, 1),
+  'pvp.mode': oneOf('never', 'defensive', 'always'),
+  'pvp.allowSparring': BOOL,
+  'pvp.neverAttackOwners': BOOL,
+  'learning.reflect': BOOL,
+  'learning.epsilon': num(0, 1)
+}
+
+function getPath (obj, key) {
+  return key.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj)
+}
+
+function setPath (obj, key, value) {
+  const parts = key.split('.')
+  const last = parts.pop()
+  const target = parts.reduce((o, k) => (o[k] = isPlainObject(o[k]) ? o[k] : {}), obj)
+  target[last] = value
+}
+
+/** Parse a string from chat into a validated setting value. */
+function parseSetting (key, raw) {
+  const spec = SETTABLE[key]
+  if (!spec) return { error: `"${key}" can't be changed in game.` }
+  const v = typeof raw === 'string' ? raw.trim() : raw
+  switch (spec.type) {
+    case 'number': {
+      const n = typeof v === 'number' ? v : Number(String(v).replace('%', '')) / (String(v).endsWith('%') ? 100 : 1)
+      if (!Number.isFinite(n)) return { error: `${key} needs a number between ${spec.min} and ${spec.max}.` }
+      return { value: Math.min(spec.max, Math.max(spec.min, n)) }
+    }
+    case 'boolean': {
+      if (typeof v === 'boolean') return { value: v }
+      if (/^(on|true|yes|1)$/i.test(v)) return { value: true }
+      if (/^(off|false|no|0)$/i.test(v)) return { value: false }
+      return { error: `${key} needs on/off.` }
+    }
+    case 'enum': {
+      const val = v === null || /^(null|none|off)$/i.test(String(v)) ? null : String(v).toLowerCase()
+      const match = spec.values.find((x) => (x === null ? val === null : x.toLowerCase() === val))
+      if (match === undefined) return { error: `${key} must be one of: ${spec.values.filter(Boolean).join(', ')}` }
+      return { value: match }
+    }
+  }
+  return { error: 'unsupported setting' }
 }
 
 // ===========================================================================
@@ -1079,7 +1449,8 @@ class SmallTalk {
     const others = Object.keys(bot.players).filter((n) => n !== bot.username)
     if (cfg.requirePlayersOnline && others.length === 0) return
     if (cfg.requirePlayersNearby && !others.some((n) => bot.players[n]?.entity?.position.distanceTo(bot.entity.position) < 32)) return
-    if (Math.random() > cfg.chance) return
+    // Happy people chat more; sad or scared people go quiet.
+    if (Math.random() > cfg.chance * agent.emotions.modifiers().talkativeness) return
 
     const mine = memory.chat.filter((c) => c.self).slice(-5).map((c) => `- ${c.text}`).join('\n') || '- (nothing yet)'
     const system = `${personaBlock(personality, bot.username)}
@@ -1089,15 +1460,17 @@ Good topics: ${(personality.chatTopics || []).join('; ')}. Keep it to one short,
 Do not repeat or paraphrase what you said recently. If nothing natural comes to mind, return "".
 Respond with ONLY JSON: {"message": "...", "emotion": "<${EMOTIONS.join('|')}>", "emotionIntensity": 1-10}`
     const user = `Your status: ${briefStatus(agent.perception?.latest)}
+How you feel: ${agent.emotions.describe()}
 Recent events: ${memory.events.slice(-5).map((e) => e.text).join('; ') || 'none'}
-Online players: ${others.join(', ') || 'none'}
+People online:
+${agent.social.peopleSummary(others.slice(0, 5)) || 'none'}
 Things you said recently:
 ${mine}`
 
     const out = await agent.llm.chat([{ role: 'system', content: system }, { role: 'user', content: user }],
       { schema: MESSAGE_SCHEMA, priority: PRIORITY.smalltalk, label: 'smalltalk', temperature: 0.9 })
     if (out.message) {
-      memory.setMood(out.emotion, out.emotionIntensity)
+      agent.emotions.fromLabel(out.emotion, out.emotionIntensity)
       await agent.chat.send(out.message, 'unprompted')
     }
   }
@@ -1114,9 +1487,12 @@ class EventReactor {
     this.lastReactionAt = 0
     this.spawnedAt = 0
     this.prev = { health: 20, food: 20, phase: null, raining: false, level: null }
+    this.healthLog = [] // { at, h } — to know health *before* a hit
     this.seenNearbyPlayers = new Map() // username -> last time seen nearby
     this.seenHostiles = new Set()
+    this.drops = new Map() // item entity id -> { player, at } (who tossed it)
     this.pendingDeathCause = null
+    this.pendingKiller = null
   }
 
   /** Event config = global config ← personality overrides. */
@@ -1126,7 +1502,16 @@ class EventReactor {
     return base || override ? deepMerge(base || {}, override || {}) : null
   }
 
+  healthBefore (bot) {
+    const cutoff = Date.now() - 700
+    const older = this.healthLog.filter((x) => x.at <= Date.now() - 150 && x.at >= cutoff)
+    return Math.max(bot.health, ...older.map((x) => x.h), this.healthLog.length ? this.healthLog[this.healthLog.length - 1].h : bot.health)
+  }
+
   attach (bot) {
+    const agent = this.agent
+    const { social, emotions, learning } = agent
+
     bot.once('spawn', () => {
       this.spawnedAt = Date.now()
       this.prev.level = bot.experience?.level ?? null
@@ -1136,6 +1521,7 @@ class EventReactor {
 
     bot.on('playerJoined', (player) => {
       if (player.username === bot.username || Date.now() - this.spawnedAt < 10000) return
+      if (social.isHostile(player.username)) emotions.stimulate({ fear: 0.08, anger: 0.08 }, `${player.username} is back`)
       this.trigger('playerJoined', { player: player.username })
     })
     bot.on('playerLeft', (player) => {
@@ -1143,33 +1529,86 @@ class EventReactor {
       this.trigger('playerLeft', { player: player.username })
     })
 
-    bot.on('death', () => this.trigger('death', { cause: this.pendingDeathCause || 'unknown causes' }))
-
-    // Death messages ("Steve was slain by Zombie") arrive as translated system chat.
+    // Death messages ("Steve was slain by Alex") arrive as translated system chat.
     bot.on('message', (jsonMsg) => {
       const key = jsonMsg?.translate
       if (!key || !key.startsWith('death.')) return
       const victim = safe(() => jsonMsg.with?.[0]?.toString())
+      const killerName = safe(() => jsonMsg.with?.[1]?.toString())
+      const killer = killerName && bot.players[killerName] && killerName !== victim ? killerName : null
       const text = jsonMsg.toString()
-      if (victim === bot.username) this.pendingDeathCause = text
-      else if (victim) this.trigger('playerDied', { player: victim, cause: text })
+      if (victim === bot.username) {
+        this.pendingDeathCause = text
+        this.pendingKiller = killer
+      } else if (victim) {
+        if (killer) social.onPlayerKilled(victim, killer)
+        this.trigger('playerDied', { player: victim, cause: text })
+      }
     })
 
-    bot.on('entityHurt', (entity) => {
-      if (entity !== bot.entity) return
-      const attacker = Object.values(bot.entities)
-        .filter((e) => e !== bot.entity && (e.type === 'player' || e.kind === 'Hostile mobs') && e.position.distanceTo(bot.entity.position) < 6)
-        .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0]
-      this.agent.lastHurtAt = Date.now()
-      this.trigger('hurt', { attacker: attacker ? attacker.username || attacker.name : 'something', health: Math.round(bot.health) })
-      this.agent.brain?.onDamage()
+    bot.on('death', () => {
+      const cause = this.pendingDeathCause || 'unknown causes'
+      const killer = this.pendingKiller
+      learning.stats.deaths++
+      learning.markDirty()
+      if (killer) {
+        social.onKilledBy(killer)
+        this.trigger('killedByPlayer', { player: killer, cause })
+      } else {
+        emotions.stimulate({ sadness: 0.35, fear: 0.15 }, 'you died')
+        // Environmental deaths teach the pathfinder to avoid that spot.
+        if (/lava|fell|fall|drown|burn|fire|suffocat|void|magma|cactus|berry|blew up|explod|withered|froze/i.test(cause) && bot.entity) {
+          learning.movement.addDanger(bot.entity.position, cause.replace(bot.username, 'you'), 3)
+        }
+        this.trigger('death', { cause })
+      }
+      learning.reflect(`You died: "${cause}". Just before: ${agent.memory.events.slice(-4).map((e) => e.text).join('; ')}`)
+      this.pendingDeathCause = null
+      this.pendingKiller = null
+    })
+
+    // On 1.20+ the server tells us who caused the damage; older versions: guess from arm swings.
+    bot.on('entityHurt', (entity, source) => {
+      if (!entity) return
+      if (entity === bot.entity) return this.onSelfHurt(bot, source)
+      const attacker = source?.type === 'player' ? source : source ? null : this.guessAttackerOf(bot, entity)
+      if (attacker) social.onEntityHarmed(entity, attacker)
+    })
+    bot.on('entitySwingArm', (entity) => social.onSwing(entity))
+    bot.on('entityUncrouch', (entity) => social.onCrouch(entity))
+
+    // Remember who tossed each dropped item, so picking it up counts as a gift from them.
+    bot.on('entitySpawn', (entity) => {
+      if (entity.name !== 'item') return
+      const thrower = Object.values(bot.players)
+        .map((p) => p.entity)
+        .find((e) => e && e !== bot.entity && e.position.offset(0, 1.3, 0).distanceTo(entity.position) < 1.6)
+      if (thrower) this.drops.set(entity.id, { player: thrower.username, at: Date.now() })
+      if (this.drops.size > 200) for (const [id, d] of this.drops) if (Date.now() - d.at > 60000) this.drops.delete(id)
+    })
+    bot.on('playerCollect', (collector, collected) => {
+      if (collector !== bot.entity) return
+      const item = safe(() => collected.getDroppedItem?.())
+      if (!item) return
+      const from = this.drops.get(collected.id)
+      this.drops.delete(collected.id)
+      if (from && Date.now() - from.at < 60000) social.onGift(from.player, item.name, item.count)
+      this.trigger('itemPickup', { item: item.name })
     })
 
     bot.on('health', () => {
+      this.healthLog.push({ at: Date.now(), h: bot.health })
+      if (this.healthLog.length > 20) this.healthLog.shift()
       const low = this.eventConfig('lowHealth')?.threshold ?? 8
       const hungry = this.eventConfig('hungry')?.threshold ?? 6
-      if (bot.health > 0 && bot.health <= low && this.prev.health > low) this.trigger('lowHealth', { health: Math.round(bot.health) })
-      if (bot.food <= hungry && this.prev.food > hungry) this.trigger('hungry', { food: bot.food })
+      if (bot.health > 0 && bot.health <= low && this.prev.health > low) {
+        emotions.stimulate({ fear: 0.25 }, 'your health is low')
+        this.trigger('lowHealth', { health: Math.round(bot.health) })
+      }
+      if (bot.food <= hungry && this.prev.food > hungry) {
+        emotions.stimulate({ anger: 0.05, sadness: 0.05 }, "you're hungry")
+        this.trigger('hungry', { food: bot.food })
+      }
       this.prev.health = bot.health
       this.prev.food = bot.food
     })
@@ -1177,28 +1616,55 @@ class EventReactor {
     bot.on('time', () => {
       const phase = timePhase(bot.time.timeOfDay)
       if (this.prev.phase && phase !== this.prev.phase) {
-        if (phase === 'night') this.trigger('nightfall', {})
-        if (phase === 'dawn') this.trigger('daybreak', {})
+        if (phase === 'night') { emotions.stimulate({ fear: 0.08 }, 'night is falling'); this.trigger('nightfall', {}) }
+        if (phase === 'dawn') { emotions.stimulate({ joy: 0.06, fear: -0.1 }); this.trigger('daybreak', {}) }
       }
       this.prev.phase = phase
     })
 
     bot.on('rain', () => {
-      if (bot.isRaining && !this.prev.raining) this.trigger('rainStart', {})
+      if (bot.isRaining && !this.prev.raining) { emotions.stimulate({ sadness: 0.03 }); this.trigger('rainStart', {}) }
       this.prev.raining = bot.isRaining
     })
 
     bot.on('experience', () => {
       const level = bot.experience?.level
-      if (this.prev.level !== null && level > this.prev.level) this.trigger('levelUp', { level })
+      if (this.prev.level !== null && level > this.prev.level) { emotions.stimulate({ joy: 0.15 }, `you reached level ${level}`); this.trigger('levelUp', { level }) }
       this.prev.level = level
     })
+  }
 
-    bot.on('playerCollect', (collector, collected) => {
-      if (collector !== bot.entity) return
-      const item = safe(() => collected.getDroppedItem?.()?.name)
-      if (item) this.trigger('itemPickup', { item })
-    })
+  onSelfHurt (bot, source) {
+    const agent = this.agent
+    const { social, emotions, learning } = agent
+    agent.lastHurtAt = Date.now()
+    const before = this.healthBefore(bot)
+    const attacker = source?.type === 'player' ? source : source ? null : social.guessAttacker(bot)
+
+    if (attacker) {
+      agent.lastAttacker = { name: attacker.username, id: attacker.id, at: Date.now() }
+      social.onHurtBy(attacker, { botHealthBefore: before })
+    } else {
+      const mob = source || Object.values(bot.entities)
+        .filter((e) => e !== bot.entity && e.kind === 'Hostile mobs' && e.position.distanceTo(bot.entity.position) < 6)
+        .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0]
+      if (mob) {
+        emotions.stimulate({ fear: 0.1, anger: 0.05 }, `a ${mob.name} is attacking you`)
+      } else if (agent.recentFallSpeed < -0.6) {
+        // Fell while moving: probably bad parkour. Enough of these and parkour gets switched off for a while.
+        if (learning.movement.recordFall()) agent.memory.addEvent('learning', 'You keep hurting yourself jumping around, so you stop doing risky parkour jumps for a while.')
+      }
+      this.trigger('hurt', { attacker: mob ? mob.name : 'something', health: Math.round(bot.health) })
+    }
+    agent.brain?.onDamage()
+  }
+
+  /** Pre-1.20: a player who just swung their arm right next to the victim. */
+  guessAttackerOf (bot, victim) {
+    return Object.values(bot.players)
+      .map((p) => p.entity)
+      .find((e) => e && e !== bot.entity && e !== victim && e.position.distanceTo(victim.position) < 4.5 &&
+        Date.now() - this.agent.social.t(e.username).swingAt < 600) || null
   }
 
   /** Called on every perception tick to detect proximity-based events. */
@@ -1226,7 +1692,9 @@ class EventReactor {
       case 'playerLeft': return `${d.player} left the game.`
       case 'playerNearby': return `${d.player} came close to you.`
       case 'death': return `You died (${d.cause}). You respawned and lost your items where you died.`
+      case 'killedByPlayer': return `${d.player} killed you (${d.cause}). You respawned and lost your items.`
       case 'hurt': return `You took damage from ${d.attacker} (health ${d.health}/20).`
+      case 'attackedByPlayer': return `${d.player} hit you with ${d.item === 'fist' ? 'their fist' : `a ${d.item}`}${d.streak > 1 ? ` (${d.streak} hits in a row)` : ''}. Your trust in them: ${d.trust}/100.`
       case 'lowHealth': return `Your health is low (${d.health}/20).`
       case 'hungry': return `You are getting hungry (food ${d.food}/20).`
       case 'playerDied': return `${d.player} died: "${d.cause}".`
@@ -1238,6 +1706,13 @@ class EventReactor {
       case 'rainStart': return 'It started raining.'
       case 'levelUp': return `You reached XP level ${d.level}.`
       case 'itemPickup': return `You picked up ${d.item}.`
+      case 'gift': return `${d.player} gave you ${d.count} ${d.item}.`
+      case 'promiseKept': return `${d.player} kept their promise: ${d.promise}.`
+      case 'promiseBroken': return `${d.player} broke their promise: ${d.promise}.`
+      case 'harmNearby': return `${d.player} attacked ${d.victim} right next to you.`
+      case 'crouchGreeting': return `${d.player} crouch-greeted you (a friendly hello).`
+      case 'wonFight': return `You won a fight against ${d.label}.`
+      case 'lostFight': return `You had to back off from a fight with ${d.label}.`
       default: return `${type} happened.`
     }
   }
@@ -1250,10 +1725,10 @@ class EventReactor {
   trigger (type, data = {}) {
     const agent = this.agent
     const { memory, config, bot, log } = agent
-    if (!bot?.entity && type !== 'death') return
+    if (!bot?.entity && type !== 'death' && type !== 'killedByPlayer') return
     const text = this.describe(type, data)
-    // Always remember the event so the decision loop can take it into account.
-    if (type !== 'itemPickup') memory.addEvent(type, text)
+    // Remember the event so the decision loop can take it into account (trust changes are logged by social.js).
+    if (!REMEMBERED_BY_SOCIAL.has(type)) memory.addEvent(type, text)
     log.debug(`event ${type}: ${text}`)
 
     const cfg = this.eventConfig(type)
@@ -1272,20 +1747,24 @@ class EventReactor {
 
   async react (type, cfg, data, text) {
     const agent = this.agent
-    const { bot, config, executor, memory, personality } = agent
+    const { bot, config, executor, personality, social, emotions } = agent
+    const wary = data.player && social.profile(data.player).trust < config.trust.waryBelow
 
     // Body language first — only when idle so we don't fight the current action for control.
-    if (cfg.gesture && config.reactions.gestures && !executor.busy && !agent.dead) {
+    // Nobody waves at someone who just stabbed them.
+    const friendlyGesture = ['wave', 'crouch', 'nod', 'jump', 'spin'].includes(cfg.gesture)
+    if (cfg.gesture && config.reactions.gestures && !executor.busy && !agent.dead && !(wary && friendlyGesture)) {
       const target = data.player ? bot.players[data.player]?.entity : data.entityId ? bot.entities[data.entityId] : null
       if (target) await bot.lookAt(target.position.offset(0, target.height ?? 1.6, 0)).catch(() => {})
       await performGesture(bot, cfg.gesture).catch(() => {})
     }
 
     const style = cfg.style || 'template'
+    const templates = (wary && cfg.templatesWary?.length) ? cfg.templatesWary : cfg.templates
     if (style === 'gesture' || style === 'silent' || !agent.chat.allows('reaction')) {
       // gesture-style events may still have a line of chat as a fallback when idle
-      if (style === 'gesture' && cfg.templates?.length && agent.chat.allows('reaction') && Math.random() < 0.3) {
-        await agent.chat.send(this.fill(pick(cfg.templates), data), 'reaction')
+      if (style === 'gesture' && templates?.length && agent.chat.allows('reaction') && Math.random() < 0.3 && !wary) {
+        await agent.chat.send(this.fill(pick(templates), data), 'reaction')
       }
       return
     }
@@ -1297,24 +1776,52 @@ class EventReactor {
 
 Something just happened in the game. React the way your character genuinely would, with ONE very short chat message (under 12 words) — or "" if you'd honestly just stay quiet. No emojis, no quotes.
 Respond with ONLY JSON: {"message": "...", "emotion": "<${EMOTIONS.join('|')}>", "emotionIntensity": 1-10}`
+        const about = data.player ? `\nHow you feel about ${data.player}: ${social.relationshipLine(data.player, { notes: 3 })}` : ''
         const out = await agent.llm.chat([
           { role: 'system', content: system },
-          { role: 'user', content: `Event: ${text}\nYour status: ${briefStatus(agent.perception?.latest)}` }
+          { role: 'user', content: `Event: ${text}\nHow you feel: ${emotions.describe()}${about}\nYour status: ${briefStatus(agent.perception?.latest)}` }
         ], { schema: MESSAGE_SCHEMA, priority: PRIORITY.reaction, label: `reaction:${type}`, temperature: 0.9 })
-        memory.setMood(out.emotion, out.emotionIntensity)
+        emotions.fromLabel(out.emotion, out.emotionIntensity)
         message = out.message
       } catch (err) {
         agent.log.debug(`LLM reaction failed, using template: ${err.message}`)
       }
     }
-    if (message === null && cfg.templates?.length) message = this.fill(pick(cfg.templates), data)
+    if (message === null && templates?.length) message = this.fill(pick(templates), data)
     if (message) await agent.chat.send(message, 'reaction')
   }
 }
 
+// These already write a (more detailed) memory event through social.js.
+const REMEMBERED_BY_SOCIAL = new Set(['attackedByPlayer', 'gift', 'promiseKept', 'promiseBroken', 'harmNearby'])
+
 // ===========================================================================
 // Brain — the throttled perceive → decide → act loop
 // ===========================================================================
+
+const MOVEMENT_ACTIONS = new Set(['moveToBlock', 'moveToPlayer', 'explore', 'mineBlock', 'collectDrops', 'followPlayer', 'retreat'])
+
+const WEAPON_POWER = { wooden: 4, golden: 4, stone: 5, iron: 6, diamond: 7, netherite: 8 }
+function weaponPower (name) {
+  if (!name) return 1
+  if (name === 'mace' || name === 'trident') return 8
+  const m = name.match(/^(\w+?)_(sword|axe)$/)
+  return m ? (WEAPON_POWER[m[1]] || 4) : 1
+}
+const ARMOR_TIER = { leather: 1, golden: 2, chainmail: 2, turtle: 2, iron: 3, diamond: 4, netherite: 5 }
+function armorTier (name) {
+  const m = name && name.match(/^(\w+?)_(helmet|chestplate|leggings|boots)$/)
+  return m ? (ARMOR_TIER[m[1]] || 1) : 0
+}
+
+function wordOverlap (a, b) {
+  const A = new Set(String(a).toLowerCase().match(/[a-z]+/g) || [])
+  const B = new Set(String(b).toLowerCase().match(/[a-z]+/g) || [])
+  if (!A.size || !B.size) return 0
+  let n = 0
+  for (const w of A) if (B.has(w)) n++
+  return n / Math.min(A.size, B.size)
+}
 
 // Classified as hostile by minecraft-data, but they leave you alone unless provoked.
 const NEUTRAL_MOBS = new Set(['enderman', 'zombified_piglin', 'piglin', 'spider', 'bee', 'wolf', 'polar_bear', 'llama', 'goat', 'iron_golem'])
@@ -1385,7 +1892,7 @@ class Brain {
     while (this.running) {
       try {
         const agent = this.agent
-        if (this.paused || !agent.bot?.entity || agent.dead) { await this.idle(1000); continue }
+        if (this.paused || !agent.bot?.entity || agent.dead || agent.bot.isSleeping) { await this.idle(1000); continue }
 
         let decision = this.forced.shift() || this.reflex()
         if (!decision) {
@@ -1405,6 +1912,7 @@ class Brain {
         if (result.ok) log.info(`✔ ${name}: ${result.message} (${(result.durationMs / 1000).toFixed(1)}s)`)
         else log.warn(`✘ ${name} [${result.code}]: ${result.message}`)
         if (!result.ok && decision.source === 'reflex') this.reflexCooldowns.set(decision.reflexKey, Date.now())
+        this.learnFrom(name, result)
 
         this.backoff = config.loop.errorBackoffMs
         await this.idle(config.loop.postActionDelayMs)
@@ -1417,15 +1925,46 @@ class Brain {
     log.info('Brain loop stopped.')
   }
 
+  /** Feelings and movement lessons from every action result. */
+  learnFrom (name, result) {
+    const { emotions, learning, memory, bot } = this.agent
+    if (MOVEMENT_ACTIONS.has(name)) learning.movement.recordResult(result, bot.entity?.position)
+    if (name === 'wait') emotions.stimulate({ boredom: 0.05 })
+    else if (result.ok) emotions.stimulate({ joy: 0.03, boredom: -0.06 })
+    else if (result.code !== 'ABORTED') emotions.stimulate({ anger: 0.04, boredom: -0.03 }, result.code === 'BUSY' ? null : 'things keep going wrong')
+    if (!result.ok && memory.failureStreak() === 3) {
+      const last = memory.actions.slice(-3).map((a) => `${a.action}(${JSON.stringify(a.args)}) → ${a.code}: ${a.message}`).join('; ')
+      learning.reflect(`Three actions in a row failed: ${last}`)
+    }
+  }
+
+  /** Weapon + armor comparison, personality, mood and health → 'fight' or 'flee'. */
+  fightOrFlight (attacker) {
+    const { bot, personality, emotions, config, social, learning } = this.agent
+    const name = attacker.username
+    if (config.pvp.mode === 'never' || (config.pvp.neverAttackOwners && social.role(name) === 'owner')) return 'flee'
+    const myWeapon = Math.max(1, ...bot.inventory.items().map((i) => weaponPower(i.name)))
+    const myArmor = ['head', 'torso', 'legs', 'feet'].reduce((a, d) => a + armorTier(safe(() => bot.inventory.slots[bot.getEquipmentDestSlot(d)]?.name)), 0)
+    const theirWeapon = weaponPower(attacker.heldItem?.name)
+    const theirArmor = (attacker.equipment || []).reduce((a, i) => a + armorTier(i?.name), 0)
+    let score = (personality.fightOrFlight ?? 0.5) +
+      emotions.modifiers().aggression * 0.4 +
+      (bot.health - 10) / 20 +
+      ((myWeapon + myArmor / 2) - (theirWeapon + theirArmor / 2)) / 12
+    const record = learning.combat.recordFor(`player:${name}`)
+    if (record && record.losses > record.wins) score -= 0.15
+    return score >= 0.5 ? 'fight' : 'flee'
+  }
+
   /**
    * Instinctive, LLM-free behaviours: fight back, flee, eat.
    * Cheap, instant, and they save LLM calls for interesting decisions.
    * @param {boolean} dryRun only report whether a reflex applies
    */
   reflex (dryRun = false) {
-    const { bot, config, memory } = this.agent
+    const { bot, config } = this.agent
     const b = config.behavior
-    if (!bot.entity) return null
+    if (!bot.entity || bot.isSleeping) return null
     const ready = (key, ms = 30000) => Date.now() - (this.reflexCooldowns.get(key) || 0) > ms
     const me = bot.entity.position
     const hostiles = Object.values(bot.entities)
@@ -1435,6 +1974,26 @@ class Brain {
     const dist = nearest ? nearest.position.distanceTo(me) : Infinity
     const recentlyHurt = Date.now() - (this.agent.lastHurtAt || 0) < 5000
     const make = (reflexKey, thought, emotion, action) => dryRun ? true : { source: 'reflex', reflexKey, thought, emotion, action }
+    const social = this.agent.social
+
+    // A player is attacking us for real (not a single friendly punch): fight back or get away.
+    const la = this.agent.lastAttacker
+    if (la && Date.now() - la.at < 4000) {
+      const attacker = bot.entities[la.id]
+      const serious = social.isHostile(la.name) || social.t(la.name).hits.length >= 2
+      if (attacker?.isValid && attacker.position.distanceTo(me) < 8 && serious && ready(`pvp:${la.name}`, 4000)) {
+        if (this.fightOrFlight(attacker) === 'fight') {
+          return make(`pvp:${la.name}`, `${la.name} keeps attacking me — fighting back.`, 'angry', { name: 'attackTarget', args: { entityId: attacker.id, maxSeconds: 30 } })
+        }
+        return make(`pvp:${la.name}`, `${la.name} is attacking me and I can't win this — getting out of here.`, 'scared', { name: 'retreat', args: { entityId: attacker.id, distance: 20 } })
+      }
+    }
+    // Someone who's hurt us before is closing in with a weapon out: keep our distance unless we're confident.
+    const threat = Object.values(bot.players).map((p) => p.entity).find((e) => e && e !== bot.entity &&
+      e.position.distanceTo(me) < 5 && social.isHostile(e.username) && e.heldItem && WEAPON.test(e.heldItem.name))
+    if (threat && ready('keepAway', 15000) && this.fightOrFlight(threat) === 'flee') {
+      return make('keepAway', `${threat.username} is coming at me armed. Not sticking around.`, 'nervous', { name: 'retreat', args: { entityId: threat.id, distance: 14 } })
+    }
 
     if (nearest && (bot.health <= b.fleeHealthBelow || (nearest.name === 'creeper' && dist < 5)) && ready('flee', 5000)) {
       return make('flee', `Too dangerous — getting away from the ${nearest.name}.`, 'scared', { name: 'retreat', args: { entityId: nearest.id, distance: 16 } })
@@ -1448,16 +2007,25 @@ class Brain {
     if (b.autoEat && bot.food <= b.autoEatBelow && dist > 6 && ready('eat')) {
       const foods = bot.registry.foodsByName
       const hasFood = bot.inventory.items().some((i) => foods[i.name] && !['rotten_flesh', 'spider_eye', 'poisonous_potato', 'pufferfish'].includes(i.name))
-      if (hasFood) return make('eat', 'Getting hungry, time for a snack.', memory.currentMood().emotion, { name: 'eatFood', args: {} })
+      if (hasFood) return make('eat', 'Getting hungry, time for a snack.', this.agent.emotions.dominant().label, { name: 'eatFood', args: {} })
     }
     return null
   }
 
   async decide () {
     const agent = this.agent
-    const { log, memory, executor, personality, config } = agent
-    const state = agent.perception.snapshot(memory, executor, personality)
+    const { log, memory, executor, config, social, learning, emotions } = agent
+
+    // Requests we promised to do "later" become the goal once our own plans allow it.
+    if (memory.pendingRequests.length && (!memory.goal || ['self', 'config'].includes(memory.goalSource))) {
+      const r = memory.pendingRequests.shift()
+      memory.setGoal(r.task, r.from)
+      memory.addEvent('task', `You're now doing what ${r.from} asked earlier: ${r.task}`)
+    }
+
+    const state = agent.perception.snapshot()
     const tools = executor.availableTools()
+    const learned = [...learning.lessons.top(8), ...learning.combat.summary(4)]
 
     const nudges = []
     const streak = memory.failureStreak()
@@ -1466,7 +2034,13 @@ class Brain {
 
     const messages = [
       { role: 'system', content: buildDecisionPrompt(agent, executor.describeTools()) },
-      { role: 'user', content: `Current state:\n${JSON.stringify(state)}\n\n${nudges.join('\n')}\nChoose your next action.` }
+      {
+        role: 'user',
+        content: `Current state:\n${JSON.stringify(state)}\n\n` +
+          `People you know (online):\n${social.peopleSummary(state.onlinePlayers.slice(0, 6)) || '- nobody else is online'}\n\n` +
+          `What you've learned from experience:\n${learned.map((l) => `- ${l}`).join('\n') || '- nothing yet'}\n\n` +
+          `${nudges.join('\n')}\nChoose your next action.`
+      }
     ]
     const out = await agent.llm.chat(messages, { schema: decisionSchema(tools), priority: PRIORITY.decision, label: 'decision' })
 
@@ -1483,10 +2057,12 @@ class Brain {
       decision.action = { name: 'wait', args: { seconds: 2 } }
     }
     if (typeof out.goal === 'string' && out.goal.trim() && out.goal.trim() !== memory.goal) {
-      // Keep the player who assigned the goal as its source while the LLM refines the wording.
-      memory.setGoal(out.goal.trim(), memory.goalSource && memory.goalSource !== 'self' ? memory.goalSource : 'self')
+      // Rewording a player's task keeps them as its source; a genuinely new goal is our own.
+      const playerGoal = memory.goalSource && !['self', 'config'].includes(memory.goalSource)
+      const sameTask = playerGoal && wordOverlap(out.goal, memory.goal) >= 0.3
+      memory.setGoal(out.goal.trim(), sameTask ? memory.goalSource : 'self')
     }
-    memory.setMood(decision.emotion, decision.emotionIntensity)
+    emotions.fromLabel(decision.emotion, decision.emotionIntensity)
     if (config.logging.logThoughts) log.mind(`[${decision.emotion} ${decision.emotionIntensity}/10] ${decision.thought}`)
     return decision
   }
@@ -1499,6 +2075,7 @@ class Brain {
 class Agent {
   constructor (config, log) {
     this.config = config
+    this.baseConfig = JSON.parse(JSON.stringify(config)) // config.json values, for "!set <key> reset"
     this.log = log
     this.personality = loadPersonality(config.personality, log)
     this.memory = new Memory(config)
@@ -1508,31 +2085,110 @@ class Agent {
     this.shuttingDown = false
     this.reconnectAttempts = 0
     this.intervals = []
+    this.recentFallSpeed = 0
+    this.lastAttacker = null
+
+    // Long-term state survives restarts and reconnects.
+    this.emotions = new EmotionEngine(() => this.config.emotions, () => this.personality)
+    this.learning = new Learning(this)
+    const saved = this.learning.data
+    this.social = new SocialModel(this, saved.social)
+    this.emotions.load(saved.emotions)
+    this.runtimeAdmins = saved.admins || []
+    this.settingOverrides = {}
+    for (const [key, value] of Object.entries(saved.settings || {})) {
+      const parsed = parseSetting(key, value)
+      if (parsed.error) continue
+      setPath(this.config, key, parsed.value)
+      this.settingOverrides[key] = parsed.value
+    }
+    if (Object.keys(this.settingOverrides).length) log.info(`In-game settings restored: ${Object.keys(this.settingOverrides).join(', ')}`)
+  }
+
+  /** Change a runtime setting (from !set, !obey, !emotion...). Persists across restarts. */
+  applySetting (key, raw, by) {
+    if (!SETTABLE[key]) return { ok: false, error: `"${key}" can't be changed in game.` }
+    if (by && this.social.role(by) !== 'owner' && this.config.commands.ownerOnlySettings.some((p) => key.startsWith(p))) {
+      return { ok: false, error: `only owners can change ${key}.` }
+    }
+    const parsed = parseSetting(key, raw)
+    if (parsed.error) return { ok: false, error: parsed.error }
+    setPath(this.config, key, parsed.value)
+    this.settingOverrides[key] = parsed.value
+    this.learning.markDirty()
+    this.log.info(`Setting ${key} = ${JSON.stringify(parsed.value)}${by ? ` (by ${by})` : ''}`)
+    return { ok: true, value: parsed.value }
+  }
+
+  resetSetting (key, by) {
+    if (!SETTABLE[key]) return { ok: false, error: `"${key}" can't be changed in game.` }
+    if (by && this.social.role(by) !== 'owner' && this.config.commands.ownerOnlySettings.some((p) => key.startsWith(p))) {
+      return { ok: false, error: `only owners can change ${key}.` }
+    }
+    const value = getPath(this.baseConfig, key)
+    setPath(this.config, key, value)
+    delete this.settingOverrides[key]
+    this.learning.markDirty()
+    return { ok: true, value }
+  }
+
+  setAdmin (name, on) {
+    const lower = name.toLowerCase()
+    this.runtimeAdmins = this.runtimeAdmins.filter((a) => a.toLowerCase() !== lower)
+    if (on) this.runtimeAdmins.push(name)
+    this.learning.markDirty()
   }
 
   setPersonality (spec) {
     this.personality = loadPersonality(spec, this.log)
     this.config.personality = spec
-    this.memory.setMood(this.personality.baselineMood, 3)
+    this.emotions.reset()
     this.log.info(`Personality: ${this.personality.name || '(username)'} — ${this.personality.description}`)
   }
 
   async start () {
     this.log.info(`Personality: ${this.personality.name || '(username)'} — ${this.personality.description}`)
-    this.log.info(`Chat mode: ${this.config.chat.mode}`)
+    this.log.info(`Chat mode: ${this.config.chat.mode} | requests from: ${this.config.obedience.whoCanInstruct} | pvp: ${this.config.pvp.mode}`)
     await this.llm.healthCheck()
-    this.connect()
+    await this.connect()
   }
 
-  connect () {
+  /**
+   * Pick the protocol version. Auto-detect normally; if the server is newer than
+   * Mineflayer supports (e.g. 26.3 while Mineflayer tops out at 26.1), connect as
+   * the newest supported version and rely on ViaBackwards / ViaProxy to translate.
+   */
+  async resolveVersion () {
     const s = this.config.server
-    this.log.info(`Connecting to ${s.host}:${s.port} as ${s.username}...`)
+    if (s.version) return s.version
+    const latest = mineflayer.latestSupportedVersion
+    try {
+      const res = await mc.ping({ host: s.host, port: s.port, closeTimeout: 5000, noPongTimeout: 5000 })
+      const protocol = res?.version?.protocol
+      const latestProtocol = minecraftData.versionsByMinecraftVersion.pc[latest]?.version
+      if (protocol && latestProtocol && protocol > latestProtocol) {
+        this.log.warn(`Server runs "${res.version.name}" (protocol ${protocol}); Mineflayer supports up to ${latest} (protocol ${latestProtocol}).`)
+        if (s.viaFallback) {
+          this.log.warn(`Connecting as ${latest}. This works when the server has ViaVersion + ViaBackwards installed, or when you connect through ViaProxy (see README).`)
+          return latest
+        }
+      }
+    } catch (err) {
+      this.log.debug(`Server ping failed (${err.message}); letting Mineflayer auto-detect.`)
+    }
+    return false
+  }
+
+  async connect () {
+    const s = this.config.server
+    const version = await this.resolveVersion()
+    this.log.info(`Connecting to ${s.host}:${s.port} as ${s.username}${version ? ` (protocol ${version})` : ''}...`)
     const bot = mineflayer.createBot({
       host: s.host,
       port: s.port,
       username: s.username,
       auth: s.auth,
-      version: s.version || false,
+      version,
       checkTimeoutInterval: 60000,
       hideErrors: true
     })
@@ -1545,7 +2201,10 @@ class Agent {
       config: this.config,
       chat: this.chat,
       log: this.log,
-      notify: (type, data) => this.reactor.trigger(type, data)
+      social: this.social,
+      learning: this.learning,
+      memory: this.memory,
+      notify: (type, data) => this.onActionEvent(type, data)
     })
     this.reactor = new EventReactor(this)
     this.responder = new ChatResponder(this)
@@ -1561,11 +2220,49 @@ class Agent {
       this.brain.clearForced()
       this.log.warn('Died. Waiting for respawn...')
     })
+    // Falling speed over the last second, to tell fall damage apart from attacks.
+    bot.on('physicsTick', () => {
+      const vy = bot.entity?.velocity?.y ?? 0
+      this.recentFallSpeed = Math.min(vy, this.recentFallSpeed * 0.9)
+    })
     bot.on('chat', (username, message) => this.responder.onMessage(username, message))
     bot.on('whisper', (username, message) => this.responder.onMessage(username, message, { whisper: true }))
-    bot.on('kicked', (reason) => this.log.warn(`Kicked: ${typeof reason === 'string' ? reason : JSON.stringify(reason)}`))
+    bot.on('kicked', (reason) => {
+      const text = typeof reason === 'string' ? reason : JSON.stringify(reason)
+      this.log.warn(`Kicked: ${text}`)
+      if (/outdated|incompatible|version/i.test(text)) {
+        this.log.warn('That looks like a version mismatch. Pin server.version, or install ViaVersion + ViaBackwards on the server / use ViaProxy (see README).')
+      }
+    })
     bot.on('error', (err) => this.log.error(`Connection error: ${err.message}`))
     bot.on('end', (reason) => this.onEnd(reason))
+  }
+
+  /** Events raised by actions (fights, gifts, kills...). */
+  onActionEvent (type, data) {
+    const { emotions, learning, memory } = this
+    if (type === 'fightEnded') {
+      if (data.outcome === 'win') {
+        learning.stats.kills++
+        emotions.stimulate({ joy: 0.2, anger: -0.15, fear: -0.15 }, `you beat ${data.label}`)
+        if (data.isPlayer) this.reactor.trigger('wonFight', data)
+      } else if (data.outcome === 'fled' || data.outcome === 'loss') {
+        emotions.stimulate({ fear: 0.15, sadness: 0.1 }, `you lost a fight to ${data.label}`)
+        if (data.outcome === 'fled') this.reactor.trigger('lostFight', data)
+      }
+      learning.markDirty()
+      if (data.isPlayer || data.outcome !== 'win') {
+        learning.reflect(`Fight against ${data.label} using the "${data.style}" style (${COMBAT_STYLES[data.style]?.desc}): ${data.outcome}. ` +
+          `${data.hitsLanded ?? '?'} hits landed, ${data.hitsTaken ?? '?'} taken, ${data.healthLost ?? '?'} health lost.`)
+      }
+      return
+    }
+    if (type === 'gaveItem') {
+      emotions.stimulate({ joy: 0.08 })
+      memory.addEvent('gave', `You gave ${data.count} ${data.item} to ${data.player}.`)
+      return
+    }
+    this.reactor.trigger(type, data)
   }
 
   onFirstSpawn () {
@@ -1584,18 +2281,22 @@ class Agent {
       const id = bot.registry.blocksByName[name]?.id
       if (id !== undefined) movements.blocksCantBreak.add(id)
     }
+    this.learning.movement.attach(movements) // steer around places where we died or got stuck
     bot.pathfinder.setMovements(movements)
     bot.pathfinder.thinkTimeout = pf.thinkTimeoutMs
 
-    this.perception = new Perception(bot, config)
-    this.memory.setMood(this.personality.baselineMood, 3)
+    this.perception = new Perception(this)
 
-    // Periodic perception tick (every ~2s) keeps a fresh snapshot for chat prompts and proximity events.
+    // Periodic tick (every ~2s): fresh snapshot, body-language reading, feelings decay, forgiveness.
     this.intervals.push(setInterval(() => {
       if (!bot.entity || this.dead) return
       try {
-        const state = this.perception.snapshot(this.memory, this.executor, this.personality)
+        const state = this.perception.snapshot()
         this.reactor.observe(state)
+        this.social.observe(state)
+        this.social.tickRecovery()
+        this.emotions.tick()
+        this.learning.movement.tick(pf.allowParkour)
       } catch (err) {
         log.debug(`perception tick failed: ${err.message}`)
       }
@@ -1611,6 +2312,7 @@ class Agent {
     this.smalltalk?.stop()
     this.executor?.abort('disconnected')
     this.llm.clear('disconnected')
+    this.learning.save()
     for (const id of this.intervals.splice(0)) clearInterval(id)
     if (this.shuttingDown || !this.config.server.reconnect) return
 
@@ -1618,7 +2320,9 @@ class Agent {
     const delay = Math.min(s.maxReconnectDelayMs, s.reconnectDelayMs * 2 ** this.reconnectAttempts)
     this.reconnectAttempts++
     this.log.info(`Reconnecting in ${Math.round(delay / 1000)}s (attempt ${this.reconnectAttempts})...`)
-    setTimeout(() => { if (!this.shuttingDown) this.connect() }, delay)
+    setTimeout(() => {
+      if (!this.shuttingDown) this.connect().catch((err) => this.log.error(`Reconnect failed: ${err.message}`))
+    }, delay)
   }
 
   /** Lines typed into the terminal: "!command" runs an owner command, anything else is said in chat. */
@@ -1647,6 +2351,7 @@ class Agent {
     this.smalltalk?.stop()
     this.executor?.abort('shutdown')
     this.llm.clear('shutdown')
+    this.learning.close()
     try { this.bot?.quit('Bye!') } catch { /* already gone */ }
     setTimeout(() => process.exit(0), 1000).unref()
   }

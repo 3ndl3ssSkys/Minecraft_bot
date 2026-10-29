@@ -5,6 +5,7 @@
     "username": "Wanderer",
     "auth": "offline",
     "version": false,
+    "viaFallback": true,
     "reconnect": true,
     "reconnectDelayMs": 10000,
     "maxReconnectDelayMs": 120000
@@ -36,13 +37,7 @@
     "lookAtSpeaker": true,
     "goalChangeInterrupts": true,
     "whisperReplies": true,
-    "unprompted": {
-      "intervalSeconds": 90,
-      "chance": 0.35,
-      "minSilenceSeconds": 60,
-      "requirePlayersOnline": true,
-      "requirePlayersNearby": false
-    }
+    "unprompted": { "intervalSeconds": 90, "chance": 0.35, "minSilenceSeconds": 60, "requirePlayersOnline": true, "requirePlayersNearby": false }
   },
   "reactions": {
     "enabled": true,
@@ -50,7 +45,15 @@
     "globalCooldownSec": 6,
     "events": {
       "spawn": { "enabled": true, "chance": 1, "cooldownSec": 0, "style": "llm", "gesture": "wave", "templates": ["hey everyone!", "hi all"] },
-      "playerJoined": { "enabled": true, "chance": 0.7, "cooldownSec": 15, "perTarget": true, "style": "template", "templates": ["hey {player}!", "welcome back {player}", "o/ {player}"] },
+      "playerJoined": {
+        "enabled": true,
+        "chance": 0.7,
+        "cooldownSec": 15,
+        "perTarget": true,
+        "style": "template",
+        "templates": ["hey {player}!", "welcome back {player}", "o/ {player}"],
+        "templatesWary": ["oh. {player}.", "great, {player} is back"]
+      },
       "playerLeft": { "enabled": true, "chance": 0.4, "cooldownSec": 30, "style": "template", "templates": ["cya {player}", "bye {player}!"] },
       "playerNearby": { "enabled": true, "chance": 0.6, "cooldownSec": 180, "perTarget": true, "style": "gesture", "gesture": "wave", "templates": ["oh hey {player}"] },
       "death": { "enabled": true, "chance": 1, "cooldownSec": 10, "style": "llm", "templates": ["noooo", "ugh. died."] },
@@ -65,15 +68,23 @@
       "daybreak": { "enabled": true, "chance": 0.4, "cooldownSec": 600, "style": "template", "templates": ["morning!"] },
       "rainStart": { "enabled": true, "chance": 0.3, "cooldownSec": 600, "style": "template", "templates": ["ugh, rain"] },
       "levelUp": { "enabled": true, "chance": 0.5, "cooldownSec": 60, "style": "template", "templates": ["level {level}!"] },
-      "itemPickup": { "enabled": false, "chance": 0.1, "cooldownSec": 120, "style": "template", "templates": ["ooh, {item}"] }
+      "itemPickup": { "enabled": false, "chance": 0.1, "cooldownSec": 120, "style": "template", "templates": ["ooh, {item}"] },
+      "attackedByPlayer": { "enabled": true, "chance": 0.8, "cooldownSec": 12, "perTarget": true, "style": "llm", "templates": ["hey! {player} stop", "dude what", "why are you hitting me"] },
+      "killedByPlayer": { "enabled": true, "chance": 1, "cooldownSec": 10, "style": "llm", "templates": ["really {player}?", "wow. thanks {player}"] },
+      "gift": { "enabled": true, "chance": 0.9, "cooldownSec": 20, "perTarget": true, "style": "llm", "gesture": "nod", "templates": ["thanks {player}!", "ty {player}"] },
+      "promiseKept": { "enabled": true, "chance": 0.8, "cooldownSec": 30, "style": "template", "templates": ["appreciate it {player}", "knew i could count on you {player}"] },
+      "promiseBroken": { "enabled": true, "chance": 0.7, "cooldownSec": 120, "style": "llm", "templates": ["guess {player} forgot...", "{player} you said you'd {promise}"] },
+      "harmNearby": { "enabled": true, "chance": 0.6, "cooldownSec": 30, "perTarget": true, "style": "llm", "templates": ["{player} leave the {victim} alone", "hey, stop that"] },
+      "crouchGreeting": { "enabled": true, "chance": 0.9, "cooldownSec": 60, "perTarget": true, "style": "gesture", "gesture": "crouch", "templates": ["o/ {player}"] },
+      "wonFight": { "enabled": true, "chance": 0.5, "cooldownSec": 60, "style": "llm", "templates": ["gg", "ez"] },
+      "lostFight": { "enabled": true, "chance": 0.5, "cooldownSec": 60, "style": "template", "templates": ["nope, not today", "gotta heal"] }
     }
   },
   "behavior": {
     "owners": [],
+    "admins": [],
     "commandPrefix": "!",
-    "obeyPlayers": "everyone",
     "startingGoal": "",
-    "allowPvp": false,
     "protectedPlayers": [],
     "selfDefense": true,
     "autoEat": true,
@@ -82,21 +93,90 @@
     "interruptOnDamage": true,
     "autoEquipWeapon": true,
     "autoCollectDrops": true,
-    "attackCooldownMs": 650,
     "minToolDurability": 3,
     "maxTravelDistance": 128,
     "enabledActions": [],
     "disabledActions": [],
-    "pathfinding": {
-      "canDig": true,
-      "allowParkour": true,
-      "allowSprinting": true,
-      "allow1by1towers": true,
-      "thinkTimeoutMs": 10000,
-      "baseTimeoutMs": 15000,
-      "msPerBlock": 1200,
-      "maxTimeoutMs": 180000
-    }
+    "pathfinding": { "canDig": true, "allowParkour": true, "allowSprinting": true, "allow1by1towers": true, "thinkTimeoutMs": 10000, "baseTimeoutMs": 15000, "msPerBlock": 1200, "maxTimeoutMs": 180000 }
+  },
+  "obedience": {
+    "whoCanInstruct": "everyone",
+    "chance": { "owner": 1, "admin": 0.9, "trusted": 0.7, "player": 0.45 },
+    "favorChance": 0.15,
+    "deferChance": 0.35,
+    "ownerBypass": true,
+    "applyToCommands": false,
+    "trustedThreshold": 80
+  },
+  "trust": {
+    "enabled": true,
+    "initial": 75,
+    "hostileBelow": 20,
+    "waryBelow": 45,
+    "recoveryPerHour": 6,
+    "hostileMemoryMinutes": 5,
+    "lowHealthThreshold": 8,
+    "protectRadius": 12,
+    "ignoreHostileChance": 0.4,
+    "penalties": {
+      "weaponHit": 4,
+      "fistHit": 1.5,
+      "repeatedHits": 8,
+      "hitWhileLow": 6,
+      "killedMe": 35,
+      "harmedPlayerNearby": 4,
+      "harmedPet": 6,
+      "harmedVillager": 3,
+      "harmedAnimal": 0,
+      "killedPlayerNearby": 10,
+      "brokenPromise": 10
+    },
+    "rewards": { "gift": 3, "keptPromise": 6, "helpedFight": 2, "apology": 6, "crouchGreeting": 0.5 }
+  },
+  "emotions": {
+    "enabled": true,
+    "volatility": 1,
+    "decayPerMinute": 0.2,
+    "lock": null,
+    "lockIntensity": 6
+  },
+  "pvp": {
+    "mode": "defensive",
+    "allowSparring": true,
+    "neverAttackOwners": true
+  },
+  "learning": {
+    "enabled": true,
+    "file": "data/brain.json",
+    "epsilon": 0.2,
+    "reflect": true,
+    "maxLessons": 25
+  },
+  "commands": {
+    "permissions": {
+      "help": "admin",
+      "status": "admin",
+      "stop": "admin",
+      "pause": "admin",
+      "resume": "admin",
+      "come": "admin",
+      "follow": "admin",
+      "goal": "admin",
+      "mode": "admin",
+      "emotion": "admin",
+      "trust": "admin",
+      "settings": "admin",
+      "get": "admin",
+      "set": "admin",
+      "reactions": "admin",
+      "lessons": "admin",
+      "obey": "owner",
+      "admin": "owner",
+      "persona": "owner",
+      "forget": "owner",
+      "save": "owner"
+    },
+    "ownerOnlySettings": ["obedience.", "trust.", "pvp.", "learning."]
   },
   "perception": {
     "intervalMs": 2000,
