@@ -344,6 +344,9 @@ function insideOwnBuild (bot, pos) {
   return ownBuilds.some((o) => Math.abs(o.x - pos.x) <= 14 && Math.abs(o.z - pos.z) <= 14 && Math.abs(o.y - pos.y) <= 16)
 }
 
+/** Actions that need block breaking or inventory windows — not available through ViaBedrock yet. */
+const BEDROCK_UNSUPPORTED = new Set(['mineBlock', 'craftItem', 'smeltItem', 'storeItems', 'takeItems', 'inspectContainer', 'planBuilding', 'build', 'cancelBuilding'])
+
 // Wall-mounted things: place them against the side of a block, not on the floor.
 const WALL_MOUNTED = /^(torch|soul_torch|ladder|\w+_wall_sign|lever|\w+_button|tripwire_hook)$/
 const REPLACEABLE = /^(air|cave_air|water|lava|short_grass|grass|tall_grass|fern|large_fern|snow|dead_bush|vine|seagrass|\w+_flower|dandelion|poppy)$/
@@ -1496,7 +1499,10 @@ class ActionExecutor {
   /** Names of tools the LLM may call right now (config + chat mode aware). */
   availableTools () {
     const { enabledActions, disabledActions } = this.config.behavior
+    const bedrock = this.config.server.platform === 'bedrock'
     return Object.keys(ACTIONS).filter((name) => {
+      // Through ViaProxy → Geyser, block breaking and inventory windows aren't translated (yet).
+      if (bedrock && BEDROCK_UNSUPPORTED.has(name)) return false
       if (enabledActions?.length && !enabledActions.includes(name)) return false
       if (disabledActions?.includes(name)) return false
       if (name === 'chatMessage' && !this.chat.allows('tool')) return false

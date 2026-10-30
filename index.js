@@ -87,6 +87,7 @@ const DEFAULT_CONFIG = {
     resourcePack: 'accept', // 'accept' | 'decline' server resource packs
     chatPatterns: [], // extra regexes (named groups "user" and "msg") for plugin chat formats
     authFolder: 'data/auth', // cached Microsoft sign-in tokens
+    platform: 'java', // 'bedrock' when joining through ViaProxy → Geyser: disables what ViaBedrock can't translate yet
     reconnect: true,
     reconnectDelayMs: 10000,
     maxReconnectDelayMs: 120000
@@ -571,17 +572,25 @@ class Perception {
       .filter((x) => x.kind !== 'other')
       .sort((a, b) => a.d - b.d)
       .slice(0, maxEntities)
-      .map(({ e, kind, d, how, lastPos, lastAt, invisible }) => {
+      .map(({ e, kind, d, how, lastPos, lastAt, invisible, tag, identified }) => {
         const pos = lastPos || e.position
-        const out = { id: e.id, kind, name: e.username || e.name, distance: Math.round(d * 10) / 10, position: pos3(pos) }
+        // Players are only known by name if their name tag could be read (or was a moment ago).
+        const name = kind === 'player' && !identified ? 'unknown player' : e.username || e.name
+        const out = { id: e.id, kind, name, distance: Math.round(d * 10) / 10, position: pos3(pos) }
         if (how !== 'sight') out.perceived = how === 'memory' ? `last seen ${ago(lastAt)}` : how
         if (invisible) out.invisible = true
+        if (tag?.tag) out.nameTag = tag.tag
+        if (tag?.tamed) out.tamed = true
+        if (tag?.owner) out.owner = tag.owner
         if (kind === 'item') out.item = safe(() => e.getDroppedItem()?.name)
         if (kind === 'player') {
-          out.holding = e.heldItem?.name || null
-          if (out.holding && WEAPON.test(out.holding)) out.armed = true
-          if (e.crouching) out.crouching = true
-          Object.assign(out, this.agent.social.annotate(e.username))
+          if (how !== 'name tag through wall' && how !== 'memory') {
+            out.holding = e.heldItem?.name || null
+            if (out.holding && WEAPON.test(out.holding)) out.armed = true
+            if (e.crouching) out.crouching = true
+          }
+          if (identified) Object.assign(out, this.agent.social.annotate(e.username))
+          else out.note = "can't see their name tag"
         }
         return out
       })
@@ -1035,6 +1044,7 @@ ${mindBlock(agent)}
 - Survive: eat when hungry, avoid lava, deep falls and status.dangerZonesNearby, fight or flee from hostile mobs, be careful at night.
 - Use the game's systems: smelt ores and cook food (smeltItem), store loot in chests (status.knownContainers remembers what's where), sleep in a bed at night, open doors, fish, and useItem for potions, pearls, buckets, bone meal and the like. If you're unsure how something works or how to get an item, use knowledge — but you only know what a player of your skill knows; otherwise experiment or ask.
 - Your senses are realistic: nearbyEntities is what you can see or hear ("perceived" says how; "last seen" means it went out of sight). status.senses lists sounds and particles; "source unseen" means you can't see what made it. If something sounds wrong (footsteps, a chest opening, mining, with nobody visible), be cautious and check it out — less so if you know other players are around.
+- Name tags: you know who a player is only from their name tag ("unknown player" = you can't read it — they're invisible, too far, or their tag is hidden). Tags show through walls unless the player sneaks, so "name tag through wall" means you know they're there. A nameTag field shows ranks or prefixes like [Admin] and the names of named mobs and pets; "tamed" means it has a collar (someone's pet).
 - Read signs (status.signs, readSigns): they tell you whose place it is, rules, and directions. Chests: inspectContainer tells you whose chest it is (yours, community, someone's private chest, unlooted or looted loot chest). Never take from other players' private chests; loot chests and community chests are fine (take fairly from community ones).
 - On other people's servers be a good guest: don't break or dig through other players' builds, don't take their things, and follow any rules you see in chat or on signs.
 - Fights: attackTarget already uses your whole kit (status.combatKit) — bows at range, axe vs shields, mace + wind charges, potions, golden apples, totems. Carry good stuff before risky trips.
@@ -1043,7 +1053,7 @@ ${mindBlock(agent)}
 - Your feelings (status.feelings) should colour how you play: scared → careful, angry → blunt and aggressive, happy → social and generous, bored → go do something new.
 - status.task is something you agreed to do for another player. Work on it (gather/craft: mineBlock, craftItem, smeltItem…; the hand-over happens automatically when you have enough). Take care of urgent needs first. If it's done (for non-item tasks) set taskUpdate.status "done"; if you honestly don't want to keep going — it's dragging on, or you have something you need or want to do — set "gave_up" with a short note. Otherwise "working" (or "none" if you have no task).
 - status.queuedTasks are things you said you'd do later.
-- ${chatPolicy(config.chat.mode)}
+- ${chatPolicy(config.chat.mode)}${config.server.platform === 'bedrock' ? "\n- You joined through a Bedrock bridge: you can't break blocks or use inventories or chests here. Explore, socialise, follow, fight, use items and place blocks instead." : ''}
 - Keep "thought" to one or two sentences. "emotion" is how you genuinely feel right now as this character.
 
 ## Available actions
@@ -1219,10 +1229,11 @@ function parsePluginChat (text, extra = []) {
     const m = t.match(re)
     if (m?.groups?.user && m.groups.msg) return { user: m.groups.user, msg: m.groups.msg, whisper: Boolean(m.groups.whisper) }
   }
-  let m = t.match(/^\[?([A-Za-z0-9_]{2,16})\s*(?:->|→|»)\s*(?:me|you)\]?\s*:?\s+(.+)$/i) || t.match(/^([A-Za-z0-9_]{2,16}) whispers(?: to you)?:\s+(.+)$/i) || t.match(/^From ([A-Za-z0-9_]{2,16}):\s+(.+)$/i)
+  const N = '([.*]?[A-Za-z0-9_]{2,16})' // Floodgate (Bedrock) players get a "." or "*" prefix
+  let m = t.match(new RegExp(`^\\[?${N}\\s*(?:->|→|»)\\s*(?:me|you)\\]?\\s*:?\\s+(.+)$`, 'i')) || t.match(new RegExp(`^${N} whispers(?: to you)?:\\s+(.+)$`, 'i')) || t.match(new RegExp(`^From ${N}:\\s+(.+)$`, 'i'))
   if (m) return { user: m[1], msg: m[2], whisper: true }
-  m = t.match(/^(?:\[[^\]]{1,24}\]\s*)*<([A-Za-z0-9_]{2,16})>\s+(.+)$/) ||
-    t.match(/^(?:\[[^\]]{1,24}\]\s*)*(?:[^\s:]{1,16}\s)?([A-Za-z0-9_]{2,16})\s*(?:»|>>|:|\|)\s+(.+)$/)
+  m = t.match(new RegExp(`^(?:\\[[^\\]]{1,24}\\]\\s*)*<${N}>\\s+(.+)$`)) ||
+    t.match(new RegExp(`^(?:\\[[^\\]]{1,24}\\]\\s*)*(?:[^\\s:]{1,16}\\s)?${N}\\s*(?:»|>>|:|\\|)\\s+(.+)$`))
   return m ? { user: m[1], msg: m[2], whisper: false } : null
 }
 
@@ -1276,8 +1287,9 @@ class ChatResponder {
   isAddressed (username, message, whisper) {
     if (whisper) return true
     const { bot, personality, memory } = this.agent
-    const words = [bot.username, personality.name, ...(personality.nicknames || [])].filter(Boolean)
-    if (words.some((w) => new RegExp(`\\b${escapeRegex(w)}\\b`, 'i').test(message))) return true
+    // Bedrock players via Floodgate get a prefix (".Gamertag"): match the name with or without it.
+    const words = [bot.username, bot.username?.replace(/^[^A-Za-z0-9_]+/, ''), personality.name, ...(personality.nicknames || [])].filter(Boolean)
+    if (words.some((w) => new RegExp(`(^|[^A-Za-z0-9_])${escapeRegex(w)}($|[^A-Za-z0-9_])`, 'i').test(message))) return true
     const last = memory.lastTalkedWith.get(username)
     return Boolean(last && Date.now() - last < this.cfg.conversationWindowSec * 1000)
   }
@@ -2347,6 +2359,7 @@ class Brain {
       const near = Object.entries(state.nearbyBlocks).find(([n, b]) => (n === t.item || n.includes(t.item)) && b.distance <= 8)
       if (near) add(4, 'mineBlock', { blockType: near[0], count: 2, maxDistance: 8 }, `grabbed some ${near[0]} for ${t.from}`)
     }
+    if (agent.config.server.platform === 'bedrock') return options.filter((o) => o.name === 'collectDrops')[0] || { w: 1, name: 'parkour', args: { seconds: 6 }, label: 'hopped around' }
     if (state?.nearbyBlocks) {
       const ore = Object.entries(state.nearbyBlocks).find(([n, b]) => /_ore$/.test(n) && b.distance <= 6 && b.visible)
       if (ore) add(2, 'mineBlock', { blockType: ore[0], count: 1, maxDistance: 6 }, `mined a bit of ${ore[0]}`)
@@ -2881,7 +2894,7 @@ class Agent {
 
     const pf = config.behavior.pathfinding
     const movements = new Movements(bot)
-    movements.canDig = pf.canDig
+    movements.canDig = pf.canDig && config.server.platform !== 'bedrock' // no block breaking through ViaBedrock
     // Parkour and sprinting are skills too.
     movements.allowParkour = pf.allowParkour && this.intelligence.can('parkour', 'survival')
     movements.allowSprinting = pf.allowSprinting && this.intelligence.can('sprint', 'survival')

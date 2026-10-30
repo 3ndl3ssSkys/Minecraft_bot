@@ -13,6 +13,7 @@
     "resourcePack": "accept",
     "chatPatterns": [],
     "authFolder": "data/auth",
+    "platform": "java",
     "reconnect": true,
     "reconnectDelayMs": 10000,
     "maxReconnectDelayMs": 120000

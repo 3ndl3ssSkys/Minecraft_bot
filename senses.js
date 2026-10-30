@@ -26,7 +26,20 @@
 const { Vec3 } = require('vec3')
 
 /** Ways of perceiving that count as actually seeing something. */
-const SEEN = new Set(['sight', 'close', 'armor', 'swirls', 'tracked', 'tracked (invisible)'])
+const SEEN = new Set(['sight', 'close', 'armor', 'swirls', 'tracked', 'tracked (invisible)', 'name tag through wall'])
+
+/** Decode a chat component / NBT / string name into plain text. */
+const chatCache = new WeakMap()
+function plainText (registry, value) {
+  if (value === undefined || value === null || value === '') return ''
+  if (typeof value === 'string' && !/^[{[]/.test(value)) return value
+  try {
+    if (!chatCache.has(registry)) chatCache.set(registry, require('prismarine-chat')(registry))
+    return chatCache.get(registry).fromNotch(value).toString()
+  } catch {
+    return typeof value === 'string' ? value : ''
+  }
+}
 
 const SEE_THROUGH = /glass|leaves|iron_bars|fence|chain|ladder|vine|scaffolding|trapdoor|door|torch|flower|grass|fern|sapling|carpet|snow$|rail|pane/
 
@@ -178,6 +191,66 @@ class Senses {
     return false
   }
 
+  metaValue (bot, entity, key) {
+    const keys = bot.registry.entitiesByName?.[entity.name]?.metadataKeys
+    const i = keys ? keys.indexOf(key) : -1
+    return i < 0 ? undefined : entity.metadata?.[i]
+  }
+
+  /** Scoreboard team rules for a player's tag: 'always' | 'never' | 'hideForOtherTeams' | 'hideForOwnTeam'. */
+  tagAllowed (bot, username) {
+    const team = bot.teamMap?.[username]
+    const mine = bot.teamMap?.[bot.username]
+    const vis = team?.nameTagVisibility || 'always'
+    if (vis === 'never') return false
+    if (vis === 'hideForOtherTeams' && team !== mine) return false
+    if (vis === 'hideForOwnTeam' && team === mine) return false
+    return true
+  }
+
+  /**
+   * What the bot can read on an entity's name tag right now.
+   * Players (vanilla rules): visible within 64 blocks in line of sight, and through walls
+   * unless they're sneaking; never for invisible players or when team rules hide it.
+   * Mobs: a custom name shows if "always visible", otherwise only when looked at up close.
+   * @returns {{ name: string, tag?: string, tamed?: boolean, owner?: string } | null}
+   */
+  readTag (bot, entity, how, dist) {
+    if (entity.type === 'player') {
+      if (how === 'tracked' || how === 'tracked (invisible)') return { name: entity.username } // impossible: from packets
+      if (this.isInvisible(entity) || dist > 64 || !this.tagAllowed(bot, entity.username)) return null
+      const seen = SEEN.has(how) && how !== 'armor' && how !== 'swirls'
+      if (!seen && !(how === 'name tag through wall')) return null
+      const team = bot.teamMap?.[entity.username]
+      const prefix = team?.prefix ? String(team.prefix).trim() : ''
+      const suffix = team?.suffix ? String(team.suffix).trim() : ''
+      const display = plainText(bot.registry, bot.players[entity.username]?.displayName?.json ?? bot.players[entity.username]?.displayName?.toString())
+      const tag = [prefix, entity.username, suffix].filter(Boolean).join(' ')
+      const out = { name: entity.username }
+      if (tag !== entity.username) out.tag = tag
+      else if (display && display !== entity.username) out.tag = display
+      return out
+    }
+    // Mobs and other entities.
+    const out = {}
+    const custom = plainText(bot.registry, this.metaValue(bot, entity, 'custom_name'))
+    if (custom && SEEN.has(how)) {
+      const always = Boolean(this.metaValue(bot, entity, 'custom_name_visible'))
+      const lookingAt = dist <= 8 && this.angleTo(bot, entity.position.offset(0, (entity.height || 1) * 0.7, 0)) < 0.25
+      if ((always && dist <= 32) || lookingAt) out.tag = custom
+    }
+    const flags = this.metaValue(bot, entity, 'flags')
+    const ownerUuid = this.metaValue(bot, entity, 'owneruuid')
+    if (typeof flags === 'number' && (flags & 0x04) && SEEN.has(how)) {
+      out.tamed = true // the collar shows
+      if (ownerUuid && this.intel.can('seeThroughWalls', 'senses')) {
+        const owner = Object.values(bot.players).find((p) => p.uuid === ownerUuid)
+        if (owner) out.owner = owner.username
+      }
+    }
+    return Object.keys(out).length ? out : null
+  }
+
   /**
    * Entities the bot actually perceives, each with how it knows:
    * 'sight', 'close', 'armor' (invisible but armor shows), 'swirls', 'heard', 'tracked' (impossible: through walls), 'memory'.
@@ -207,20 +280,24 @@ class Senses {
         // Things far away at the edge of attention can go unnoticed by weaker players.
         how = d < 12 || Math.random() < attention + 0.3 ? 'sight' : null
       }
+      // Vanilla draws players' name tags through walls unless they sneak.
+      if (!how && e.type === 'player' && !invisible && !e.crouching && d <= 64 && this.tagAllowed(bot, e.username)) how = 'name tag through wall'
       if (!how && this.intel.can('soundTracking', 'senses')) {
         // Good players can place an unseen entity by its sounds.
         const sound = this.heard.find((h) => h.sourceId === e.id && Date.now() - h.at < 8000)
         if (sound) how = 'heard'
       }
       if (how) {
-        this.lastSeen.set(e.id, { at: Date.now(), pos: e.position.clone(), name: e.username || e.name })
-        out.push({ entity: e, how, invisible })
+        const tag = this.readTag(bot, e, how, d)
+        const prev = this.lastSeen.get(e.id)
+        this.lastSeen.set(e.id, { at: Date.now(), pos: e.position.clone(), name: e.username || e.name, identified: Boolean(tag?.name) || prev?.identified, tag })
+        out.push({ entity: e, how, invisible, tag, identified: e.type !== 'player' || Boolean(tag?.name) || Boolean(prev?.identified && Date.now() - prev.at < 3000) })
       }
     }
     // Things we lost sight of a moment ago: remembered position.
     for (const [id, m] of this.lastSeen) {
       if (Date.now() - m.at > 20000) { this.lastSeen.delete(id); continue }
-      if (!out.some((o) => o.entity.id === id) && bot.entities[id]) out.push({ entity: bot.entities[id], how: 'memory', lastPos: m.pos, lastAt: m.at })
+      if (!out.some((o) => o.entity.id === id) && bot.entities[id]) out.push({ entity: bot.entities[id], how: 'memory', lastPos: m.pos, lastAt: m.at, identified: bot.entities[id].type !== 'player' || m.identified, tag: m.tag })
     }
     this.perceivedCache = { at: Date.now(), list: out }
     return out

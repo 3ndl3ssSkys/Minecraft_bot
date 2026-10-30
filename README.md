@@ -164,6 +164,7 @@ In game (owner): `!mind like a medieval knight`, `!mind style explorer`, `!mind 
   - **Invisibility works**, unless the invisible player's armor or held item shows, their potion swirls are visible close in front of it, or they're bumping into it.
   - It only knows about ores and other blocks it has actually seen.
   - Impossible tracks every entity the server sends, even through walls.
+  - Players' name tags also show through walls unless they sneak (see [Name tags](#name-tags)).
 - **Hearing** (`hearing`): every sound the server sends (about 16 blocks, through walls) is sorted into mob noises, footsteps, chests/barrels/doors opening, blocks breaking or being placed, combat (bows, crits, shields, splash potions), anvils, spawners, and the **creeper hiss**. A hiss makes it back away even if it can't see the creeper. World-wide sounds (a wither spawning, the dragon dying) are noticed too.
 - **Particles** (`particles`): crits, mining dust, cracks spreading on a block, smoke, portal particles, hearts and potion splashes — when close, roughly in front of it, and in line of sight.
 - **Suspicion:** a player-type sound or particle with no visible source (footsteps, a chest opening, mining) makes it suspicious.
@@ -172,6 +173,18 @@ In game (owner): `!mind like a medieval knight`, `!mind style explorer`, `!mind 
   - Tested live: with nobody known nearby, a chest opening behind a wall pushed suspicion to "high" and set an investigation at that spot. With a player who had just gone behind the wall, the same sound stayed below the threshold.
 
 `!senses` shows what it has heard and noticed recently.
+
+## Name tags
+
+The bot knows who a player is from their **name tag**, following vanilla rules:
+- **Readable:** in line of sight within 64 blocks.
+- **Through walls:** yes, unless the player is **sneaking**. The bot then knows they're there ("name tag through wall") without seeing them.
+- **Never:** for invisible players, or when scoreboard team settings hide tags.
+- **Unknown players:** a player it can see but can't read (invisible with armor showing, too far, tag hidden) is listed as **"unknown player"**, with no relationship info, because it can't know who that is. Once identified, it keeps the name while they stay in view.
+- **Ranks:** team prefixes and suffixes ("[Admin] Steve") and tab-list display names show up as `nameTag`, which helps it work out who's staff or which team someone is on.
+- **Mobs:** named mobs and pets show their names (always-visible tags within 32 blocks, others only when it looks right at them up close). Tamed animals show their collar (`tamed`). Only Impossible knows a pet's owner, from the data the server sends.
+
+Tested live: identified in the open → through the wall while standing → hidden once they sneak (remembered briefly, then gone) → not perceived when invisible.
 
 ## Chests and signs
 
@@ -536,13 +549,67 @@ Keys under `trust.`, `pvp.`, `learning.`, `intelligence.` and `mind.`, plus the 
 | **Realms** | A Java account invited to the Realm: `"realm": "Realm name"`. |
 
 - **Your own Java account** works, but one account can only be online once. If you log in while the bot is on, it's kicked with "logged in from another location". It then **stops reconnecting**, so it never kicks you back off. Use it when you aren't playing.
-- **Bedrock accounts can't sign into Java servers.** Mineflayer only speaks the Java protocol, and Java servers only accept Java accounts.
-  - The one route: if a friend's server already runs **GeyserMC + Floodgate** (common on servers with Bedrock players), Bedrock accounts are allowed in. You could then run **[ViaProxy](https://github.com/ViaVersion/ViaProxy)** on your machine, signed into a Bedrock/Xbox account, pointed at the server's Geyser (Bedrock) port, and connect the bot to ViaProxy.
-  - That route goes through ViaProxy's experimental Bedrock support and double translation (Java → Bedrock → Java). I couldn't test it; expect rough edges.
+- **Bedrock accounts can't sign into Java servers directly.** Mineflayer only speaks the Java protocol. The route that works is through ViaProxy and a server running Geyser + Floodgate — see [Using a Bedrock account (ViaProxy)](#using-a-bedrock-account-viaproxy).
 - PrismLauncher "offline" accounts are just offline mode: they only work on offline-mode servers.
 - Note: Minecraft for PC has been sold as "Java & Bedrock Edition" since 2022 — if you bought it on PC since then, you already own Java (on your own account, which you're using).
 
-**Joining friends' servers** without them setting anything up:
+### Using a Bedrock account (ViaProxy)
+
+**What has to be true:**
+- The friend's Java server runs **[GeyserMC](https://geysermc.org) + Floodgate**. Many servers with Bedrock players already do.
+  - Geyser lets Bedrock players connect; Floodgate lets them in **without** a Java account.
+  - With Geyser alone (`auth-type: online`), Bedrock players must sign into a Java account, so this route doesn't help there.
+- You know the server's **Bedrock port**: Geyser's default is `19132`, over UDP. Ask your friend.
+
+**How it fits together:** the bot (Java) → ViaProxy on your PC, signed into your Bedrock account → the friend's Geyser port → their Java server.
+
+**Steps:**
+1. Install a current **Java** (21 or newer; if ViaProxy refuses to start, update Java).
+2. Download the latest **ViaProxy** jar from [GitHub Releases](https://github.com/ViaVersion/ViaProxy/releases/latest) and put it in its own folder; it stores its settings there.
+3. Run it (double-click, or `java -jar ViaProxy-<version>.jar`). A window opens.
+4. **Accounts tab** → **Add Bedrock account** → sign in with the Microsoft account that owns Bedrock, using the code it shows, in your browser.
+5. **General tab:**
+   - **Server address**: `friend.example.net:19132` (their Geyser port).
+   - **Server version**: the **Bedrock** entry in the version list.
+   - **Minecraft account**: select the Bedrock account you added.
+   - Leave **Proxy online mode** off.
+6. Click **Start**. ViaProxy listens on `0.0.0.0:25568` by default (the bind address).
+7. Add a server profile for the bot:
+   ```json
+   "servers": {
+     "friend-bedrock": {
+       "host": "127.0.0.1", "port": 25568,
+       "auth": "offline", "username": "Wanderer",
+       "version": "1.21.4",
+       "platform": "bedrock"
+     }
+   }
+   ```
+   `auth: offline` is right here: the bot connects to ViaProxy without signing in, and ViaProxy uses your Bedrock account for the real server. The bot's `username` is ignored.
+8. Start the bot:
+   ```bash
+   node index.js --server friend-bedrock
+   ```
+
+**In game**, the bot shows up under your **Bedrock gamertag with Floodgate's prefix** (default `.`), e.g. `.YourGamertag`. Floodgate gives Bedrock players their own identity, so you should be able to stay on with your Java account at the same time. The bot understands `.`/`*`-prefixed names in chat and recognises its own name with or without the prefix.
+
+**Running ViaProxy without the window**, once the account is added in the GUI:
+```bash
+java -jar ViaProxy-<version>.jar config viaproxy.yml
+```
+Then in `viaproxy.yml` set:
+- `target-address` and `target-version` (the Bedrock version);
+- `auth-method: account` and `minecraft-account-index: 0` (the first account in the GUI list).
+
+**Limits of this route:** ViaProxy's Bedrock translation (ViaBedrock) is still a work in progress. It can't break blocks or use inventories (chests, crafting tables, furnaces) yet, and mob sounds aren't translated. With `"platform": "bedrock"` the bot knows this: mining, crafting, smelting, chests and building are removed from its actions and it doesn't dig while pathfinding. It can still explore, chat, follow, fight, use items and place blocks.
+
+I couldn't test this route here (it needs a real Geyser server and a Bedrock account), so expect some rough edges. The ViaBedrock feature list is at https://github.com/RaphiMC/ViaBedrock#features.
+
+**Tip:** ViaProxy also joins **Java servers up to 26.3** with a Java account (Accounts → Add Microsoft account, target version auto-detect). That's an alternative to ViaBackwards for new server versions.
+
+### Joining friends' servers
+
+Without them setting anything up:
 - Put each server in `servers` and pick one with `--server`:
   ```json
   "servers": {
