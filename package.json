@@ -7,8 +7,9 @@
   "scripts": {
     "start": "node index.js",
     "start:debug": "BOT_DEBUG=1 node index.js",
-    "check": "node --check index.js && node --check actions.js && node --check social.js && node --check emotions.js && node --check learning.js && node --check tasks.js && node --check combat.js && node --check knowledge.js && node --check building.js && node --check util.js && node --check intelligence.js && node --check senses.js && node --check containers.js",
-    "update-mc": "npm install mineflayer@latest minecraft-protocol@latest minecraft-data@latest mineflayer-pathfinder@latest"
+    "check": "node --check index.js && node --check actions.js && node --check social.js && node --check emotions.js && node --check learning.js && node --check tasks.js && node --check combat.js && node --check knowledge.js && node --check building.js && node --check util.js && node --check intelligence.js && node --check senses.js && node --check containers.js && node --check doctor.js",
+    "update-mc": "npm install mineflayer@latest minecraft-protocol@latest minecraft-data@latest mineflayer-pathfinder@latest",
+    "doctor": "node doctor.js"
   },
   "keywords": [
     "minecraft",

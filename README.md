@@ -50,6 +50,106 @@ Environment variables override the config: `MC_HOST`, `MC_PORT`, `MC_USERNAME`, 
 
 > **Model size:** `qwen2.5:7b` is a good default. `qwen2.5:3b` is faster on weak hardware but makes more mistakes; `qwen2.5:14b` plans and role-plays noticeably better. Ollama 0.5+ is recommended for strict JSON-schema output.
 
+## Running it on your server computer
+
+The bot runs alongside Ollama on any PC that can reach the Minecraft server; it can be the same machine as the server. The bot draws nothing on screen, so it needs no graphics card itself; the GPU is for the LLM.
+
+### Windows
+
+1. Install:
+   - [Node.js 22 LTS](https://nodejs.org);
+   - [Git](https://git-scm.com);
+   - [Ollama](https://ollama.com/download);
+   - an up-to-date NVIDIA driver.
+2. Download the model:
+   ```bash
+   ollama pull qwen2.5:7b
+   ```
+3. Recommended for 6 GB graphics cards: in **System Properties → Environment Variables**, add these user variables, then quit Ollama from the tray and start it again.
+   - `OLLAMA_FLASH_ATTENTION` = `1`
+   - `OLLAMA_KV_CACHE_TYPE` = `q8_0` (halves the memory the context uses)
+   - `OLLAMA_KEEP_ALIVE` = `24h` (keeps the model loaded between calls)
+4. Get the bot:
+   ```bash
+   git clone -b claude/confident-meitner-1ita5a https://github.com/3ndl3ssSkys/Minecraft_bot.git
+   ```
+   ```bash
+   cd Minecraft_bot
+   ```
+   ```bash
+   npm install
+   ```
+5. Edit `config.json`:
+   - `server` — use `127.0.0.1` if the Minecraft server runs on this same PC;
+   - `behavior.owners` — your in-game name;
+   - `personality` and `intelligence.level`;
+   - any `servers` profiles.
+6. Check everything (`--probe-login` also tells you whether the server is online- or offline-mode):
+   ```bash
+   npm run doctor -- --probe-login
+   ```
+7. Start it once by hand: `npm start` (or `node index.js --server <profile>`). If it uses a Microsoft account, it prints a code to enter at microsoft.com/link, and the sign-in is remembered in `data/auth`.
+8. Keep it running: `scripts\start-bot.bat` (add `--server <profile>` if needed) restarts it after a crash. To start it with Windows:
+   - open **Task Scheduler → Create Task**;
+   - choose "Run whether user is logged on or not" and the trigger "At startup";
+   - set the action to `scripts\start-bot.bat`, with "Start in" set to the `Minecraft_bot` folder.
+   
+   If you use ViaProxy, start it the same way, before the bot.
+
+### Linux
+
+1. Install Ollama, which also installs a service:
+   ```bash
+   curl -fsSL https://ollama.com/install.sh | sh
+   ```
+   Install Node.js 22 and git with your package manager or NodeSource, then pull the model:
+   ```bash
+   ollama pull qwen2.5:7b
+   ```
+2. For the same 6 GB settings, add them to Ollama's service:
+   ```bash
+   sudo systemctl edit ollama
+   ```
+   Add these lines:
+   ```
+   [Service]
+   Environment="OLLAMA_FLASH_ATTENTION=1" "OLLAMA_KV_CACHE_TYPE=q8_0" "OLLAMA_KEEP_ALIVE=24h"
+   ```
+3. Clone and install as above (for example into `/opt/Minecraft_bot`), edit `config.json`, run `npm run doctor`, and start it once with `npm start` for the Microsoft sign-in.
+4. Run it as a service. Install `scripts/minecraft-bot.service` (edit the user, folder and `--server` profile in it first):
+   ```bash
+   sudo cp scripts/minecraft-bot.service /etc/systemd/system/
+   ```
+   ```bash
+   sudo systemctl daemon-reload
+   ```
+   ```bash
+   sudo systemctl enable --now minecraft-bot
+   ```
+   Follow the logs with:
+   ```bash
+   journalctl -u minecraft-bot -f
+   ```
+
+**Updating:** run `git pull`, then `npm install`. Everything the bot has learned (relationships, lessons, chests, skills) is in `data/brain.json`; back that file up.
+
+### Hardware (e.g. a GTX 1660 Super with 32 GB of RAM)
+
+| Part | Needs | On a 1660 Super (6 GB VRAM) + 32 GB RAM |
+| --- | --- | --- |
+| LLM (`qwen2.5:7b`) | ≈ 4.7 GB for the model + ≈ 0.5-1 GB for an 8k context | Fits, but only just. With flash attention and the `q8_0` context cache it fits comfortably. Expect roughly 4-8 s per decision and 2-5 s per chat reply (`npm run doctor` measures your real numbers). |
+| LLM (`qwen2.5:3b`) | ≈ 2 GB | Fits easily and runs about twice as fast; it's less clever. Use it if a Minecraft client shares the GPU. |
+| Minecraft **server** | CPU + 4-8 GB RAM (no GPU) | Fine: e.g. `java -Xmx6G -jar server.jar nogui` |
+| Bot (Node.js) | ≈ 0.3-0.5 GB RAM, light CPU | Fine |
+| ViaProxy (Bedrock route) | ≈ 0.5 GB RAM | Fine |
+| Minecraft **client** on the same PC | 1-2 GB VRAM | This is what squeezes the GPU. The 7B model then spills partly onto the CPU and gets several times slower — use `qwen2.5:3b`, or play on another PC. |
+
+32 GB of RAM is plenty for all of it together. On a dedicated server PC (Minecraft server + bot + Ollama, no game client), the 1660 Super runs the 7B model well. The bot keeps busy (gathering, checking chests, parkour) while the model thinks, so a few seconds per decision looks like a player thinking rather than lag. If `npm run doctor` says the model is only partly on the GPU, the fixes are:
+- the Ollama variables above;
+- `llm.numCtx: 6144`;
+- closing other GPU programs;
+- the 3B model.
+
 ## Minecraft 26.3 and other newer versions
 
 Mineflayer currently supports Minecraft up to **26.1**. Neither the released packages nor PrismarineJS's development branch have 26.2 or 26.3 support yet. Mineflayer refuses to connect to anything newer. The bot handles this for you:
@@ -81,6 +181,8 @@ You can also pin a version with `"server": { "version": "26.1" }`. If you're kic
 | `senses.js` | Sight (line of sight, invisibility), hearing, particles, suspicion |
 | `containers.js` | Chest classification, contents memory, signs |
 | `util.js` | Small shared helpers |
+| `doctor.js` | `npm run doctor`: checks Node, config, Ollama (with a speed/VRAM benchmark) and the server |
+| `scripts/` | `start-bot.bat` / `start-bot.sh` (auto-restart) and a systemd service file |
 | `learning.js` | Combat-style learning, danger zones, LLM-written lessons, and persistence |
 | `config.json` | All settings (every key has a default in code, so you can delete the ones you don't change) |
 | `personalities/*.json` | Presets: `friendly`, `grumpy-miner`, `shy-explorer`, `hype-builder` |
@@ -606,6 +708,18 @@ Then in `viaproxy.yml` set:
 I couldn't test this route here (it needs a real Geyser server and a Bedrock account), so expect some rough edges. The ViaBedrock feature list is at https://github.com/RaphiMC/ViaBedrock#features.
 
 **Tip:** ViaProxy also joins **Java servers up to 26.3** with a Java account (Accounts → Add Microsoft account, target version auto-detect). That's an alternative to ViaBackwards for new server versions.
+
+### Geyser without Floodgate
+
+This depends on how the server's Geyser is set up (`auth-type` in Geyser's config):
+
+| Geyser `auth-type` | What it means | What to do |
+| --- | --- | --- |
+| `floodgate` | Bedrock accounts are allowed in as themselves | The ViaProxy route above works. |
+| `online` (the default without Floodgate) | Every Bedrock player must **also sign in with a Java account** (Geyser asks for a microsoft.com/link code) | A Bedrock-only account can't get in. This is the server's login check, and the bot can't (and shouldn't) get around it. If you have a Java account for the bot, skip Bedrock entirely and connect directly with `"auth": "microsoft"` — it's simpler and every feature works. |
+| `offline` | The Java server runs in offline mode | Skip Geyser and ViaProxy: connect the bot straight to the Java port with `"auth": "offline"`. Every feature works, including mining, chests and building. |
+
+If the bot is kicked with a Geyser message about Java accounts, it says so in the log and stops retrying. `npm run doctor -- --probe-login` tells you whether a server is online- or offline-mode. **On your own server**, installing [Floodgate](https://geysermc.org/download?project=floodgate) next to Geyser is free and is what makes the Bedrock-account route possible.
 
 ### Joining friends' servers
 

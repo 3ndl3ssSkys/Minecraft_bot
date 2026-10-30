@@ -1,0 +1,23 @@
+# systemd service for Linux. Install:
+#   sudo cp scripts/minecraft-bot.service /etc/systemd/system/
+#   (edit User, WorkingDirectory and the --server profile below)
+#   sudo systemctl daemon-reload && sudo systemctl enable --now minecraft-bot
+# Logs:  journalctl -u minecraft-bot -f
+# Do the Microsoft sign-in once by running `npm start` by hand first — a service can't show you the code.
+
+[Unit]
+Description=Minecraft LLM bot
+After=network-online.target ollama.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=minecraft
+WorkingDirectory=/opt/Minecraft_bot
+ExecStart=/usr/bin/node index.js
+# ExecStart=/usr/bin/node index.js --server friend1
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

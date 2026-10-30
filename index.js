@@ -2804,6 +2804,12 @@ class Agent {
       } else if (/white-?list|not allowed on this server|banned|ban\b/i.test(text)) {
         this.stopReconnecting = true
         this.log.warn('The server does not let this account in (whitelist/ban). Not retrying.')
+      } else if (/verify username|invalid session|not authenticated|premium account|bad login/i.test(text)) {
+        this.stopReconnecting = true
+        this.log.warn('This is an online-mode server: it rejected an offline account. Use a Java account ("auth": "microsoft"), or a Bedrock account through ViaProxy if the server has Geyser + Floodgate (see README).')
+      } else if (/java edition account|log ?in with (your )?(java|microsoft)|microsoft\.com\/link|link your (java )?account/i.test(text)) {
+        this.stopReconnecting = true
+        this.log.warn('This Geyser server has no Floodgate: Bedrock players must sign in with a Java account, so a Bedrock-only account can\'t get in (see README "Geyser without Floodgate").')
       } else if (/spam|flying|too (fast|many)/i.test(text)) {
         this.reconnectAttempts += 2 // back off harder
       }
