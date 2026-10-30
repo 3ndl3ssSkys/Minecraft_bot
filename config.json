@@ -6,6 +6,13 @@
     "auth": "offline",
     "version": false,
     "viaFallback": true,
+    "password": "",
+    "loginCommand": "/login {password}",
+    "registerCommand": "/register {password} {password}",
+    "realm": "",
+    "resourcePack": "accept",
+    "chatPatterns": [],
+    "authFolder": "data/auth",
     "reconnect": true,
     "reconnectDelayMs": 10000,
     "maxReconnectDelayMs": 120000
@@ -20,7 +27,32 @@
     "maxRetries": 2,
     "useJsonSchema": true
   },
+  "servers": {},
   "personality": "friendly",
+  "intelligence": {
+    "level": "mediocre",
+    "learn": true,
+    "learnRate": 1,
+    "maxLearnedLevels": null,
+    "allowXray": false
+  },
+  "mind": {
+    "thinkLike": "",
+    "playstyle": "balanced",
+    "priorities": { "survival": 1, "social": 1, "building": 1, "exploring": 1, "combat": 1, "gathering": 1 },
+    "riskTolerance": 0.5,
+    "curiosity": 0.5,
+    "instructions": [],
+    "decisionTemperature": null
+  },
+  "senses": {
+    "realisticSight": true,
+    "hearing": true,
+    "particles": true,
+    "particleRange": 10,
+    "suspicionThreshold": 1,
+    "investigate": true
+  },
   "chat": {
     "mode": "both",
     "respondTo": "mentions",
@@ -92,6 +124,8 @@
     "commandPrefix": "!",
     "startingGoal": "",
     "protectedPlayers": [],
+    "respectPrivateChests": true,
+    "noGrief": true,
     "selfDefense": true,
     "autoEat": true,
     "autoEatBelow": 14,
@@ -195,12 +229,19 @@
       "admin": "owner",
       "persona": "owner",
       "forget": "owner",
-      "save": "owner"
+      "save": "owner",
+      "iq": "owner",
+      "intelligence": "owner",
+      "mind": "owner",
+      "chests": "admin",
+      "senses": "admin"
     },
     "ownerOnlySettings": [
       "trust.",
       "pvp.",
       "learning.",
+      "intelligence.",
+      "mind.",
       "obedience.levels.owner",
       "obedience.levels.admin",
       "obedience.overrideConscience",

@@ -329,8 +329,11 @@ class Learning {
       emotions: a.emotions?.toJSON(),
       tasks: a.tasks?.toJSON(),
       building: a.builder ? { current: a.builder.current, history: a.builder.history.slice(-20) } : undefined,
-      containers: a.memory?.containersToJSON?.(),
       obeyPlayers: a.config.obedience?.players,
+      intelligence: a.intelligence?.toJSON(),
+      chests: a.containers?.toJSON(),
+      knownFacts: a.knownFacts ? [...a.knownFacts] : undefined,
+      learnedItems: a.learnedItems ? [...a.learnedItems] : undefined,
       combat: this.combat.toJSON(),
       movement: this.movement.toJSON(),
       lessons: this.lessons.toJSON(),
@@ -369,6 +372,8 @@ Respond with ONLY JSON: {"lesson": "..."}`
       ], { schema: { type: 'object', properties: { lesson: { type: 'string' } }, required: ['lesson'] }, priority: 4, label: 'reflect', temperature: 0.5 })
       if (out.lesson && this.lessons.add(out.lesson)) {
         a.log.info(`Learned: ${out.lesson}`)
+        a.intelligence?.addXp('knowledge', 1)
+        a.learnFacts?.(`${experience} ${out.lesson}`, 'experience', 0.5)
         this.markDirty()
       }
     } catch (err) {

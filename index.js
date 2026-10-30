@@ -35,6 +35,9 @@ const { TaskManager, KINDS: TASK_KINDS, EFFORTS, RISKS } = require('./tasks')
 const combat = require('./combat')
 const knowledge = require('./knowledge')
 const building = require('./building')
+const { Intelligence, LEVELS: IQ_LEVELS, LABELS: IQ_LABELS } = require('./intelligence')
+const { Senses } = require('./senses')
+const { ContainerIntel, signText } = require('./containers')
 
 // ===========================================================================
 // Logging
@@ -77,6 +80,13 @@ const DEFAULT_CONFIG = {
     // If the server is newer than Mineflayer supports (e.g. 26.3), connect as the newest supported
     // version instead. The server then needs ViaBackwards, or the bot must go through ViaProxy.
     viaFallback: true,
+    password: '', // for server login plugins (AuthMe & co.): "/register" and "/login" are answered automatically
+    loginCommand: '/login {password}', // how to log in on that server
+    registerCommand: '/register {password} {password}',
+    realm: '', // join a Realm by name instead of host/port (needs auth "microsoft" and an invite)
+    resourcePack: 'accept', // 'accept' | 'decline' server resource packs
+    chatPatterns: [], // extra regexes (named groups "user" and "msg") for plugin chat formats
+    authFolder: 'data/auth', // cached Microsoft sign-in tokens
     reconnect: true,
     reconnectDelayMs: 10000,
     maxReconnectDelayMs: 120000
@@ -91,7 +101,36 @@ const DEFAULT_CONFIG = {
     maxRetries: 2,
     useJsonSchema: true // Ollama >= 0.5 structured outputs; false = plain JSON mode
   },
+  // Named server profiles: `node index.js --server friend1` merges servers.friend1 into "server".
+  servers: {},
   personality: 'friendly', // preset name from ./personalities, or an inline object
+  // How good a player it is: beginning | simple | mediocre | complicated | advanced | hardcore | master | impossible
+  intelligence: {
+    level: 'mediocre',
+    learn: true, // improve with experience (beginners improve a lot, masters barely)
+    learnRate: 1, // multiplier on experience gained
+    maxLearnedLevels: null, // override how many levels it can grow through learning
+    allowXray: false // impossible only: use block data in loaded chunks to find ores/chests through walls (counts as cheating on most servers)
+  },
+  // How it thinks and what it cares about, on top of personality.
+  mind: {
+    thinkLike: '', // e.g. "a careful speedrunner", "a medieval knight", "a cheerful farmer"
+    playstyle: 'balanced', // balanced | survivalist | builder | explorer | fighter | helper | trader | miner
+    priorities: { survival: 1, social: 1, building: 1, exploring: 1, combat: 1, gathering: 1 }, // 0 = ignore, 2 = very important
+    riskTolerance: 0.5, // 0 = very careful, 1 = reckless
+    curiosity: 0.5, // how eager it is to investigate odd things and explore
+    instructions: [], // standing instructions, e.g. "never go into the Nether without fire resistance"
+    decisionTemperature: null // override llm.temperature for decisions
+  },
+  // What it can perceive.
+  senses: {
+    realisticSight: true, // only see what's in line of sight (invisibility works); off = see everything nearby
+    hearing: true, // notice sounds: mobs, footsteps, chests, doors, mining, combat
+    particles: true, // notice particles close by in front of it
+    particleRange: 10,
+    suspicionThreshold: 1.0, // how much unexplained noise before it investigates
+    investigate: true
+  },
   chat: {
     mode: 'both', // 'silent' | 'respond' | 'unprompted' | 'both'
     respondTo: 'mentions', // 'mentions' | 'everyone' | 'whitelist'
@@ -164,6 +203,8 @@ const DEFAULT_CONFIG = {
     commandPrefix: '!',
     startingGoal: '',
     protectedPlayers: [], // never attacked, no matter what
+    respectPrivateChests: true, // never take from someone else's private chest
+    noGrief: true, // don't mine or dig through blocks that are part of other players' builds
     selfDefense: true,
     autoEat: true,
     autoEatBelow: 14,
@@ -249,10 +290,11 @@ const DEFAULT_CONFIG = {
     permissions: {
       help: 'admin', status: 'admin', stop: 'admin', pause: 'admin', resume: 'admin', come: 'admin', follow: 'admin',
       goal: 'admin', mode: 'admin', emotion: 'admin', trust: 'admin', tasks: 'admin', settings: 'admin', get: 'admin', set: 'admin',
-      reactions: 'admin', lessons: 'admin', obey: 'admin', build: 'admin', admin: 'owner', persona: 'owner', forget: 'owner', save: 'owner'
+      reactions: 'admin', lessons: 'admin', obey: 'admin', build: 'admin', admin: 'owner', persona: 'owner', forget: 'owner', save: 'owner',
+      iq: 'owner', intelligence: 'owner', mind: 'owner', chests: 'admin', senses: 'admin'
     },
     // Settings under these prefixes can only be changed by owners, even with !set / !obey.
-    ownerOnlySettings: ['trust.', 'pvp.', 'learning.', 'obedience.levels.owner', 'obedience.levels.admin', 'obedience.overrideConscience', 'obedience.whoCanInstruct']
+    ownerOnlySettings: ['trust.', 'pvp.', 'learning.', 'intelligence.', 'mind.', 'obedience.levels.owner', 'obedience.levels.admin', 'obedience.overrideConscience', 'obedience.whoCanInstruct']
   },
   perception: {
     intervalMs: 2000,
@@ -354,8 +396,20 @@ function listPersonalities () {
 }
 
 /** Load config: defaults ← config file ← environment variables. */
+/** CLI: node index.js [config.json] [--server <profile>] */
+function parseArgs () {
+  const args = process.argv.slice(2)
+  const out = { file: null, server: process.env.BOT_SERVER || null }
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--server') out.server = args[++i]
+    else if (!args[i].startsWith('--') && !out.file) out.file = args[i]
+  }
+  return out
+}
+
 function loadConfig (log) {
-  const file = process.argv[2] || process.env.BOT_CONFIG || path.join(__dirname, 'config.json')
+  const cli = parseArgs()
+  const file = cli.file || process.env.BOT_CONFIG || path.join(__dirname, 'config.json')
   let user = {}
   if (fs.existsSync(file)) {
     user = readJson(file)
@@ -364,6 +418,13 @@ function loadConfig (log) {
     log.warn(`No config file at ${file}; using defaults.`)
   }
   const config = deepMerge(DEFAULT_CONFIG, user)
+  // A named server profile overrides the default server settings.
+  if (cli.server) {
+    const profile = config.servers?.[cli.server]
+    if (!profile) throw new Error(`No server profile "${cli.server}" in config.servers (have: ${Object.keys(config.servers || {}).join(', ') || 'none'})`)
+    config.server = deepMerge(config.server, profile)
+    log.info(`Using server profile "${cli.server}" (${profile.realm ? `realm ${profile.realm}` : `${config.server.host}:${config.server.port}`})`)
+  }
 
   const env = process.env
   if (env.MC_HOST) config.server.host = env.MC_HOST
@@ -371,6 +432,8 @@ function loadConfig (log) {
   if (env.MC_USERNAME) config.server.username = env.MC_USERNAME
   if (env.MC_AUTH) config.server.auth = env.MC_AUTH
   if (env.MC_VERSION) config.server.version = env.MC_VERSION
+  if (env.MC_PASSWORD) config.server.password = env.MC_PASSWORD
+  if (env.BOT_INTELLIGENCE) config.intelligence.level = env.BOT_INTELLIGENCE
   if (env.OLLAMA_URL) config.llm.url = env.OLLAMA_URL
   if (env.OLLAMA_MODEL) config.llm.model = env.OLLAMA_MODEL
   if (env.BOT_PERSONALITY) config.personality = env.BOT_PERSONALITY
@@ -382,6 +445,10 @@ function loadConfig (log) {
     config.obedience.whoCanInstruct = { everyone: 'everyone', owners: 'owners', nobody: 'nobody' }[user.behavior.obeyPlayers] || 'everyone'
   }
 
+  if (!IQ_LEVELS.includes(config.intelligence.level)) {
+    log.warn(`Unknown intelligence.level "${config.intelligence.level}" (use ${IQ_LEVELS.join(', ')}); using mediocre.`)
+    config.intelligence.level = 'mediocre'
+  }
   if (!CHAT_MODES.includes(config.chat.mode)) {
     log.warn(`Unknown chat.mode "${config.chat.mode}", falling back to "respond".`)
     config.chat.mode = 'respond'
@@ -412,33 +479,6 @@ class Memory {
   }
 
   addEvent (type, text) { this.push(this.events, { type, text }, 20) }
-
-  /** Chest memory: what's where, from checking containers. */
-  rememberContainer (pos, type, contents) {
-    this.containers ||= new Map()
-    this.containers.set(`${pos.x},${pos.y},${pos.z}`, { x: pos.x, y: pos.y, z: pos.z, type, contents, seenAt: Date.now() })
-    if (this.containers.size > 60) this.containers.delete(this.containers.keys().next().value)
-  }
-
-  containerSeenRecently (pos, ms = 10 * 60000) {
-    const c = this.containers?.get(`${pos.x},${pos.y},${pos.z}`)
-    return Boolean(c && Date.now() - c.seenAt < ms)
-  }
-
-  nearestContainers (pos, n = 4) {
-    return [...(this.containers?.values() || [])]
-      .map((c) => ({ c, d: Math.hypot(c.x - pos.x, c.y - pos.y, c.z - pos.z) }))
-      .filter((x) => x.d < 64)
-      .sort((a, b) => a.d - b.d)
-      .slice(0, n)
-      .map(({ c }) => `${c.type} at (${c.x}, ${c.y}, ${c.z}), checked ${ago(c.seenAt)}: ${Object.entries(c.contents).slice(0, 8).map(([k, v]) => `${v} ${k}`).join(', ') || 'empty'}`)
-  }
-
-  containersToJSON () { return [...(this.containers?.values() || [])] }
-
-  loadContainers (list) {
-    this.containers = new Map((list || []).map((c) => [`${c.x},${c.y},${c.z}`, c]))
-  }
 
   addChat (from, text, { self = false, whisper = false } = {}) {
     this.push(this.chat, { from, text, self, whisper }, 30)
@@ -520,18 +560,22 @@ class Perception {
     this.latest = null
   }
 
+  /** Only what the bot can actually perceive (sight, hearing, memory) — see senses.js. */
   nearbyEntities () {
     const { bot } = this
     const { entityRadius, maxEntities } = this.config.perception
     const me = bot.entity.position
-    return Object.values(bot.entities)
-      .filter((e) => e !== bot.entity && e.position && e.position.distanceTo(me) <= entityRadius)
-      .map((e) => ({ e, kind: classifyEntity(e), d: e.position.distanceTo(me) }))
+    const radius = this.agent.intelligence.can('seeThroughWalls', 'senses') ? Math.max(entityRadius, 48) : entityRadius
+    return this.agent.senses.perceive(bot, radius)
+      .map((p) => ({ ...p, e: p.entity, kind: classifyEntity(p.entity), d: (p.lastPos || p.entity.position).distanceTo(me) }))
       .filter((x) => x.kind !== 'other')
       .sort((a, b) => a.d - b.d)
       .slice(0, maxEntities)
-      .map(({ e, kind, d }) => {
-        const out = { id: e.id, kind, name: e.username || e.name, distance: Math.round(d * 10) / 10, position: pos3(e.position) }
+      .map(({ e, kind, d, how, lastPos, lastAt, invisible }) => {
+        const pos = lastPos || e.position
+        const out = { id: e.id, kind, name: e.username || e.name, distance: Math.round(d * 10) / 10, position: pos3(pos) }
+        if (how !== 'sight') out.perceived = how === 'memory' ? `last seen ${ago(lastAt)}` : how
+        if (invisible) out.invisible = true
         if (kind === 'item') out.item = safe(() => e.getDroppedItem()?.name)
         if (kind === 'player') {
           out.holding = e.heldItem?.name || null
@@ -543,21 +587,33 @@ class Perception {
       })
   }
 
+  /**
+   * Notable blocks. Realistically only ones it can see (or saw recently, or is
+   * standing next to); impossible + allowXray reads every loaded block.
+   */
   nearbyBlocks () {
     const { bot } = this
-    const radius = this.config.perception.blockSearchRadius
+    const intel = this.agent.intelligence
+    const xray = intel.can('seeThroughWalls', 'senses') && this.config.intelligence.allowXray
+    const realistic = this.config.senses.realisticSight && !xray
+    const radius = xray ? Math.max(32, this.config.perception.blockSearchRadius) : this.config.perception.blockSearchRadius
+    this.blockMemory ||= new Map() // "x,y,z" -> { name, at }
     const found = {}
     const record = (pos) => {
       const block = bot.blockAt(pos)
       if (!block) return
+      const dist = bot.entity.position.distanceTo(pos)
+      const k = `${pos.x},${pos.y},${pos.z}`
+      let visible = dist <= 3 || this.agent.senses.canSee(bot, pos.offset(0.5, 0.5, 0.5))
+      if (visible) this.blockMemory.set(k, { name: block.name, at: Date.now() })
+      else if (realistic) {
+        const m = this.blockMemory.get(k)
+        if (!m || m.name !== block.name || Date.now() - m.at > 10 * 60000) return // never seen it: doesn't know it's there
+        visible = false
+      }
       const entry = found[block.name]
       if (entry) { entry.count++; return }
-      found[block.name] = {
-        count: 1,
-        nearest: pos3(pos),
-        distance: Math.round(bot.entity.position.distanceTo(pos)),
-        visible: safe(() => bot.canSeeBlock(block)) ?? false
-      }
+      found[block.name] = { count: 1, nearest: pos3(pos), distance: Math.round(dist), visible }
     }
     if (this.interestingIds.length) {
       for (const pos of bot.findBlocks({ matching: this.interestingIds, maxDistance: radius, count: 256 })) record(pos)
@@ -585,6 +641,19 @@ class Perception {
       }
     }
     return Object.fromEntries(Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 10))
+  }
+
+  /** Signs it can see and read. */
+  visibleSigns () {
+    const { bot } = this
+    if (!this.signCache || Date.now() - this.signCache.at > 6000) {
+      const list = this.agent.containers.signsNear(bot, bot.entity.position.floored(), 10, 8)
+        .filter((sg) => this.agent.senses.canSee(bot, sg.pos.offset(0.5, 0.5, 0.5)))
+        .slice(0, 5)
+        .map((sg) => `(${sg.pos.x}, ${sg.pos.y}, ${sg.pos.z}): "${sg.text}"`)
+      this.signCache = { at: Date.now(), list }
+    }
+    return this.signCache.list
   }
 
   equipment () {
@@ -655,9 +724,12 @@ class Perception {
         danger: this.agent.dangerLevel(),
         combatKit: combat.describeKit(bot),
         building: this.agent.builder.current ? building.describePlan(this.agent.builder.current) : null,
-        knownContainers: memory.nearestContainers(e.position),
+        knownContainers: this.agent.containers.nearest(e.position),
+        skill: this.agent.intelligence.describe(),
         dangerZonesNearby: learning.movement.nearbyDangers(e.position)
       },
+      senses: this.agent.senses.summary(),
+      signs: this.visibleSigns(),
       recentActions: memory.actions.slice(-recent).map((a) => ({
         when: ago(a.at), action: a.action, args: a.args, ok: a.ok, ...(a.code ? { code: a.code } : {}), result: a.message
       })),
@@ -921,9 +993,38 @@ function chatPolicy (mode) {
   }
 }
 
+/** The "how you think" block: skill level + configurable mind. */
+function mindBlock (agent) {
+  const m = agent.config.mind
+  const intel = agent.intelligence
+  const lines = [`## How you think\nSkill: ${intel.label}. ${intel.mindset()}`]
+  if (intel.cfg.learn && intel.baseIndex < 7) lines.push('You get better with experience; "What you\'ve learned" is knowledge you picked up yourself.')
+  if (m.thinkLike) lines.push(`Think and play like ${m.thinkLike}.`)
+  const styles = {
+    survivalist: 'You focus on staying alive and self-sufficient: food, shelter, safety first.',
+    builder: 'You love building: you spend your time gathering materials and constructing things.',
+    explorer: 'You love exploring: new biomes, caves and structures pull you along.',
+    fighter: 'You seek out fights and gear up for combat.',
+    helper: 'You like helping other players and working together.',
+    trader: 'You care about trading and collecting valuables (emeralds, diamonds, villagers).',
+    miner: 'You love mining: caves, ores and big tunnels.'
+  }
+  if (styles[m.playstyle]) lines.push(styles[m.playstyle])
+  const pr = Object.entries(m.priorities || {}).filter(([, v]) => v !== 1).map(([k, v]) => `${k} ${v > 1 ? 'matters a lot' : v <= 0 ? "doesn't matter to you" : 'matters less'}`)
+  if (pr.length) lines.push(`Priorities: ${pr.join(', ')}.`)
+  if (m.riskTolerance <= 0.25) lines.push('You are very careful and avoid unnecessary risks.')
+  else if (m.riskTolerance >= 0.75) lines.push('You take big risks for big rewards.')
+  if (m.curiosity >= 0.75) lines.push('You are very curious: odd noises and unexplored places draw you in.')
+  else if (m.curiosity <= 0.25) lines.push("You don't go poking around things that don't concern you.")
+  if (m.instructions?.length) lines.push(`Always: ${m.instructions.map((x) => `\n- ${x}`).join('')}`)
+  return lines.join('\n')
+}
+
 function buildDecisionPrompt (agent, toolDocs) {
   const { personality, config } = agent
   return `${personaBlock(personality, agent.bot.username)}
+
+${mindBlock(agent)}
 
 ## How you play
 - Each turn you get your current state as JSON and choose exactly ONE action. You'll see its result next turn.
@@ -932,7 +1033,10 @@ function buildDecisionPrompt (agent, toolDocs) {
 - Read recentActions: if an action failed, understand the error code and try something different instead of repeating it.
 - If a player asked you for something and you agreed (see status.goal / recentChat), prioritise it.
 - Survive: eat when hungry, avoid lava, deep falls and status.dangerZonesNearby, fight or flee from hostile mobs, be careful at night.
-- Use the game's systems: smelt ores and cook food (smeltItem), store loot in chests (status.knownContainers remembers what's where), sleep in a bed at night, open doors, fish, and useItem for potions, pearls, buckets, bone meal and the like. If you're unsure how something works or how to get an item, use knowledge — it's instant.
+- Use the game's systems: smelt ores and cook food (smeltItem), store loot in chests (status.knownContainers remembers what's where), sleep in a bed at night, open doors, fish, and useItem for potions, pearls, buckets, bone meal and the like. If you're unsure how something works or how to get an item, use knowledge — but you only know what a player of your skill knows; otherwise experiment or ask.
+- Your senses are realistic: nearbyEntities is what you can see or hear ("perceived" says how; "last seen" means it went out of sight). status.senses lists sounds and particles; "source unseen" means you can't see what made it. If something sounds wrong (footsteps, a chest opening, mining, with nobody visible), be cautious and check it out — less so if you know other players are around.
+- Read signs (status.signs, readSigns): they tell you whose place it is, rules, and directions. Chests: inspectContainer tells you whose chest it is (yours, community, someone's private chest, unlooted or looted loot chest). Never take from other players' private chests; loot chests and community chests are fine (take fairly from community ones).
+- On other people's servers be a good guest: don't break or dig through other players' builds, don't take their things, and follow any rules you see in chat or on signs.
 - Fights: attackTarget already uses your whole kit (status.combatKit) — bows at range, axe vs shields, mace + wind charges, potions, golden apples, totems. Carry good stuff before risky trips.
 - Building: when you want a home, base or lookout, use planBuilding with your own concept (what YOU would like, fitting the place), then build repeatedly; gather what it says is missing. status.building shows progress.
 - People: each player in nearbyEntities has your trust in them and how they seem. Be generous with friends (giveItem, help them), polite but guarded with strangers, and keep your distance from people who hurt you. You may fight players who attack you; never attack someone just because you dislike them. Accept a duel only when a player asks for one (attackTarget with sparring: true).
@@ -1108,6 +1212,20 @@ const pick = (arr) => arr[Math.floor(Math.random() * arr.length)]
 // ChatResponder — incoming chat, replies, task requests and owner commands
 // ===========================================================================
 
+/** Common plugin chat/whisper formats. Returns { user, msg, whisper } or null. */
+function parsePluginChat (text, extra = []) {
+  const t = String(text).replace(/§./g, '').trim()
+  for (const re of extra) {
+    const m = t.match(re)
+    if (m?.groups?.user && m.groups.msg) return { user: m.groups.user, msg: m.groups.msg, whisper: Boolean(m.groups.whisper) }
+  }
+  let m = t.match(/^\[?([A-Za-z0-9_]{2,16})\s*(?:->|→|»)\s*(?:me|you)\]?\s*:?\s+(.+)$/i) || t.match(/^([A-Za-z0-9_]{2,16}) whispers(?: to you)?:\s+(.+)$/i) || t.match(/^From ([A-Za-z0-9_]{2,16}):\s+(.+)$/i)
+  if (m) return { user: m[1], msg: m[2], whisper: true }
+  m = t.match(/^(?:\[[^\]]{1,24}\]\s*)*<([A-Za-z0-9_]{2,16})>\s+(.+)$/) ||
+    t.match(/^(?:\[[^\]]{1,24}\]\s*)*(?:[^\s:]{1,16}\s)?([A-Za-z0-9_]{2,16})\s*(?:»|>>|:|\|)\s+(.+)$/)
+  return m ? { user: m[1], msg: m[2], whisper: false } : null
+}
+
 const URGENT = /\b(help|run|behind you|watch out|look out|creeper|danger|stop|wait|duck)\b/i
 
 class ChatResponder {
@@ -1180,6 +1298,9 @@ class ChatResponder {
         return
       }
     }
+
+    // Players can teach it things ("you need an iron pickaxe for diamonds").
+    if (!this.agent.social.isHostile(username)) this.agent.learnFacts(message, username, 0.35)
 
     if (!this.agent.chat.allows('reply')) return
     const addressed = this.isAddressed(username, message, whisper)
@@ -1452,6 +1573,39 @@ ${speaker}'s latest message${said.length > 1 ? 's' : ''}: ${said.map((m) => `"${
         return reply(`${what} obedience = ${o.players[what.toLowerCase()]}`)
       }
 
+      case 'iq':
+      case 'intelligence': {
+        const level = (rest[0] || '').toLowerCase()
+        const intel = agent.intelligence
+        if (!level) return reply(`intelligence: ${intel.describe()}${config.intelligence.learn ? ' (learning)' : ''}. levels: ${IQ_LEVELS.join(', ')}`)
+        if (level === 'learn') { const r = agent.applySetting('intelligence.learn', rest[1] ?? 'on', username); return reply(r.ok ? `learning ${r.value ? 'on' : 'off'}.` : r.error) }
+        const r = agent.applySetting('intelligence.level', level, username)
+        return reply(r.ok ? `intelligence set to ${IQ_LABELS[r.value]}.` : r.error)
+      }
+
+      case 'mind': {
+        // !mind | !mind like <text> | !mind style <playstyle> | !mind risk <0-1> | !mind curious <0-1> | !mind add <instruction> | !mind clear
+        const m = config.mind
+        const [sub, ...words] = rest
+        const text = words.join(' ')
+        if (!sub) return reply(`thinks like: ${m.thinkLike || '(itself)'} | style: ${m.playstyle} | risk ${m.riskTolerance} | curiosity ${m.curiosity} | rules: ${m.instructions.length ? m.instructions.join('; ') : 'none'}`.slice(0, 250))
+        const map = { like: 'mind.thinkLike', style: 'mind.playstyle', risk: 'mind.riskTolerance', curious: 'mind.curiosity', curiosity: 'mind.curiosity' }
+        if (map[sub]) { const r = agent.applySetting(map[sub], text, username); return reply(r.ok ? `${map[sub]} = ${JSON.stringify(r.value)}` : r.error) }
+        if (sub === 'add' && text) { m.instructions.push(text.slice(0, 160)); agent.settingOverrides['mind.instructions'] = m.instructions; agent.learning.markDirty(); return reply(`ok, I'll remember: ${text}`) }
+        if (sub === 'clear') { m.instructions = []; agent.settingOverrides['mind.instructions'] = []; agent.learning.markDirty(); return reply('standing instructions cleared.') }
+        return reply('usage: mind [like <text> | style <balanced|survivalist|builder|explorer|fighter|helper|trader|miner> | risk <0-1> | curious <0-1> | add <rule> | clear]')
+      }
+
+      case 'chests': {
+        const near = agent.containers.nearest(bot.entity.position, 3)
+        return reply(near.length ? near.join(' | ').slice(0, 250) : "haven't looked in any chests around here.")
+      }
+
+      case 'senses': {
+        const sm = agent.senses.summary()
+        return reply(`suspicion: ${sm.suspicion} | heard: ${sm.heard.slice(-3).join('; ') || 'nothing'} | noticed: ${sm.noticed.slice(-2).join('; ') || 'nothing'}`.slice(0, 250))
+      }
+
       case 'build': {
         const plan = agent.builder.current
         if (rest[0] === 'cancel') { agent.builder.current = null; agent.learning.markDirty(); return reply(plan ? `dropped ${plan.name}.` : 'no plan.') }
@@ -1515,7 +1669,7 @@ ${speaker}'s latest message${said.length > 1 ? 's' : ''}: ${said.map((m) => `"${
 
       case 'help':
       default:
-        return reply('commands: status stop pause resume come follow goal mode emotion trust obey tasks build admin set get settings persona reactions lessons forget save')
+        return reply('commands: status stop pause resume come follow goal mode emotion trust obey tasks build chests senses iq mind admin set get settings persona reactions lessons forget save')
     }
   }
 }
@@ -1545,6 +1699,21 @@ const SETTABLE = {
   'obedience.whoCanInstruct': oneOf('everyone', 'trusted', 'admins', 'owners', 'nobody'),
   'obedience.overrideConscience': BOOL,
   'chat.stopToType': BOOL,
+  'intelligence.level': oneOf(...IQ_LEVELS),
+  'intelligence.learn': BOOL,
+  'intelligence.learnRate': num(0, 5),
+  'intelligence.allowXray': BOOL,
+  'mind.thinkLike': { type: 'string', max: 200 },
+  'mind.playstyle': oneOf('balanced', 'survivalist', 'builder', 'explorer', 'fighter', 'helper', 'trader', 'miner'),
+  'mind.riskTolerance': num(0, 1),
+  'mind.curiosity': num(0, 1),
+  'senses.realisticSight': BOOL,
+  'senses.hearing': BOOL,
+  'senses.particles': BOOL,
+  'senses.investigate': BOOL,
+  'senses.suspicionThreshold': num(0.2, 5),
+  'behavior.respectPrivateChests': BOOL,
+  'behavior.noGrief': BOOL,
   'busyWork.enabled': BOOL,
   'emotions.enabled': BOOL,
   'emotions.volatility': num(0, 3),
@@ -1589,6 +1758,10 @@ function parseSetting (key, raw) {
       if (/^(on|true|yes|1)$/i.test(v)) return { value: true }
       if (/^(off|false|no|0)$/i.test(v)) return { value: false }
       return { error: `${key} needs on/off.` }
+    }
+    case 'string': {
+      const text = String(v ?? '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, spec.max || 200)
+      return { value: /^(none|clear|off)$/i.test(text) ? '' : text }
     }
     case 'enum': {
       const val = v === null || /^(null|none|off)$/i.test(String(v)) ? null : String(v).toLowerCase()
@@ -1753,6 +1926,8 @@ class EventReactor {
         this.trigger('death', { cause })
       }
       learning.reflect(`You died: "${cause}". Just before: ${agent.memory.events.slice(-4).map((e) => e.text).join('; ')}`)
+      agent.intelligence.addXp('survival', 2)
+      agent.learnFacts(`${cause} ${agent.memory.events.slice(-3).map((e) => e.text).join(' ')}`, 'dying', 0.6)
       this.pendingDeathCause = null
       this.pendingKiller = null
     })
@@ -1995,6 +2170,13 @@ const REMEMBERED_BY_SOCIAL = new Set(['attackedByPlayer', 'gift', 'promiseKept',
 // Brain — the throttled perceive → decide → act loop
 // ===========================================================================
 
+/** Which skill domain each action trains. */
+const ACTION_DOMAINS = {
+  attackTarget: 'combat', retreat: 'combat', mineBlock: 'survival', craftItem: 'survival', smeltItem: 'survival', eatFood: 'survival',
+  fish: 'survival', sleepInBed: 'survival', parkour: 'survival', explore: 'survival', moveToBlock: 'survival', planBuilding: 'building',
+  build: 'building', placeBlock: 'building', knowledge: 'knowledge', readSigns: 'senses', inspectContainer: 'senses', useItem: 'survival'
+}
+
 const MOVEMENT_ACTIONS = new Set(['moveToBlock', 'moveToPlayer', 'explore', 'mineBlock', 'collectDrops', 'followPlayer', 'retreat'])
 
 const WEAPON_POWER = { wooden: 4, golden: 4, stone: 5, iron: 6, diamond: 7, netherite: 8 }
@@ -2158,7 +2340,7 @@ class Brain {
 
     if (Object.values(bot.entities).some((e) => e.name === 'item' && e.position.distanceTo(me) < 6)) add(3, 'collectDrops', { radius: 6 }, 'picked up items lying around')
     const ids = ['chest', 'trapped_chest', 'barrel'].map((n) => bot.registry.blocksByName[n]?.id).filter((x) => x !== undefined)
-    const chest = bot.findBlocks({ matching: ids, maxDistance: 12, count: 6 }).find((p) => !memory.containerSeenRecently(p))
+    const chest = bot.findBlocks({ matching: ids, maxDistance: 12, count: 6 }).find((p) => !agent.containers.seenRecently(p))
     if (chest) add(2.5, 'inspectContainer', { x: chest.x, y: chest.y, z: chest.z }, 'checked a chest')
     const t = tasks.active()
     if (t && ['gather', 'craft'].includes(t.kind) && t.item && state?.nearbyBlocks) {
@@ -2179,8 +2361,12 @@ class Brain {
 
   /** Feelings and movement lessons from every action result. */
   learnFrom (name, result) {
-    const { emotions, learning, memory, bot } = this.agent
+    const { emotions, learning, memory, bot, intelligence } = this.agent
     if (MOVEMENT_ACTIONS.has(name)) learning.movement.recordResult(result, bot.entity?.position)
+    // Practice makes better (with diminishing returns — see intelligence.js).
+    const domain = ACTION_DOMAINS[name]
+    if (domain && result.code !== 'ABORTED') intelligence.addXp(domain, result.ok ? 0.4 : 0.15)
+    if (name === 'craftItem' && result.ok && result.args?.itemName) this.agent.learnedItems.add(String(result.args.itemName).toLowerCase())
     if (name === 'wait') emotions.stimulate({ boredom: 0.05 })
     else if (result.ok) emotions.stimulate({ joy: 0.03, boredom: -0.06 })
     else if (result.code !== 'ABORTED') emotions.stimulate({ anger: 0.04, boredom: -0.03 }, result.code === 'BUSY' ? null : 'things keep going wrong')
@@ -2228,6 +2414,13 @@ class Brain {
     const make = (reflexKey, thought, emotion, action) => dryRun ? true : { source: 'reflex', reflexKey, thought, emotion, action }
     const social = this.agent.social
 
+    // A creeper hissing right next to us — even if we can't see it.
+    const ca = this.agent.creeperAlert
+    if (ca && Date.now() - ca.at < 2500 && ready('creeper', 3000)) {
+      const creeper = (ca.id && bot.entities[ca.id]) || Object.values(bot.entities).find((e) => e.name === 'creeper' && e.position.distanceTo(ca.pos) < 4)
+      if (creeper) return make('creeper', 'I hear a creeper hissing — get away!', 'scared', { name: 'retreat', args: { entityId: creeper.id, distance: 10 } })
+    }
+
     // Someone is attacking a player we promised to protect.
     const pa = this.agent.protectAlert
     if (pa && Date.now() - pa.at < 8000 && ready(`protect:${pa.attacker}`, 6000)) {
@@ -2265,6 +2458,15 @@ class Brain {
     if (b.selfDefense && nearest && nearest.name !== 'creeper' && (provoked || tooClose) && ready('defend', 5000)) {
       return make('defend', `A ${nearest.name} is attacking me, fighting back!`, 'determined', { name: 'attackTarget', args: { entityId: nearest.id, maxSeconds: 15 } })
     }
+    // Something odd we heard or saw with nobody around: go have a careful look.
+    const inv = this.agent.investigation
+    if (inv && !inv.done && config.senses.investigate && Date.now() - inv.at < 60000 && !nearest && ready('investigate', 30000) &&
+      !this.agent.tasks.active() && Math.random() < 0.5 + config.mind.curiosity * 0.5) {
+      inv.done = true
+      this.agent.emotions.stimulate({ fear: 0.05 })
+      return make('investigate', `Heard ${inv.reason}. Going to check it out carefully.`, 'nervous', { name: 'moveToBlock', args: { x: inv.pos.x, y: inv.pos.y, z: inv.pos.z, range: 3 } })
+    }
+
     if (b.autoEat && bot.food <= b.autoEatBelow && dist > 6 && ready('eat')) {
       const foods = bot.registry.foodsByName
       const hasFood = bot.inventory.items().some((i) => foods[i.name] && !['rotten_flesh', 'spider_eye', 'poisonous_potato', 'pufferfish'].includes(i.name))
@@ -2283,8 +2485,9 @@ class Brain {
     const learned = [...learning.lessons.top(8), ...learning.combat.summary(4)]
     const knowhow = knowledge.relevantFacts([
       memory.goal, state.status.task?.what, state.status.building, Object.keys(state.inventory.items).join(' '),
-      Object.keys(state.nearbyBlocks).join(' '), state.nearbyEntities.map((e) => e.name).join(' '), state.world.phase, state.self.dimension
-    ].filter(Boolean).join(' '), 4)
+      Object.keys(state.nearbyBlocks).join(' '), state.nearbyEntities.map((e) => e.name).join(' '), state.world.phase, state.self.dimension,
+      state.senses.heard.join(' ')
+    ].filter(Boolean).join(' '), 4, agent.knowledgeOpts())
 
     const nudges = []
     const streak = memory.failureStreak()
@@ -2302,7 +2505,7 @@ class Brain {
           `${nudges.join('\n')}\nChoose your next action.`
       }
     ]
-    const out = await agent.llm.chat(messages, { schema: decisionSchema(tools), priority: PRIORITY.decision, label: 'decision' })
+    const out = await agent.llm.chat(messages, { schema: decisionSchema(tools), priority: PRIORITY.decision, label: 'decision', temperature: config.mind.decisionTemperature ?? undefined })
 
     const decision = {
       source: 'llm',
@@ -2355,19 +2558,49 @@ class Agent {
     const saved = this.learning.data
     this.social = new SocialModel(this, saved.social)
     this.tasks = new TaskManager(this, saved.tasks)
+    this.intelligence = new Intelligence(() => this.config.intelligence, saved.intelligence)
+    this.senses = new Senses(this)
+    // Chests remembered by older versions carry over.
+    const legacy = !saved.chests && Array.isArray(saved.containers)
+      ? { records: Object.fromEntries(saved.containers.map((c) => [`${c.x},${c.y},${c.z}`, { ...c, lastSeen: c.seenAt, openers: {}, history: [] }])) }
+      : saved.chests
+    this.containers = new ContainerIntel(this, legacy)
+    this.knownFacts = new Set(saved.knownFacts || []) // facts above its level it has learned
+    this.learnedItems = new Set(saved.learnedItems || []) // recipes it worked out itself
     this.builder = { current: saved.building?.current || null, history: saved.building?.history || [], owner: config.server.username }
-    this.memory.loadContainers(saved.containers)
     if (saved.obeyPlayers) this.config.obedience.players = { ...saved.obeyPlayers, ...this.config.obedience.players }
     this.emotions.load(saved.emotions)
     this.runtimeAdmins = saved.admins || []
     this.settingOverrides = {}
     for (const [key, value] of Object.entries(saved.settings || {})) {
+      if (key === 'mind.instructions' && Array.isArray(value)) { this.config.mind.instructions = value; this.settingOverrides[key] = value; continue }
       const parsed = parseSetting(key, value)
       if (parsed.error) continue
       setPath(this.config, key, parsed.value)
       this.settingOverrides[key] = parsed.value
     }
     if (Object.keys(this.settingOverrides).length) log.info(`In-game settings restored: ${Object.keys(this.settingOverrides).join(', ')}`)
+  }
+
+  /** What the bot knows right now (for knowledge lookups and prompts). */
+  knowledgeOpts () {
+    return { tier: this.intelligence.knowledgeTier(), known: this.knownFacts, learnedItems: this.learnedItems }
+  }
+
+  /**
+   * Learn from experience or from being told: facts above its level can stick.
+   * @param {string} text what happened / what someone said
+   * @param {string} from where it came from (for the memory note)
+   */
+  learnFacts (text, from, chance = 0.4) {
+    if (!this.config.intelligence.learn) return
+    for (const f of knowledge.learnFrom(text, this.knowledgeOpts(), chance)) {
+      this.knownFacts.add(f.keys)
+      this.intelligence.addXp('knowledge', 2)
+      this.memory.addEvent('learned', `You learned something${from ? ` (from ${from})` : ''}: ${f.text}`)
+      this.log.info(`Learned a fact${from ? ` from ${from}` : ''}: ${f.text.slice(0, 80)}...`)
+      this.learning.markDirty()
+    }
   }
 
   /**
@@ -2411,6 +2644,7 @@ class Agent {
     this.settingOverrides[key] = parsed.value
     this.learning.markDirty()
     this.log.info(`Setting ${key} = ${JSON.stringify(parsed.value)}${by ? ` (by ${by})` : ''}`)
+    if (key.startsWith('intelligence.')) this.refreshMovements()
     return { ok: true, value: parsed.value }
   }
 
@@ -2477,15 +2711,25 @@ class Agent {
     const s = this.config.server
     const version = await this.resolveVersion()
     this.log.info(`Connecting to ${s.host}:${s.port} as ${s.username}${version ? ` (protocol ${version})` : ''}...`)
-    const bot = mineflayer.createBot({
+    const options = {
       host: s.host,
       port: s.port,
       username: s.username,
       auth: s.auth,
       version,
       checkTimeoutInterval: 60000,
-      hideErrors: true
-    })
+      hideErrors: true,
+      // Microsoft sign-in: tokens are cached so you only do this once.
+      profilesFolder: path.isAbsolute(s.authFolder) ? s.authFolder : path.join(__dirname, s.authFolder),
+      onMsaCode: (data) => this.log.warn(`Microsoft sign-in for the bot's account: go to ${data.verification_uri} and enter code ${data.user_code}`)
+    }
+    if (s.realm) {
+      delete options.host
+      options.realms = { pickRealm: (realms) => realms.find((r) => r.name.toLowerCase() === s.realm.toLowerCase()) || realms[0] }
+    }
+    const bot = mineflayer.createBot(options)
+    this.stopReconnecting = false
+    this.loginSentAt = 0
     this.bot = bot
     bot.loadPlugin(pathfinder)
 
@@ -2500,6 +2744,9 @@ class Agent {
       memory: this.memory,
       tasks: this.tasks,
       builder: this.builder,
+      intel: this.intelligence,
+      containers: this.containers,
+      knowledgeOpts: () => this.knowledgeOpts(),
       notify: (type, data) => this.onActionEvent(type, data)
     })
     this.reactor = new EventReactor(this)
@@ -2507,6 +2754,8 @@ class Agent {
     this.brain = new Brain(this)
     this.smalltalk = new SmallTalk(this)
     this.reactor.attach(bot)
+    this.senses.attach(bot)
+    this.attachServerHelpers(bot)
 
     bot.once('spawn', () => this.onFirstSpawn())
     bot.on('spawn', () => { this.dead = false })
@@ -2520,8 +2769,8 @@ class Agent {
     bot.on('physicsTick', () => {
       const vy = bot.entity?.velocity?.y ?? 0
       this.recentFallSpeed = Math.min(vy, this.recentFallSpeed * 0.9)
-      // Water-bucket clutch when falling hard toward the ground.
-      if (vy < -0.75 && !this.clutching && Date.now() - (this.lastClutchAt || 0) > 3000) {
+      // Water-bucket clutch when falling hard toward the ground (a skill not everyone has).
+      if (vy < -0.75 && !this.clutching && this.intelligence.can('waterClutch', 'survival') && Date.now() - (this.lastClutchAt || 0) > 3000) {
         this.clutching = true
         combat.fallClutch(bot).then((did) => { if (did) { this.lastClutchAt = Date.now(); this.log.info('Water-bucket clutch!') } })
           .catch(() => {}).finally(() => { this.clutching = false })
@@ -2535,6 +2784,16 @@ class Agent {
       if (/outdated|incompatible|version/i.test(text)) {
         this.log.warn('That looks like a version mismatch. Pin server.version, or install ViaVersion + ViaBackwards on the server / use ViaProxy (see README).')
       }
+      // Never fight a real person for the same account, and don't hammer a server that doesn't want us.
+      if (/logged in from another location|another location|duplicate (login|name)|already (connected|online|playing|logged in)/i.test(text)) {
+        this.stopReconnecting = true
+        this.log.warn('Someone else logged in with this account (maybe you). The bot will not reconnect and kick you off.')
+      } else if (/white-?list|not allowed on this server|banned|ban\b/i.test(text)) {
+        this.stopReconnecting = true
+        this.log.warn('The server does not let this account in (whitelist/ban). Not retrying.')
+      } else if (/spam|flying|too (fast|many)/i.test(text)) {
+        this.reconnectAttempts += 2 // back off harder
+      }
     })
     bot.on('error', (err) => this.log.error(`Connection error: ${err.message}`))
     bot.on('end', (reason) => this.onEnd(reason))
@@ -2544,6 +2803,7 @@ class Agent {
   onActionEvent (type, data) {
     const { emotions, learning, memory } = this
     if (type === 'fightEnded') {
+      this.intelligence.addXp('combat', data.outcome === 'win' ? 2.5 : 1.5)
       this.tasks.onFightEnded(data)
       this.tasks.distract(0.1)
       if (data.outcome === 'win') {
@@ -2577,6 +2837,43 @@ class Agent {
     this.reactor.trigger(type, data)
   }
 
+  /** Re-apply skill-dependent movement (parkour, sprinting) after an intelligence change. */
+  refreshMovements () {
+    const m = this.bot?.pathfinder?.movements
+    if (!m) return
+    const pf = this.config.behavior.pathfinding
+    m.allowParkour = pf.allowParkour && this.intelligence.can('parkour', 'survival')
+    m.allowSprinting = pf.allowSprinting && this.intelligence.can('sprint', 'survival')
+  }
+
+  /** Things that make joining other people's servers just work. */
+  attachServerHelpers (bot) {
+    const s = this.config.server
+    // Resource packs.
+    bot.on('resourcePack', () => {
+      try { if (s.resourcePack === 'decline') bot.denyResourcePack(); else bot.acceptResourcePack() } catch { /* older versions */ }
+    })
+    const recentChat = []
+    bot.on('chat', (username, message) => { recentChat.push(`${username}|${message}`); if (recentChat.length > 20) recentChat.shift() })
+    const userPatterns = (s.chatPatterns || []).map((p) => { try { return new RegExp(p) } catch { return null } }).filter(Boolean)
+
+    bot.on('messagestr', (text, position) => {
+      if (position === 'game_info') return
+      // Login plugins (AuthMe, nLogin, ...): answer "/register" and "/login" prompts.
+      if (s.password && Date.now() - this.loginSentAt > 8000) {
+        const fill = (t) => t.replace(/\{password\}/g, s.password)
+        if (/\/register\b|please register|register (with|using)/i.test(text)) { this.loginSentAt = Date.now(); bot.chat(fill(s.registerCommand)); this.log.info('Registered with the server login plugin.') }
+        else if (/\/login\b|please log ?in|log ?in (with|using)/i.test(text)) { this.loginSentAt = Date.now(); bot.chat(fill(s.loginCommand)); this.log.info('Logged in with the server login plugin.') }
+      }
+      // Plugin chat formats ("[Member] Steve: hi", "Steve » hi", "Steve -> me: psst") that don't come through as normal chat.
+      const parsed = parsePluginChat(text, userPatterns)
+      if (!parsed || !bot.players[parsed.user] || parsed.user === bot.username) return
+      if (recentChat.includes(`${parsed.user}|${parsed.msg}`)) return // already handled as normal chat
+      recentChat.push(`${parsed.user}|${parsed.msg}`)
+      this.responder.onMessage(parsed.user, parsed.msg, { whisper: parsed.whisper })
+    })
+  }
+
   onFirstSpawn () {
     const { bot, config, log } = this
     this.reconnectAttempts = 0
@@ -2585,8 +2882,15 @@ class Agent {
     const pf = config.behavior.pathfinding
     const movements = new Movements(bot)
     movements.canDig = pf.canDig
-    movements.allowParkour = pf.allowParkour
-    movements.allowSprinting = pf.allowSprinting
+    // Parkour and sprinting are skills too.
+    movements.allowParkour = pf.allowParkour && this.intelligence.can('parkour', 'survival')
+    movements.allowSprinting = pf.allowSprinting && this.intelligence.can('sprint', 'survival')
+    // Good guest: don't dig through other players' builds while pathfinding.
+    if (config.behavior.noGrief) {
+      for (const b of bot.registry.blocksArray) {
+        if (/planks$|glass|_bricks$|wool$|concrete|terracotta$|_door$|_bed$|lantern|bookshelf|carpet$|_sign$|_stairs$|_slab$|_fence$|_fence_gate$|_wall$|torch$|smooth_|chiseled_|quartz|_trapdoor$/.test(b.name)) movements.blocksCantBreak.add(b.id)
+      }
+    }
     movements.allow1by1towers = pf.allow1by1towers
     // Never tunnel through containers or beds that other players placed.
     for (const name of ['chest', 'trapped_chest', 'barrel', 'furnace', 'crafting_table', 'ender_chest']) {
@@ -2627,7 +2931,7 @@ class Agent {
     this.llm.clear('disconnected')
     this.learning.save()
     for (const id of this.intervals.splice(0)) clearInterval(id)
-    if (this.shuttingDown || !this.config.server.reconnect) return
+    if (this.shuttingDown || !this.config.server.reconnect || this.stopReconnecting) return
 
     const s = this.config.server
     const delay = Math.min(s.maxReconnectDelayMs, s.reconnectDelayMs * 2 ** this.reconnectAttempts)

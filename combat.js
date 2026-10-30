@@ -230,7 +230,7 @@ function aimAtEntity (bot, entity, profile) {
 }
 
 /** Throw a throwable (splash potion, pearl, wind charge, snowball) at a point or entity, or at your own feet. */
-async function throwItem (bot, item, target, profileName) {
+async function throwItem (bot, item, target, profileName, aimErrorDeg = 0) {
   await hold(bot, item)
   if (target === 'feet') {
     await bot.look(bot.entity.yaw, -Math.PI / 2, true)
@@ -240,12 +240,23 @@ async function throwItem (bot, item, target, profileName) {
       ? aimAtEntity(bot, target, profile)
       : solveAim(bot.entity.position.offset(0, 1.52, 0), target, profile)
     if (!aim) return false
-    await bot.look(aim.yaw, aim.pitch, true)
+    const [ey, ep] = aimNoise(aimErrorDeg)
+    await bot.look(aim.yaw + ey, aim.pitch + ep, true)
   }
   bot.activateItem()
   await sleep(80)
   return true
 }
+
+/** Random aim error (radians) for less skilled players. */
+function aimNoise (deg) {
+  if (!deg) return [0, 0]
+  const r = () => (Math.random() + Math.random() + Math.random() - 1.5) / 1.5 // roughly normal, -1..1
+  return [r() * deg * Math.PI / 180, r() * deg * 0.7 * Math.PI / 180]
+}
+
+/** Full ability when no intelligence profile is given (tests, scripts). */
+const FULL_PROFILE = { skill: 1, reactionMs: 60, aimErrorDeg: 0, missChance: 0, cooldownDiscipline: 1, critChance: 1, maceQuality: 1, can: () => true }
 
 /** Drink or eat something (potion, golden apple...). */
 async function consume (bot, item, signal) {
@@ -265,10 +276,14 @@ async function consume (bot, item, signal) {
  */
 async function fight (ctx, entity, style, maxSeconds) {
   const { bot, signal, log } = ctx
+  const prof = ctx.intel?.combatProfile?.() || FULL_PROFILE
+  const can = prof.can
   const started = Date.now()
   const startHealth = bot.health
   const end = started + maxSeconds * 1000
-  const tactics = entity.type === 'player' ? { player: true } : (MOB_TACTICS[entity.name] || {})
+  // Mob-specific tactics need experience; anyone runs from a warden.
+  const known = entity.type === 'player' ? { player: true } : (MOB_TACTICS[entity.name] || {})
+  const tactics = can('mobTactics') ? { ...known, splits: known.splits && can('splitChase') } : { player: known.player, flee: known.flee }
   const used = { potions: 0, gaps: 0, totems: 0, pearls: 0, arrows: 0, smashes: 0, webs: 0, axeBreaks: 0 }
   if (tactics.flee) return { outcome: 'fled', hitsLanded: 0, hitsTaken: 0, healthLost: 0, durationMs: 0, used }
 
@@ -334,13 +349,14 @@ async function fight (ctx, entity, style, maxSeconds) {
 
       // --- Sustain: stay alive first.
       if (now >= s.nextSustainAt) {
-        const usedSomething = await sustain(ctx, kit, s, target, d, used, { stopMoving, lowerShield })
-        if (usedSomething) { kit = readKit(bot); kitAt = Date.now(); s.nextSustainAt = Date.now() + 400; continue }
+        const usedSomething = await sustain(ctx, kit, s, target, d, used, { stopMoving, lowerShield, can })
+        s.nextSustainAt = Date.now() + prof.reactionMs // slower players notice low health later
+        if (usedSomething) { kit = readKit(bot); kitAt = Date.now(); s.nextSustainAt += 400; continue }
       }
       if (bot.health <= style.retreatHealth && bot.health < startHealth) { outcome = 'fled'; break }
 
       // --- Buff up before a serious fight, while there's still distance.
-      if (!s.buffed && (tactics.player || tactics.fire || entity.name === 'warden') && d > 6) {
+      if (!s.buffed && can('preBuffs') && (tactics.player || tactics.fire || entity.name === 'warden') && d > 6) {
         s.buffed = true
         const wants = ['strength', 'swiftness', ...(tactics.fire ? ['fire_resistance'] : [])]
         for (const w of wants) {
@@ -352,12 +368,12 @@ async function fight (ctx, entity, style, maxSeconds) {
       }
 
       // --- Mace: wind-charge launch and smash, or drop on them from above.
-      if (kit.mace && (style.mace || !kit.melee || kit.melee === kit.mace) && now >= s.nextMaceAt && !tactics.onlyRanged) {
+      if (kit.mace && can('maceBasic') && (style.mace || !kit.melee || kit.melee === kit.mace) && now >= s.nextMaceAt && !tactics.onlyRanged) {
         const above = bot.entity.position.y - target.position.y
         const horiz = Math.hypot(target.position.x - bot.entity.position.x, target.position.z - bot.entity.position.z)
         if (kit.windCharge && bot.entity.onGround && horiz < 3.5 && now - s.lastAttack > 1200) {
           s.nextMaceAt = now + 3500
-          if (await maceSmash(ctx, target, kit, s)) used.smashes++
+          if (await maceSmash(ctx, target, kit, s, prof.maceQuality)) used.smashes++
           kit = readKit(bot)
           continue
         }
@@ -369,13 +385,13 @@ async function fight (ctx, entity, style, maxSeconds) {
       }
 
       // --- Ranged: bow/crossbow at distance (or when melee makes no sense).
-      const launcher = kit.bow || kit.crossbow
+      const launcher = (can('bow') && kit.bow) || (can('crossbow') && kit.crossbow)
       const wantsRange = launcher && kit.arrows > 0 && !tactics.noProjectiles &&
         (tactics.onlyRanged || ((style.ranged || tactics.preferBow) && d > 5) || d > 12) && d < 50
       if (wantsRange && now >= s.nextBowAt && canSee(bot, target)) {
         if (bot.pathfinder.goal) bot.pathfinder.setGoal(null)
         lowerShield()
-        const shot = await shoot(ctx, target, kit, s, style)
+        const shot = await shoot(ctx, target, kit, s, style, prof)
         if (shot) used.arrows++
         s.nextBowAt = Date.now() + 150
         kit = readKit(bot)
@@ -383,14 +399,15 @@ async function fight (ctx, entity, style, maxSeconds) {
       }
 
       // --- Offensive splash potions (mind the undead).
-      if (now >= s.nextOffensiveAt && d >= 3 && d <= 9) {
-        const undead = UNDEAD.has(target.name)
+      if (now >= s.nextOffensiveAt && can('throwPotions') && d >= 3 && d <= 9) {
+        // Knowing that harming heals undead takes experience.
+        const undead = UNDEAD.has(target.name) && can('undeadAware')
         const pick = undead
           ? kit.splash.healing
           : kit.splash.harming || (target.type === 'player' ? kit.splash.weakness || kit.splash.slowness : null) || kit.splash.poison
         if (pick) {
           s.nextOffensiveAt = now + 6000
-          await throwItem(bot, pick, target, 'splash')
+          await throwItem(bot, pick, target, 'splash', prof.aimErrorDeg)
           used.potions++
           kit = readKit(bot)
           continue
@@ -398,7 +415,7 @@ async function fight (ctx, entity, style, maxSeconds) {
       }
 
       // --- Cobweb under an approaching player.
-      if (kit.cobweb && tactics.player && used.webs < 2 && d <= 3.2 && now - s.lastAttack > 300) {
+      if (kit.cobweb && can('cobweb') && tactics.player && used.webs < 2 && d <= 3.2 && now - s.lastAttack > 300) {
         if (await webTarget(bot, target, kit)) { used.webs++; kit = readKit(bot); continue }
       }
 
@@ -416,7 +433,7 @@ async function fight (ctx, entity, style, maxSeconds) {
         setStrafe(null)
         bot.setControlState('back', false)
         // Closing on archers: shield up and weave.
-        if (tactics.ranged && offhandShield() && d < 16) {
+        if (tactics.ranged && can('shieldBlock') && offhandShield() && d < 16) {
           bot.activateItem(true); s.shieldUp = true
         }
         if (!bot.pathfinder.goal) bot.pathfinder.setGoal(new goals.GoalFollow(target, 2), true)
@@ -428,7 +445,7 @@ async function fight (ctx, entity, style, maxSeconds) {
         const wantForward = now >= s.wtapUntil && d > 2.2 && !tactics.waitForSwoop
         bot.setControlState('forward', Boolean(wantForward || tactics.rush))
         bot.setControlState('sprint', Boolean(wantForward || tactics.rush))
-        if (style.strafe && !tactics.rush) {
+        if (style.strafe && can('strafe') && !tactics.rush) {
           if (now > s.nextStrafeSwitch) {
             s.strafeDir = s.strafeDir === 'left' ? 'right' : 'left'
             s.nextStrafeSwitch = now + 400 + Math.random() * 600
@@ -441,22 +458,24 @@ async function fight (ctx, entity, style, maxSeconds) {
         // Pick the weapon for the next hit.
         const blocking = isBlocking(bot, target)
         let weapon = kit.melee
-        if (blocking && kit.axe) weapon = kit.axe // axes knock shields down for 5 seconds
-        else if (style.combo && kit.axe && kit.sword) weapon = s.comboStep % 3 === 0 ? kit.axe : kit.sword // heavy axe crit, then quick sword hits
+        if (blocking && kit.axe && can('axeVsShield')) weapon = kit.axe // axes knock shields down for 5 seconds
+        else if (style.combo && can('combo') && kit.axe && kit.sword) weapon = s.comboStep % 3 === 0 ? kit.axe : kit.sword // heavy axe crit, then quick sword hits
         else if (kit.sword) weapon = kit.sword
         if (weapon) await swap(weapon)
 
         const cooldown = attackCooldown(bot)
-        const ready = now - Math.max(s.lastAttack, s.lastSwap) >= cooldown * (blocking ? 0.9 : 1)
+        // Beginners click before the cooldown is back (weak hits); good players wait for it.
+        const ready = now - Math.max(s.lastAttack, s.lastSwap) >= cooldown * (blocking ? 0.9 : 1) * prof.cooldownDiscipline
 
-        // Shield up between swings while they swing at us.
-        if (style.shield && offhandShield() && !ready && now - s.targetSwingAt < 600 && !s.shieldUp) {
+        // Shield up between swings while they swing at us (after the player's reaction time).
+        const sinceSwing = now - s.targetSwingAt
+        if (style.shield && can('shieldBlock') && offhandShield() && !ready && sinceSwing >= prof.reactionMs * 0.5 && sinceSwing < 600 + prof.reactionMs && !s.shieldUp) {
           bot.activateItem(true)
           s.shieldUp = true
         }
 
         if (ready) {
-          if (style.crit && !s.jumping && bot.entity.onGround && !bot.entity.isInWater && cooldown >= 500 && !blocking) {
+          if (style.crit && !s.jumping && bot.entity.onGround && !bot.entity.isInWater && cooldown >= 500 && !blocking && Math.random() < prof.critChance) {
             bot.setControlState('jump', true)
             s.jumping = true
             s.jumpAt = now
@@ -468,11 +487,12 @@ async function fight (ctx, entity, style, maxSeconds) {
             bot.setControlState('jump', false)
             lowerShield()
             if (d <= 3.2) {
-              bot.attack(target)
+              if (Math.random() < prof.missChance) bot.swingArm('right') // a flailing miss
+              else bot.attack(target)
               s.lastAttack = now
               s.comboStep++
               if (blocking && weapon === kit.axe) used.axeBreaks++
-              if (style.wtap) s.wtapUntil = now + 90
+              if (style.wtap && can('wtap')) s.wtapUntil = now + 90
               if (style.backOff || tactics.style === 'hitAndRun') s.backOffUntil = now + Math.min(700, cooldown)
             }
           }
@@ -493,24 +513,24 @@ async function fight (ctx, entity, style, maxSeconds) {
 }
 
 /** Healing, totems and golden apples. Returns true if it spent time using something. */
-async function sustain (ctx, kit, s, target, d, used, { stopMoving, lowerShield }) {
+async function sustain (ctx, kit, s, target, d, used, { stopMoving, lowerShield, can = () => true }) {
   const { bot, signal } = ctx
   const hp = bot.health
   const offhand = bot.inventory.slots[bot.getEquipmentDestSlot('off-hand')]
 
   // A totem only works in a hand: when it's getting dangerous, it replaces the shield.
-  if (hp <= 8 && kit.totem && offhand?.name !== 'totem_of_undying') {
+  if (hp <= 8 && kit.totem && can('totemSwap') && offhand?.name !== 'totem_of_undying') {
     lowerShield()
     await bot.equip(kit.totem, 'off-hand').catch(() => {})
     used.totems++
     return true
   }
-  if (hp <= 8 && kit.splash.healing) {
+  if (hp <= 8 && kit.splash.healing && can('throwPotions')) {
     await throwItem(bot, kit.splash.healing, 'feet')
     used.potions++
     return true
   }
-  if (hp <= 8 && kit.drink.healing && d > 3) {
+  if (hp <= 8 && kit.drink.healing && can('drinkPotions') && d > 3) {
     lowerShield(); stopMoving()
     await consume(bot, kit.drink.healing, signal)
     used.potions++
@@ -518,7 +538,7 @@ async function sustain (ctx, kit, s, target, d, used, { stopMoving, lowerShield 
   }
   // Golden apples take time to eat: back away while doing it.
   const apple = hp <= 6 && kit.egap ? kit.egap : kit.gap || (hp <= 8 ? kit.egap : null)
-  if (hp <= 10 && apple && Date.now() >= s.nextGapAt && !hasEffect(bot, 'Absorption')) {
+  if (hp <= 10 && apple && can('gaps') && Date.now() >= s.nextGapAt && !hasEffect(bot, 'Absorption')) {
     lowerShield()
     if (bot.pathfinder.goal) bot.pathfinder.setGoal(null)
     bot.setControlState('forward', false)
@@ -529,7 +549,7 @@ async function sustain (ctx, kit, s, target, d, used, { stopMoving, lowerShield 
     used.gaps++
     return true
   }
-  if (hp <= 12 && kit.drink.regeneration && !hasEffect(bot, 'Regeneration') && d > 5) {
+  if (hp <= 12 && kit.drink.regeneration && can('drinkPotions') && !hasEffect(bot, 'Regeneration') && d > 5) {
     lowerShield(); stopMoving()
     await consume(bot, kit.drink.regeneration, signal)
     used.potions++
@@ -537,19 +557,21 @@ async function sustain (ctx, kit, s, target, d, used, { stopMoving, lowerShield 
   }
   // Burning.
   if (isOnFire(bot.entity) && !hasEffect(bot, 'FireResistance')) {
-    if (kit.drink.fire_resistance) { stopMoving(); await consume(bot, kit.drink.fire_resistance, signal); used.potions++; return true }
-    if (kit.waterBucket && await douse(bot, kit.waterBucket)) return true
+    if (kit.drink.fire_resistance && can('drinkPotions')) { stopMoving(); await consume(bot, kit.drink.fire_resistance, signal); used.potions++; return true }
+    if (kit.waterBucket && can('waterClutch') && await douse(bot, kit.waterBucket)) return true
   }
   return false
 }
 
 /** Wind charge at our feet → fly up → mace → smash on the way down. */
-async function maceSmash (ctx, target, kit, s) {
+async function maceSmash (ctx, target, kit, s, quality = 1) {
   const { bot, signal } = ctx
   if (s.shieldUp) { bot.deactivateItem(); s.shieldUp = false }
   bot.pathfinder.setGoal(null)
   await hold(bot, kit.windCharge)
-  await bot.look(bot.entity.yaw, -Math.PI / 2, true)
+  // Sloppier players don't throw it perfectly straight down, so the launch drifts.
+  const sloppy = (1 - quality) * 0.5
+  await bot.look(bot.entity.yaw + (Math.random() - 0.5) * sloppy, -Math.PI / 2 + Math.random() * sloppy, true)
   bot.setControlState('jump', true)
   await sleep(60)
   bot.activateItem() // burst under us
@@ -565,9 +587,12 @@ async function maceSmash (ctx, target, kit, s) {
     const eye = target.position.offset(0, (target.height || 1.8) * 0.8, 0)
     await bot.lookAt(eye, true)
     const horiz = Math.hypot(target.position.x - bot.entity.position.x, target.position.z - bot.entity.position.z)
-    bot.setControlState('forward', horiz > 1)
-    const falling = bot.entity.velocity.y < -0.3
-    if (falling && bot.entity.position.y - target.position.y > 1.5 && bot.entity.position.distanceTo(eye) <= 3.4) {
+    // Good mace players steer onto the target all the way down; others drift.
+    bot.setControlState('forward', quality >= 0.9 ? horiz > 1 : horiz > 2.5)
+    // ...and wait for real falling speed before swinging (a bigger smash). Others swing early.
+    const swingAt = quality >= 0.9 ? -0.45 : Math.random() < 1 - quality ? -0.1 : -0.3
+    const falling = bot.entity.velocity.y < swingAt
+    if (falling && bot.entity.position.y - target.position.y > 1.2 && bot.entity.position.distanceTo(eye) <= 3.4) {
       bot.attack(target)
       s.lastAttack = Date.now()
       hit = true
@@ -581,9 +606,9 @@ async function maceSmash (ctx, target, kit, s) {
 }
 
 /** One bow or crossbow shot (draws, aims with lead, releases). */
-async function shoot (ctx, target, kit, s, style) {
+async function shoot (ctx, target, kit, s, style, prof = FULL_PROFILE) {
   const { bot, signal } = ctx
-  const crossbow = !kit.bow && kit.crossbow
+  const crossbow = !(kit.bow && prof.can('bow')) && kit.crossbow
   const launcher = kit.bow || kit.crossbow
   await hold(bot, launcher)
   s.lastSwap = Date.now()
@@ -619,7 +644,8 @@ async function shoot (ctx, target, kit, s, style) {
   strafe(false)
   const aim = aimAtEntity(bot, target, profile)
   if (!aim) { if (!crossbow) bot.deactivateItem(); return false }
-  await bot.look(aim.yaw, aim.pitch, true)
+  const [ey, ep] = aimNoise(prof.aimErrorDeg)
+  await bot.look(aim.yaw + ey, aim.pitch + ep, true)
   if (crossbow) bot.activateItem()
   else bot.deactivateItem() // release
   s.lastAttack = Date.now()
@@ -709,12 +735,14 @@ async function pearlEscape (ctx, from) {
 }
 
 /** Which fighting styles make sense with what we're carrying. */
-function availableStyles (bot) {
+function availableStyles (bot, intel) {
   const kit = readKit(bot)
-  const out = ['aggressive', 'balanced', 'cautious', 'hitAndRun']
-  if (kit.axe && kit.sword) out.push('comboAxe')
-  if ((kit.bow || kit.crossbow) && kit.arrows > 0) out.push('ranged')
-  if (kit.mace && kit.windCharge) out.push('mace')
+  const can = (a) => (intel ? intel.can(a, 'combat') : true)
+  const out = ['aggressive', 'balanced', 'hitAndRun']
+  if (can('shieldBlock')) out.push('cautious')
+  if (kit.axe && kit.sword && can('combo')) out.push('comboAxe')
+  if ((kit.bow || kit.crossbow) && kit.arrows > 0 && can('bow')) out.push('ranged')
+  if (kit.mace && kit.windCharge && can('maceBasic')) out.push('mace') // hardcore players and up only
   return out
 }
 

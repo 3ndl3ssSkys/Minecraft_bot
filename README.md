@@ -13,6 +13,10 @@ On top of that it has an inner life:
 - **Minecraft know-how**: recipes, loot and ore levels from the game's own data, plus hand-written experience.
 - **Its own buildings**: designed from reusable pieces, unique each time, and fitted to the terrain.
 - **Natural pacing**: it keeps busy while thinking, stops moving to type, and only types a word or two when it's in danger.
+- **An intelligence level**, from complete Beginner (who learns as it goes) to Impossible, plus a configurable way of thinking.
+- **Real senses**: line-of-sight vision (invisibility works), hearing mobs, footsteps, chests and mining, noticing particles, getting suspicious and investigating.
+- **Reading the world**: signs, and whose chest is whose (yours, community, someone's private chest, unlooted or looted loot chests).
+- **A good guest on friends' servers**: server profiles, login plugins, plugin chat formats, no griefing, and no fighting your own login.
 
 When it says no, it says it like a person, never like a bot.
 
@@ -42,7 +46,7 @@ Perception (every 2s) ──► state JSON + feelings + relationships + lessons 
    node index.js my-config.json
    ```
 
-Environment variables override the config: `MC_HOST`, `MC_PORT`, `MC_USERNAME`, `MC_AUTH`, `MC_VERSION`, `OLLAMA_URL`, `OLLAMA_MODEL`, `BOT_PERSONALITY`, `BOT_CHAT_MODE`, and `BOT_DEBUG=1` for verbose logs.
+Environment variables override the config: `MC_HOST`, `MC_PORT`, `MC_USERNAME`, `MC_AUTH`, `MC_VERSION`, `MC_PASSWORD`, `OLLAMA_URL`, `OLLAMA_MODEL`, `BOT_PERSONALITY`, `BOT_CHAT_MODE`, `BOT_INTELLIGENCE`, `BOT_SERVER` (profile name), and `BOT_DEBUG=1` for verbose logs.
 
 > **Model size:** `qwen2.5:7b` is a good default. `qwen2.5:3b` is faster on weak hardware but makes more mistakes; `qwen2.5:14b` plans and role-plays noticeably better. Ollama 0.5+ is recommended for strict JSON-schema output.
 
@@ -73,6 +77,9 @@ You can also pin a version with `"server": { "version": "26.1" }`. If you're kic
 | `combat.js` | The fight engine: weapons, projectiles, potions and consumables, per-mob tactics |
 | `knowledge.js` | Minecraft know-how: facts, item descriptions, "how do I get X" from recipes/loot data |
 | `building.js` | Building designer: terrain reading, site choice, pieces, unique designs, support-aware ordering |
+| `intelligence.js` | Skill levels, the skill curve, ability unlocks, learning |
+| `senses.js` | Sight (line of sight, invisibility), hearing, particles, suspicion |
+| `containers.js` | Chest classification, contents memory, signs |
 | `util.js` | Small shared helpers |
 | `learning.js` | Combat-style learning, danger zones, LLM-written lessons, and persistence |
 | `config.json` | All settings (every key has a default in code, so you can delete the ones you don't change) |
@@ -96,6 +103,94 @@ You can also pin a version with `"server": { "version": "26.1" }`. If you're kic
 4. **Throttle.** Decisions are at least `loop.minLlmIntervalMs` apart. Every LLM request goes through one priority queue, so only one is ever in flight. The order is: chat replies, then reactions, then decisions, then small talk, then reflection.
 
 **Reflexes** run without the LLM: fight-or-flight against attacking players, keeping away from armed enemies, fighting back against mobs, fleeing creepers, and eating when hungry.
+
+## Intelligence (`intelligence`)
+
+Set `intelligence.level` (or use `!iq <level>`). Every level is better than the one below, but the gains shrink as you go up. The skill curve is concave: a step from Hardcore to Master changes far less than one from Beginning to Simple.
+
+| Level | Skill | Plays like | Notable abilities |
+| --- | --- | --- | --- |
+| `beginning` | 0.08 | never played; knows only the basics, figures things out, makes newbie mistakes | spam-clicks, misses swings, aims badly; learns fastest |
+| `simple` | 0.41 | has played a little | crits, bows, golden apples, sprinting |
+| `mediocre` | 0.63 | an average casual player | strafing, shields, parkour, drinking potions, basic mob tactics |
+| `complicated` | 0.78 | a decent player | w-taps, axe vs shield, totem swaps, chasing split slimes |
+| `advanced` | 0.87 | an experienced survival player | axe/sword combos, throwing potions (undead-aware), buffs, pearl escapes |
+| `hardcore` | 0.93 | a hardcore player | cobwebs, water clutches, tracking by sound, **mace PvP (sloppy)** |
+| `master` | 0.97 | knows everything the game gives normal players | **good mace PvP**, all knowledge |
+| `impossible` | 1.00 | exploits niche mechanics; can do almost anything | tracks entities through walls, niche-mechanic knowledge, near-perfect reactions and aim |
+
+What skill changes:
+- **Combat:** reaction time (≈390ms → 60ms), aim error (±13° → 0°), missed swings, cooldown discipline, crit frequency, and which tactics it knows.
+- **Mace PvP:** only for Hardcore and up; good mace PvP only for Master and Impossible. Hardcore's wind-charge launch drifts and it swings early; Master steers onto the target and waits for full falling speed. These are tied to the configured level, so practice doesn't unlock them.
+- **Knowledge:** a Beginner doesn't know how to make a shield or that diamonds need an iron pickaxe; Master knows every recipe, drop chance and block stat; Impossible adds niche mechanics (sound tracking, eye-of-ender triangulation, pearl stasis, slime chunks...).
+- **Building:** a Beginner builds a box with a flat roof and no windows. Each level adds roofs, windows, overhangs, porches and chimneys, up to elaborate designs.
+- **Movement:** parkour and sprinting are skills too.
+- **Senses:** how much it notices.
+
+**Learning** (`intelligence.learn`, on by default) raises skill per area (combat, building, survival, knowledge, senses) with experience, along the same diminishing curve. A Beginner can grow to around Advanced (it never reaches mace PvP); a Master barely improves; Impossible can't. It also **learns facts**:
+- from dying ("lava hides under blocks…");
+- from its own lessons;
+- from **players telling it things in chat** ("use a wind charge under you then smash with the mace").
+
+`learnRate` scales experience gained, `maxLearnedLevels` overrides how far it can grow, and `!iq` shows current levels per area.
+
+`intelligence.allowXray` (off by default, Impossible only) lets it read ores and chests through walls from loaded chunk data. Most servers treat that as cheating, so only turn it on where that's OK.
+
+## How it thinks (`mind`)
+
+On top of personality, you can shape how it reasons:
+
+```json
+"mind": {
+  "thinkLike": "a careful speedrunner",
+  "playstyle": "builder",
+  "priorities": { "survival": 1, "social": 2, "building": 2, "exploring": 1, "combat": 0.5, "gathering": 1 },
+  "riskTolerance": 0.3,
+  "curiosity": 0.8,
+  "instructions": ["never go into the Nether without fire resistance", "always share food with friends"],
+  "decisionTemperature": 0.6
+}
+```
+
+- `playstyle`: `balanced`, `survivalist`, `builder`, `explorer`, `fighter`, `helper`, `trader` or `miner`.
+- `priorities`: 0 means it doesn't care, 2 means it matters a lot.
+- `curiosity` also controls how readily it investigates odd noises.
+
+In game (owner): `!mind like a medieval knight`, `!mind style explorer`, `!mind risk 0.2`, `!mind add <rule>`, `!mind clear`.
+
+## Senses (`senses`)
+
+- **Sight** (`realisticSight`): it only perceives entities it has line of sight to (glass and leaves don't block), or ones right next to it. Things it loses sight of are remembered for 20 seconds ("last seen…").
+  - **Invisibility works**, unless the invisible player's armor or held item shows, their potion swirls are visible close in front of it, or they're bumping into it.
+  - It only knows about ores and other blocks it has actually seen.
+  - Impossible tracks every entity the server sends, even through walls.
+- **Hearing** (`hearing`): every sound the server sends (about 16 blocks, through walls) is sorted into mob noises, footsteps, chests/barrels/doors opening, blocks breaking or being placed, combat (bows, crits, shields, splash potions), anvils, spawners, and the **creeper hiss**. A hiss makes it back away even if it can't see the creeper. World-wide sounds (a wither spawning, the dragon dying) are noticed too.
+- **Particles** (`particles`): crits, mining dust, cracks spreading on a block, smoke, portal particles, hearts and potion splashes — when close, roughly in front of it, and in line of sight.
+- **Suspicion:** a player-type sound or particle with no visible source (footsteps, a chest opening, mining) makes it suspicious.
+  - Knowing other players are around greatly reduces that. If someone just walked behind a wall, a chest opening back there barely registers.
+  - Past `suspicionThreshold` it gets nervous and **goes to investigate** (more likely when curious).
+  - Tested live: with nobody known nearby, a chest opening behind a wall pushed suspicion to "high" and set an investigation at that spot. With a player who had just gone behind the wall, the same sound stayed below the threshold.
+
+`!senses` shows what it has heard and noticed recently.
+
+## Chests and signs
+
+**Signs** within view are read automatically (`status.signs`), and `readSigns` reads all signs nearby.
+
+**Chests:** `inspectContainer`, `storeItems` and `takeItems` classify every chest and remember its contents:
+
+| Kind | How it tells |
+| --- | --- |
+| **your own** | it placed it |
+| **community** | a sign says community/free/shared/public/"take what you need", or several different players use it |
+| **someone's private chest** | a sign naming them or saying "keep out"/"private"; inside a build (placed blocks all around); tidy full stacks; one regular user |
+| **unlooted loot chest** | part of a natural structure (dungeon spawner, mineshaft rails/cobwebs, temple, village, stronghold, bastion, fortress, end city, ancient city, trial chamber, shipwreck, buried treasure) and still full of typical loot |
+| **looted loot chest** | a structure chest that's empty or picked over |
+
+- It notices changes since its last look ("missing since you last looked: 8 diamond"). If its own chest is raided, it remembers who it heard opening it, and that player loses trust.
+- It **won't take from other players' private chests** (`behavior.respectPrivateChests`). The exceptions are chests belonging to its owners, or the player it's fetching for.
+
+`!chests` lists what it knows about nearby chests.
 
 ## Feelings (`emotions`)
 
@@ -399,6 +494,9 @@ When anyone else types `!stop`, it's treated as normal chat, so the bot just ans
 | `!emotion` | admin | `!emotion` (show) · `!emotion angry 8` (set) · `!emotion lock happy` · `!emotion unlock` · `!emotion volatility 0.5` |
 | `!trust [player] [0-100\|reset]` | admin | view a relationship (trust, liking, history), or set trust; no player = list |
 | `!tasks [clear]` | admin | what it's doing for whom, what it said it'd do later, and what it forgot |
+| `!iq [level\|learn on/off]` | owner | show or set the intelligence level (per-area levels shown) |
+| `!mind [like\|style\|risk\|curious\|add\|clear …]` | owner | how it thinks |
+| `!chests`, `!senses` | admin | what it knows about nearby chests; what it heard and noticed |
 | `!obey` | admin | `!obey` (show) · `!obey player 0.2` · `!obey trusted 0.4` · `!obey Steve 0.8` / `!obey Steve reset` · owner-only: `!obey owner …`, `!obey admin …`, `!obey who <everyone\|trusted\|admins\|owners\|nobody>`, `!obey conscience on\|off` |
 | `!build [cancel]` | admin | current building plan, progress and missing materials |
 | `!set <key> <value\|reset>` / `!get <key>` / `!settings [reset]` | admin | change settings live (see below) |
@@ -411,12 +509,14 @@ When anyone else types `!stop`, it's treated as normal chat, so the bot just ans
 - **Reactions:** `reactions.enabled`, `reactions.gestures`
 - **Obedience:** `obedience.levels.owner/admin/trusted/player`, `obedience.whoCanInstruct`, `obedience.overrideConscience`
 - **Pacing:** `chat.stopToType`, `busyWork.enabled`
+- **Intelligence & mind:** `intelligence.level`, `intelligence.learn`, `intelligence.learnRate`, `intelligence.allowXray`, `mind.thinkLike`, `mind.playstyle`, `mind.riskTolerance`, `mind.curiosity`
+- **Senses & manners:** `senses.realisticSight`, `senses.hearing`, `senses.particles`, `senses.investigate`, `senses.suspicionThreshold`, `behavior.respectPrivateChests`, `behavior.noGrief`
 - **Emotions:** `emotions.enabled`, `emotions.volatility`, `emotions.decayPerMinute`, `emotions.lock`, `emotions.lockIntensity`
 - **Trust:** `trust.enabled`, `trust.initial`, `trust.recoveryPerHour`, `trust.ignoreHostileChance`
 - **PvP:** `pvp.mode`, `pvp.allowSparring`, `pvp.neverAttackOwners`
 - **Learning:** `learning.reflect`, `learning.epsilon`
 
-Keys under `trust.`, `pvp.` and `learning.`, plus the owner/admin obedience levels, `whoCanInstruct` and the conscience override, are owner-only (`commands.ownerOnlySettings`).
+Keys under `trust.`, `pvp.`, `learning.`, `intelligence.` and `mind.`, plus the owner/admin obedience levels, `whoCanInstruct` and the conscience override, are owner-only (`commands.ownerOnlySettings`).
 
 ## Safety switches
 
@@ -424,6 +524,45 @@ Keys under `trust.`, `pvp.` and `learning.`, plus the owner/admin obedience leve
 - LLM chat output is sanitized: no leading `/` (no server commands), no control characters or `§` codes, and no assistant-speak.
 - The pathfinder never digs through chests, barrels, furnaces or crafting tables.
 - `behavior.maxTravelDistance` limits how far a single move can go.
+
+## Accounts and joining servers
+
+**Which account can the bot use?**
+
+| Server type | What the bot needs |
+| --- | --- |
+| **Offline-mode** (`online-mode=false`, often with a login plugin) | Nothing: `"auth": "offline"` and any username. Set `server.password` and it answers `/register` and `/login` prompts automatically (AuthMe, nLogin, ...). This is the same as a PrismLauncher offline account. |
+| **Normal (online-mode) Java server** | Its own Java account (`"auth": "microsoft"`, email as `username`; you sign in once in a browser and the token is cached in `data/auth`). |
+| **Realms** | A Java account invited to the Realm: `"realm": "Realm name"`. |
+
+- **Your own Java account** works, but one account can only be online once. If you log in while the bot is on, it's kicked with "logged in from another location". It then **stops reconnecting**, so it never kicks you back off. Use it when you aren't playing.
+- **Bedrock accounts can't sign into Java servers.** Mineflayer only speaks the Java protocol, and Java servers only accept Java accounts.
+  - The one route: if a friend's server already runs **GeyserMC + Floodgate** (common on servers with Bedrock players), Bedrock accounts are allowed in. You could then run **[ViaProxy](https://github.com/ViaVersion/ViaProxy)** on your machine, signed into a Bedrock/Xbox account, pointed at the server's Geyser (Bedrock) port, and connect the bot to ViaProxy.
+  - That route goes through ViaProxy's experimental Bedrock support and double translation (Java → Bedrock → Java). I couldn't test it; expect rough edges.
+- PrismLauncher "offline" accounts are just offline mode: they only work on offline-mode servers.
+- Note: Minecraft for PC has been sold as "Java & Bedrock Edition" since 2022 — if you bought it on PC since then, you already own Java (on your own account, which you're using).
+
+**Joining friends' servers** without them setting anything up:
+- Put each server in `servers` and pick one with `--server`:
+  ```json
+  "servers": {
+    "sam": { "host": "sam.example.net", "port": 25565, "auth": "microsoft", "username": "botaccount@example.com" },
+    "lan": { "host": "192.168.1.20", "port": 25565, "auth": "offline", "username": "Wanderer", "password": "s3cret" }
+  }
+  ```
+  ```bash
+  node index.js --server sam
+  ```
+- **Versions:** detected automatically. Newer than Mineflayer supports → it connects as the newest supported version (needs ViaBackwards/ViaProxy, see above).
+- **Resource packs:** accepted (`server.resourcePack`).
+- **Chat:** plugin chat formats ("[Member] Steve: hi", "Steve » hi", "Steve -> me: psst") are understood. Add your own regexes with named groups `user`/`msg` in `server.chatPatterns`.
+- **Kicks:** a whitelist or ban stops reconnects; spam kicks back off harder.
+- **Manners:** it's a good guest by default.
+  - `behavior.noGrief`: it won't mine or path through other players' builds.
+  - `respectPrivateChests`: it doesn't take from private chests.
+  - It reads signs and chat for rules and follows them.
+  - It chats within rate limits.
+- If a server has a whitelist, the bot's name has to be on it like anyone else's.
 
 ## Troubleshooting
 

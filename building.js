@@ -168,8 +168,16 @@ function planBuilding (bot, opts = {}, helpers = {}) {
   const seedText = `${bot.username}|${opts.concept || ''}|${p.x},${p.z}|${Date.now() >> 16}`
   const rng = seededRandom(seedText)
   const styleName = styleFromConcept(opts.concept, purpose, rng)
-  const style = STYLES[styleName]
-  const sizeName = SIZES[opts.size] ? opts.size : PURPOSES[purpose].size
+  // Skill shapes ambition: a beginner builds a box; a master adds every touch.
+  const cx = Number.isFinite(opts.complexity) ? opts.complexity : 7
+  const style = { ...STYLES[styleName] }
+  if (cx < 1) Object.assign(style, { roofs: ['flat'], overhang: [0], porch: 0, chimney: 0, battlement: false, wallHeight: [3] })
+  else if (cx < 2) Object.assign(style, { roofs: style.roofs.includes('gable') ? ['flat', 'gable'] : style.roofs, overhang: [0], porch: 0, chimney: 0 })
+  else if (cx < 3) Object.assign(style, { roofs: style.roofs.filter((r) => r !== 'hip').length ? style.roofs.filter((r) => r !== 'hip') : ['gable'], porch: (style.porch || 0) / 2, chimney: 0 })
+  else if (cx >= 6) Object.assign(style, { porch: style.porch ? 0.9 : 0, chimney: style.chimney ? 0.9 : 0 })
+  let sizeName = SIZES[opts.size] ? opts.size : PURPOSES[purpose].size
+  if (cx < 2) sizeName = 'small'
+  else if (cx < 4 && sizeName === 'large') sizeName = 'medium'
   let w = style.tower ? 5 : between(rng, SIZES[sizeName][0])
   let d = style.tower ? 5 : between(rng, SIZES[sizeName][1])
   if (rng() < 0.5) [w, d] = [d, w]
@@ -251,7 +259,7 @@ function planBuilding (bot, opts = {}, helpers = {}) {
 
   // Frame (corner posts) and walls with window rhythm.
   const wallTop = roof === 'aframe' ? floorY + 1 : yTop
-  const rhythm = pick(rng, [2, 3])
+  const rhythm = cx < 1 ? 99 : cx < 2 ? 3 : pick(rng, [2, 3]) // no windows at all for a first box
   const offset = Math.floor(rng() * rhythm)
   const tallWindows = h >= 4 && rng() < 0.5
   const doorAlong = front.along === 'x' ? Math.round((x0 + x1) / 2 + (rng() < 0.5 ? 0 : (rng() < 0.5 ? -1 : 1))) : Math.round((z0 + z1) / 2 + (rng() < 0.5 ? 0 : (rng() < 0.5 ? -1 : 1)))
@@ -369,7 +377,7 @@ function planBuilding (bot, opts = {}, helpers = {}) {
   }
 
   // Furniture along the back wall.
-  const furniture = (PURPOSES[purpose].furniture || []).slice(0, Math.max(1, Math.min(w, d) - 1))
+  const furniture = (PURPOSES[purpose].furniture || []).slice(0, cx < 1 ? 1 : Math.max(1, Math.min(w, d) - 1))
   const inside = []
   for (let x = x0 + 1; x < x1; x++) for (let z = z0 + 1; z < z1; z++) inside.push({ x, z })
   const backCells = inside.filter((c) => back.along === 'x' ? c.z === (back.dz < 0 ? z0 + 1 : z1 - 1) : c.x === (back.dx < 0 ? x0 + 1 : x1 - 1))
@@ -390,7 +398,7 @@ function planBuilding (bot, opts = {}, helpers = {}) {
   const palette = {}
   for (const role of Object.keys(roleNeeds)) palette[role] = chooseMaterial(candidates[role] || [role], inv, registry, roleNeeds[role])
   // A little personality: sometimes an accent frame of a different wood.
-  if (rng() < 0.3 && /_log$/.test(palette.frame || '')) {
+  if (rng() < (cx >= 6 ? 0.6 : cx >= 3 ? 0.3 : 0) && /_log$/.test(palette.frame || '')) {
     const alt = expand('LOG', registry).filter((n) => n !== palette.frame && inv[n] > 4)[0]
     if (alt) palette.frame = alt
   }

@@ -23,6 +23,7 @@ const { ActionError, sleep, abortError, throwIfAborted, abortableSleep, normaliz
 const combat = require('./combat')
 const knowledge = require('./knowledge')
 const building = require('./building')
+const { signText } = require('./containers')
 
 function round1 (n) {
   return Math.round(n * 10) / 10
@@ -324,6 +325,25 @@ const BAD_FOODS = new Set(['rotten_flesh', 'spider_eye', 'poisonous_potato', 'pu
 // Blocks that open a GUI when right-clicked; we sneak while placing against them.
 const INTERACTABLE = /chest|crafting_table|furnace|smoker|barrel|door|trapdoor|gate|button|lever|anvil|table|bed|shulker|hopper|dispenser|dropper|loom|stonecutter|grindstone|bell|note_block/
 
+const BUILT = /planks$|glass|_bricks$|wool$|concrete|terracotta$|_door$|_bed$|lantern|bookshelf|carpet$|_sign$|_stairs$|_slab$|_fence$|_wall$|torch$|smooth_|chiseled_|quartz|crafting_table|furnace|chest|barrel/
+
+/** A crafted-looking block with several other crafted-looking blocks around it: someone built this. */
+function looksPlayerBuilt (bot, block) {
+  if (!BUILT.test(block.name)) return false
+  if (bot.entity && insideOwnBuild(bot, block.position)) return false
+  let n = 0
+  for (let dx = -2; dx <= 2; dx++) for (let dy = -2; dy <= 2; dy++) for (let dz = -2; dz <= 2; dz++) {
+    const b = bot.blockAt(block.position.offset(dx, dy, dz))
+    if (b && BUILT.test(b.name)) n++
+  }
+  return n >= 4
+}
+let ownBuilds = []
+/** Is this inside one of the bot's own buildings? (set by the executor) */
+function insideOwnBuild (bot, pos) {
+  return ownBuilds.some((o) => Math.abs(o.x - pos.x) <= 14 && Math.abs(o.z - pos.z) <= 14 && Math.abs(o.y - pos.y) <= 16)
+}
+
 // Wall-mounted things: place them against the side of a block, not on the floor.
 const WALL_MOUNTED = /^(torch|soul_torch|ladder|\w+_wall_sign|lever|\w+_button|tripwire_hook)$/
 const REPLACEABLE = /^(air|cave_air|water|lava|short_grass|grass|tall_grass|fern|large_fern|snow|dead_bush|vine|seagrass|\w+_flower|dandelion|poppy)$/
@@ -389,6 +409,7 @@ async function placeAt (ctx, pos, item, { clearSoft = true } = {}) {
   } finally {
     if (sneak) bot.setControlState('sneak', false)
   }
+  if (/^(chest|trapped_chest|barrel|\w*shulker_box)$/.test(item.name)) ctx.containers?.onPlaced(pos, item.name)
 }
 
 /** Look inside a container and remember what's in it. */
@@ -399,11 +420,17 @@ async function readContainer (ctx, block) {
   try {
     const contents = {}
     for (const i of container.containerItems()) contents[i.name] = (contents[i.name] || 0) + i.count
-    ctx.memory?.rememberContainer?.(block.position, block.name, contents)
-    return contents
+    const info = ctx.containers?.inspect(bot, block, contents)
+    return { contents, info }
   } finally {
     container.close()
   }
+}
+
+/** "a community chest (sign: "free stuff") — missing since you last looked: 3 bread" */
+function describeContainer (info) {
+  if (!info) return ''
+  return ` It looks like ${info.label}${info.reasons.length ? ` (${info.reasons.join('; ')})` : ''}.${info.changes ? ` ${info.changes[0].toUpperCase()}${info.changes.slice(1)}.` : ''}`
 }
 
 /** Ground-level spot within a few blocks, a bit higher or lower than us, for parkour hops. */
@@ -549,6 +576,12 @@ const ACTIONS = {
         const pos = candidates[0] // findBlocks returns nearest first
         const block = bot.blockAt(pos)
         if (!block || !ids.includes(block.type)) { skip.add(pos.toString()); continue }
+        // Good guest: leave other players' builds alone.
+        if (ctx.config.behavior.noGrief && looksPlayerBuilt(bot, block)) {
+          skip.add(pos.toString())
+          failureNotes.push(`skipped ${block.name} at ${fmtPos(pos)}: it's part of someone's build`)
+          continue
+        }
 
         try {
           if (!block.diggable) throw new ActionError('UNBREAKABLE', `${block.name} cannot be mined.`)
@@ -668,7 +701,7 @@ const ACTIONS = {
       const weaponBefore = bot.heldItem
 
       const key = entity.type === 'player' ? `player:${entity.username}` : entity.name
-      const available = combat.availableStyles(bot)
+      const available = combat.availableStyles(bot, ctx.intel)
       const style = ctx.learning
         ? ctx.learning.combat.chooseStyle(key, { forced: args?.style, available })
         : { name: 'balanced', crit: true, wtap: true, strafe: true, shield: true, retreatHealth: 7 }
@@ -703,7 +736,7 @@ const ACTIONS = {
           // Losing: get out, then try to heal.
           let note = ''
           try {
-            if (bot.health <= 6 && entity.isValid && await combat.pearlEscape(ctx, entity)) note = ' Pearled away.'
+            if (bot.health <= 6 && entity.isValid && (ctx.intel?.can('pearlEscape') ?? true) && await combat.pearlEscape(ctx, entity)) note = ' Pearled away.'
             else await ACTIONS.retreat.run(ctx, { entityId: id, distance: 18 })
             await ACTIONS.eatFood.run(ctx, {})
             note += ' Retreated and ate to recover.'
@@ -959,7 +992,7 @@ const ACTIONS = {
         }
         const after = {}
         for (const i of container.containerItems()) after[i.name] = (after[i.name] || 0) + i.count
-        ctx.memory?.rememberContainer?.(block.position, block.name, after)
+        ctx.containers?.inspect(bot, block, after)
       } finally {
         container.close()
       }
@@ -980,6 +1013,12 @@ const ACTIONS = {
       const container = await bot.openContainer(block)
       try {
         const items = container.containerItems()
+        const before = {}
+        for (const i of items) before[i.name] = (before[i.name] || 0) + i.count
+        const info = ctx.containers?.inspect(bot, block, before)
+        // Someone else's private chest: that's stealing.
+        const permission = ctx.containers?.mayTake(block.position, { forPlayer: ctx.tasks?.active()?.from })
+        if (permission && !permission.ok) throw new ActionError('NOT_YOURS', permission.reason)
         const match = items.find((i) => i.name === itemName) || items.find((i) => i.name.includes(itemName))
         if (!match) {
           const contents = {}
@@ -991,8 +1030,9 @@ const ACTIONS = {
         await container.withdraw(match.type, null, n)
         const after = {}
         for (const i of container.containerItems()) after[i.name] = (after[i.name] || 0) + i.count
-        ctx.memory?.rememberContainer?.(block.position, block.name, after)
-        return `Took ${n} ${match.name}.`
+        ctx.containers?.noteSelfTook(block.position)
+        ctx.containers?.inspect(bot, block, after)
+        return `Took ${n} ${match.name} from ${info?.label || block.name}.`
       } finally {
         container.close()
       }
@@ -1119,7 +1159,22 @@ const ACTIONS = {
     description: 'Recall what you know about an item, block, mob or topic: what it is for, how to get or craft it, tips. Instant — use it when unsure.',
     params: { topic: 'string, e.g. "bucket", "how to find diamonds", "brewing", "mace"' },
     async run (ctx, args) {
-      return knowledge.lookup(ctx.bot.registry, argString(args, 'topic'))
+      return knowledge.lookup(ctx.bot.registry, argString(args, 'topic'), ctx.knowledgeOpts?.() || {})
+    }
+  },
+
+  readSigns: {
+    description: 'Read the signs around you (up to 12 blocks) — names, rules, directions, shop info, "keep out"...',
+    params: { radius: 'number, optional (default 12)' },
+    async run (ctx, args) {
+      const { bot } = ctx
+      const radius = argNumber(args, 'radius', { min: 2, max: 24, def: 12 })
+      const ids = bot.registry.blocksArray.filter((b) => /_sign$|_hanging_sign$/.test(b.name)).map((b) => b.id)
+      const signs = bot.findBlocks({ matching: ids, maxDistance: radius, count: 12 })
+        .map((p) => ({ p, text: signText(bot.blockAt(p)) }))
+        .filter((x) => x.text)
+      if (!signs.length) throw new ActionError('NOT_FOUND', `No readable signs within ${radius} blocks.`)
+      return signs.map((x) => `sign at ${fmtPos(x.p)}: "${x.text}"`).join('\n')
     }
   },
 
@@ -1132,14 +1187,14 @@ const ACTIONS = {
       if (args?.x !== undefined) block = bot.blockAt(new Vec3(argNumber(args, 'x'), argNumber(args, 'y'), argNumber(args, 'z')).floored())
       else {
         const ids = CONTAINERS.map((n) => bot.registry.blocksByName[n]?.id).filter((x) => x !== undefined)
-        const seen = (p) => ctx.memory?.containerSeenRecently?.(p)
+        const seen = (p) => ctx.containers?.seenRecently(p)
         const pos = bot.findBlocks({ matching: ids, maxDistance: 16, count: 12 }).find((p) => !seen(p))
         block = pos && bot.blockAt(pos)
       }
       if (!block || !CONTAINERS.includes(block.name)) throw new ActionError('NOT_FOUND', 'No unchecked chest or barrel nearby.')
-      const contents = await readContainer(ctx, block)
+      const { contents, info } = await readContainer(ctx, block)
       const list = Object.entries(contents).map(([k, v]) => `${v} ${k}`).join(', ')
-      return `${block.name} at ${fmtPos(block.position)}: ${list || 'empty'}.`
+      return `${block.name} at ${fmtPos(block.position)}: ${list || 'empty'}.${describeContainer(info)}`
     }
   },
 
@@ -1182,7 +1237,8 @@ const ACTIONS = {
         purpose: normalizeName(args?.purpose || 'house'),
         concept: String(args?.concept || '').slice(0, 200),
         size: args?.size ? normalizeName(args.size) : undefined,
-        owner: ctx.builder.owner
+        owner: ctx.builder.owner,
+        complexity: ctx.intel ? ctx.intel.level('building') : 7
       }, { dangerCost: (x, y, z) => ctx.learning?.movement.costAt({ x, y, z }) || 0 })
       if (!res.ok) throw new ActionError('NO_SITE', res.reason)
       ctx.builder.current = res.plan
@@ -1237,7 +1293,7 @@ const ACTIONS = {
             if (step.optional) { plan.cursor++; continue }
             const { missing } = building.remaining(plan, bot)
             const list = Object.entries(missing).map(([k, v]) => `${v} ${k}`).join(', ')
-            const tips = Object.keys(missing).slice(0, 2).map((m) => knowledge.howToObtain(bot.registry, m)[0]).filter(Boolean).join('; ')
+            const tips = Object.keys(missing).slice(0, 2).map((m) => knowledge.howToObtain(bot.registry, m, ctx.knowledgeOpts?.() || {})[0]).filter(Boolean).join('; ')
             const options = (plan.candidates[step.role] || []).join('/')
             throw new ActionError('MISSING_MATERIALS', `${plan.name} is ${Math.round(plan.cursor / plan.steps.length * 100)}% built and you're out of ${step.role} material (${options}). Still needed: ${list}.${tips ? ` (${tips})` : ''}`)
           }
@@ -1412,8 +1468,8 @@ class ActionExecutor {
    * @param {object} [deps.memory]   Memory (recent chat, e.g. duel invitations)
    * @param {object} [deps.tasks]    TaskManager (fights the bot agreed to)
    */
-  constructor ({ bot, config, chat, log, notify, social, learning, memory, tasks, builder }) {
-    Object.assign(this, { bot, config, chat, log, notify, social, learning, memory, tasks, builder })
+  constructor ({ bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts }) {
+    Object.assign(this, { bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts })
     this.current = null // { name, args, startedAt, controller }
     this.pauseUntil = 0
     this.pauseListeners = new Set()
@@ -1475,6 +1531,7 @@ class ActionExecutor {
 
     const controller = new AbortController()
     this.current = { name, args, startedAt: started, controller }
+    ownBuilds = [this.builder?.current?.origin, ...(this.builder?.history || []).map((h) => h.origin)].filter(Boolean)
     const ctx = {
       bot: this.bot,
       config: this.config,
@@ -1486,6 +1543,9 @@ class ActionExecutor {
       memory: this.memory,
       tasks: this.tasks,
       builder: this.builder,
+      intel: this.intel,
+      containers: this.containers,
+      knowledgeOpts: this.knowledgeOpts,
       isPaused: () => this.paused,
       onPause: (fn) => { this.pauseListeners.add(fn); return () => this.pauseListeners.delete(fn) },
       signal: controller.signal
