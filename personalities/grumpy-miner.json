@@ -24,6 +24,7 @@
   "forgetfulness": 0.15,
   "violence": 0.5,
   "generosity": 0.25,
+  "restlessness": 0.2,
   "refusalStyle": "blunt and sarcastic — \"do it yourself, kid\", \"no.\", or a dry complaint",
   "fallbackRefusals": ["no.", "do it yourself kid", "not happening"],
   "reactions": {

@@ -29,7 +29,9 @@
     "unaddressedReplyChance": 0.15,
     "conversationWindowSec": 45,
     "replyDelayMs": [1000, 2500],
-    "typingCharsPerSecond": 14,
+    "typingCharsPerSecond": 9,
+    "stopToType": true,
+    "danger": { "maxChars": 24, "postponeChance": 0.6 },
     "maxMessageLength": 200,
     "minSecondsBetweenMessages": 3,
     "maxMessagesPerMinute": 8,
@@ -80,7 +82,8 @@
       "lostFight": { "enabled": true, "chance": 0.5, "cooldownSec": 60, "style": "template", "templates": ["nope, not today", "gotta heal"] },
       "taskDone": { "enabled": true, "chance": 1, "cooldownSec": 0, "style": "llm", "templates": ["there you go {player}", "done!"] },
       "taskPartial": { "enabled": true, "chance": 1, "cooldownSec": 0, "style": "llm", "templates": ["that's all i got time for {player}", "got you some, not all of it"] },
-      "taskAbandoned": { "enabled": true, "chance": 0.8, "cooldownSec": 0, "style": "llm", "templates": ["sorry {player}, couldn't do it", "gonna pass on that one after all"] }
+      "taskAbandoned": { "enabled": true, "chance": 0.8, "cooldownSec": 0, "style": "llm", "templates": ["sorry {player}, couldn't do it", "gonna pass on that one after all"] },
+      "buildDone": { "enabled": true, "chance": 1, "cooldownSec": 0, "style": "llm", "templates": ["finally finished my {name}", "done building!"] }
     }
   },
   "behavior": {
@@ -108,6 +111,15 @@
     "maxQueuedTasks": 4,
     "forgetting": true,
     "requestedFights": true
+  },
+  "obedience": {
+    "levels": { "owner": 0.5, "admin": 0.3, "trusted": 0.15, "player": 0 },
+    "players": {},
+    "whoCanInstruct": "everyone",
+    "overrideConscience": false
+  },
+  "busyWork": {
+    "enabled": true
   },
   "affinity": {
     "initial": 50,
@@ -178,12 +190,22 @@
       "set": "admin",
       "reactions": "admin",
       "lessons": "admin",
+      "obey": "admin",
+      "build": "admin",
       "admin": "owner",
       "persona": "owner",
       "forget": "owner",
       "save": "owner"
     },
-    "ownerOnlySettings": ["trust.", "pvp.", "learning."]
+    "ownerOnlySettings": [
+      "trust.",
+      "pvp.",
+      "learning.",
+      "obedience.levels.owner",
+      "obedience.levels.admin",
+      "obedience.overrideConscience",
+      "obedience.whoCanInstruct"
+    ]
   },
   "perception": {
     "intervalMs": 2000,

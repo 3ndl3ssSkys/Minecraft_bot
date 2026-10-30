@@ -8,7 +8,11 @@ On top of that it has an inner life:
 - **Trust** in each player (are they safe?) changes with what that player *does*.
 - **Liking** for each player (do I enjoy them?) grows from chemistry and time spent together, not from politeness.
 - **Learned experience** builds up over time: which fighting styles work, where it died, and short lessons.
-- **Its own judgment** about requests: it weighs what's asked, who's asking and what it would rather be doing. It sometimes does only part of a job, and sometimes forgets one.
+- **Its own judgment** about requests: it weighs what's asked, who's asking and what it would rather be doing. It sometimes does only part of a job, and sometimes forgets one. Owners and admins can add obedience on top, for any role or any single player.
+- **Real PvP**: bows with ballistics, axe/sword combos, mace + wind-charge smashes, potions, golden apples, totems, pearls, cobwebs, and tactics for specific mobs.
+- **Minecraft know-how**: recipes, loot and ore levels from the game's own data, plus hand-written experience.
+- **Its own buildings**: designed from reusable pieces, unique each time, and fitted to the terrain.
+- **Natural pacing**: it keeps busy while thinking, stops moving to type, and only types a word or two when it's in danger.
 
 When it says no, it says it like a person, never like a bot.
 
@@ -65,7 +69,11 @@ You can also pin a version with `"server": { "version": "26.1" }`. If you're kic
 | `actions.js` | The tool API the LLM can call (including the PvP combat engine), plus the `ActionExecutor` |
 | `emotions.js` | The emotion engine: six core feelings with decay, temperament and behaviour modifiers |
 | `social.js` | Per-player trust and liking, intent reading, promises, body language |
-| `tasks.js` | Judging requests by task type, and running them: progress, patience, partial hand-overs, forgetting |
+| `tasks.js` | Judging requests by task type (plus obedience levels), and running them: progress, patience, partial hand-overs, forgetting |
+| `combat.js` | The fight engine: weapons, projectiles, potions and consumables, per-mob tactics |
+| `knowledge.js` | Minecraft know-how: facts, item descriptions, "how do I get X" from recipes/loot data |
+| `building.js` | Building designer: terrain reading, site choice, pieces, unique designs, support-aware ordering |
+| `util.js` | Small shared helpers |
 | `learning.js` | Combat-style learning, danger zones, LLM-written lessons, and persistence |
 | `config.json` | All settings (every key has a default in code, so you can delete the ones you don't change) |
 | `personalities/*.json` | Presets: `friendly`, `grumpy-miner`, `shy-explorer`, `hype-builder` |
@@ -158,7 +166,7 @@ Liking tiers: best friend (85+), good friend (70+), likes them (57+), no strong 
 
 ## Requests (`judgment`)
 
-There is no obey-chance setting. When someone asks for something, the bot first works out *what* they're asking. The LLM classifies the request (kind, item, amount, target, effort, risk), and the bot makes its own estimate of the work: "a stack of diamonds" is huge, "10 logs" is small. Then it decides how it feels about **that particular request**:
+Every request starts with the bot's own judgment (obedience levels, below, can add to it). When someone asks for something, the bot first works out *what* they're asking. The LLM classifies the request (kind, item, amount, target, effort, risk), and the bot makes its own estimate of the work: "a stack of diamonds" is huge, "10 logs" is small. Then it decides how it feels about **that particular request**:
 
 | Kind of request | What mostly decides it |
 | --- | --- |
@@ -189,21 +197,39 @@ Only after deciding does the LLM write the reply, in character, from the decisio
 | `judgment.requestedFights` | true | consider kill requests at all |
 | personality `helpfulness`, `patience`, `forgetfulness`, `violence`, `generosity` | | per-character temperament for all of the above |
 
-These live in `config.json` and the personality, not in game commands: nobody can dial up its obedience.
+### Obedience levels (`obedience`)
+
+On top of its own willingness, owners and admins can set how obedient it is, for every role or for single players:
+
+```
+chance = own willingness + (1 − own willingness) × obedience level
+```
+
+At `0` it's purely its own call. At `1` it does whatever it physically can. Hard limits still apply: offline targets, `protectedPlayers`, `pvp.mode: never`, and hostile requesters. Its conscience (not killing friends, keeping its own promises) also holds, unless `overrideConscience` is on and the level is 0.9 or higher.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `obedience.levels.owner` / `admin` / `trusted` / `player` | 0.5 / 0.3 / 0.15 / 0 | per role ("trusted" = trust ≥ 80 or liking ≥ 70) |
+| `obedience.players` | `{}` | per-player levels, e.g. `{ "steve": 0.8 }` — set with `!obey Steve 0.8` |
+| `obedience.whoCanInstruct` | `everyone` | who may ask at all; others only get favours (lower chance, no obedience) |
+| `obedience.overrideConscience` | false | let very high obedience override loyalty and promises |
 
 ## Combat and learning (`pvp`, `learning`)
 
-`attackTarget` is a real melee engine that runs about 20 updates per second. Its tactics:
-- **critical hits** (jump, then hit on the way down);
-- **sprint-reset / w-tap** for extra knockback;
-- **strafing**;
-- **shield blocking** between swings while the opponent swings;
-- **hit-and-run**;
-- respecting the 1.9+ attack cooldown of each weapon.
+`attackTarget` hands the fight to `combat.js`, which runs about 20 updates per second and uses whatever the bot carries:
 
-When the fight goes badly, it retreats and eats.
+| Tactic | What it does |
+| --- | --- |
+| **Melee** | Crits (hit while falling), sprint-reset w-taps, strafing, shield blocking between swings, and each weapon's 1.9+ cooldown (item swaps reset it). |
+| **Axe + sword** | An axe hit knocks a raised shield down for 5 seconds; the `comboAxe` style opens with a heavy axe crit and follows with quick sword hits. Blocking is read from the target's metadata. |
+| **Bow / crossbow** | Real projectile physics (gravity + drag, simulated per tick), leading moving targets. Shoots at range, then switches to melee when they close in. Crossbows load and fire. |
+| **Mace** | Throws a wind charge at its feet to launch upward, swaps to the mace mid-air and smashes on the way down. Also drops onto targets from high ground. |
+| **Potions** | Drinks strength/swiftness (and fire resistance against fire mobs) before serious fights. Throws splash harming/poison/weakness/slowness at enemies. Healing hurts undead and harming heals them, so it picks accordingly. |
+| **Staying alive** | At low health: totem into the off-hand, splash or drink healing, golden apples (backing off to eat), regeneration, fire resistance or water when burning. Water-bucket clutch when falling hard, any time. |
+| **Utility** | A cobweb at a close attacker's feet, and an ender pearl away from a fight it's losing. |
+| **Mob tactics** | Creepers: hit and run (or shoot). Skeletons and pillagers: shield up and close in. Slimes and magma cubes: keeps going until every split piece is dead. Breezes and endermen: no arrows. Witches: rush. Phantoms: wait for the swoop. Wardens: run. |
 
-It **learns which style works**. The styles are `aggressive`, `balanced`, `cautious` and `hitAndRun`. Stats are tracked per opponent (each mob type, each player, and players as a group). An epsilon-greedy bandit picks the best-known style and sometimes experiments (`learning.epsilon`). Retreat thresholds adapt: it backs off earlier against things that beat it, and stays in longer against things it beats easily.
+It **learns which style works**. The styles are `aggressive`, `balanced`, `cautious`, `hitAndRun`, plus `comboAxe` (with an axe and sword), `ranged` (with a bow or crossbow and arrows) and `mace` (with a mace and wind charges). Only styles its current kit supports are considered. Stats are tracked per opponent (each mob type, each player, and players as a group). An epsilon-greedy bandit picks the best-known style and sometimes experiments (`learning.epsilon`). Retreat thresholds adapt: it backs off earlier against things that beat it, and stays in longer against things it beats easily.
 
 It also learns:
 - **Danger zones**: places where it died to lava, falls or drowning, or got stuck. The pathfinder routes around them, and they show up in the prompt.
@@ -218,6 +244,43 @@ PvP rules (`pvp.mode`):
 Players can ask for a duel ("1v1 me"), and `allowSparring` lets the bot accept. `neverAttackOwners` and `behavior.protectedPlayers` always apply.
 
 Everything is saved to `data/brain.json` every 30s and on shutdown, so relationships and experience carry across sessions.
+
+## Knowledge (`knowledge.js`)
+
+The bot knows Minecraft the way an experienced player does:
+- **Know-how:** about 50 hand-written facts on progression, tool tiers, ore heights (1.18+), food and farming, brewing ingredients, enchanting, villagers, the Nether and the End, combat items, mob behaviour, dangers and building. The most relevant few are added to each decision prompt based on its goal, task, inventory and surroundings.
+- **Game data:** precise answers from the server version's own data — recipes ("6 planks (any wood) + 1 iron_ingot → shield"), smelting, which blocks drop an item and the minimum tool, mob drops, stack size, durability, food value and blast resistance.
+- **The `knowledge` action:** the LLM can look anything up instantly ("how do i make a bucket", "brewing", "mace"). Running out of building materials also tells it how to get them.
+
+## Building (`building.js`)
+
+`planBuilding` takes the bot's own **concept** ("cozy spruce cabin with a porch by the lake") and a purpose: house, shelter, storage, workshop, lookout or hut.
+- **Reading the land:** it reads a heightmap around itself and picks a site, scoring flatness, water, trees, distance and danger zones. It never builds over anyone else's blocks.
+- **Fitting the terrain:**
+  - small bumps → **flattened**;
+  - moderate slopes → **cut-and-fill terrace** with a stone foundation;
+  - steep ground or water → **stilts** with steps down to the ground;
+  - hillside burrows → **dug into the hill**, with earth over the roof.
+  
+  A one-block apron around the build is smoothed, and trees in the way are cleared.
+- **Unique designs:** the design combines familiar construction pieces:
+  - log-frame corners, walls, windows in a rhythm, a door on the most open side;
+  - gable, hip, A-frame or flat roofs (stepped two blocks thick so every block is supported), with overhangs;
+  - chimney, porch with fence posts, battlements, a lookout ladder;
+  - furniture that fits the purpose (bed, chests, crafting table, furnaces, torches).
+  
+  A seeded generator varies the style, proportions, roof, window rhythm, door side, overhang, extras and accent materials using the concept, the site and the bot's name. It names the result too ("Wanderer's Hillside Cabin").
+- **Materials:** chosen from what it has, falling back to similar blocks (any planks, any logs, stone-like blocks) when it runs low.
+- **Building it:** `build` places a few dozen blocks per call, supports first, digging out whatever is in the way. If materials run out it says exactly what's missing and how to get it. Plans are saved, so a build continues after a restart. `!build` shows progress.
+
+## Natural pacing
+
+- **While it thinks:** during every LLM call it does something small and useful — picks up items lying around, checks an unchecked chest (and remembers its contents: `status.knownContainers`), mines a visible ore or something its task needs, or hops around doing parkour (more often for restless personalities: `restlessness`). It stops the moment the decision arrives, and skips all of this in danger.
+- **Typing:** it stops moving while it types, like a player with the chat box open (`chat.typingCharsPerSecond`, default 9; `chat.stopToType`). In testing, a walking bot stood still for the ~6 seconds a long message took, then carried on.
+- **In danger** (fighting, almost dead, just hit, something hostile right next to it):
+  - Messages are cut to a few words and typed in under a second ("hey whats up").
+  - Replies are often **postponed** until it's safe, then answered with a short "sorry, was fighting" (`chat.danger.postponeChance`). Urgent messages like "help" or "behind you" are answered right away.
+  - It doesn't do small talk.
 
 ## Actions (tools)
 
@@ -236,11 +299,18 @@ Everything is saved to `data/brain.json` every 30s and on shutdown, so relations
 | `fish` | `seconds?` |
 | `giveItem` | `playerName, itemName, count?`: walks over and tosses the items |
 | `equipItem` | `itemName, destination?` |
-| `attackTarget` | `entityId, maxSeconds?, style?, sparring?` |
+| `attackTarget` | `entityId, maxSeconds?, style?, sparring?` — style: aggressive, balanced, cautious, hitAndRun, comboAxe, ranged, mace |
 | `retreat` | `entityId, distance?` |
 | `eatFood` | `foodName?` |
 | `collectDrops` | `radius?` |
 | `chatMessage` | `text` |
+| `useItem` | `itemName, target?` ("self", "feet", entity id, "x,y,z"): drink or eat, throw (splash potions, pearls, wind charges, snowballs), place buckets, use on blocks or entities (bone meal, flint and steel, shears, name tags, leads) |
+| `knowledge` | `topic` — instant lookup of items, recipes and how-tos |
+| `inspectContainer` | `x?, y?, z?` — open a chest/barrel and remember its contents |
+| `parkour` | `seconds?` — hop around nearby blocks |
+| `planBuilding` | `purpose, concept, size?` — design a building fitted to the terrain |
+| `build` | `maxBlocks?` — continue building the plan |
+| `cancelBuilding` | — |
 | `emote` | `gesture`: wave, jump, nod, shake_head, crouch, spin, look_around |
 | `wait` | `seconds` |
 
@@ -329,6 +399,8 @@ When anyone else types `!stop`, it's treated as normal chat, so the bot just ans
 | `!emotion` | admin | `!emotion` (show) · `!emotion angry 8` (set) · `!emotion lock happy` · `!emotion unlock` · `!emotion volatility 0.5` |
 | `!trust [player] [0-100\|reset]` | admin | view a relationship (trust, liking, history), or set trust; no player = list |
 | `!tasks [clear]` | admin | what it's doing for whom, what it said it'd do later, and what it forgot |
+| `!obey` | admin | `!obey` (show) · `!obey player 0.2` · `!obey trusted 0.4` · `!obey Steve 0.8` / `!obey Steve reset` · owner-only: `!obey owner …`, `!obey admin …`, `!obey who <everyone\|trusted\|admins\|owners\|nobody>`, `!obey conscience on\|off` |
+| `!build [cancel]` | admin | current building plan, progress and missing materials |
 | `!set <key> <value\|reset>` / `!get <key>` / `!settings [reset]` | admin | change settings live (see below) |
 | `!lessons`, `!reactions on\|off` | admin | |
 | `!admin add\|remove <player>` | owner | |
@@ -337,12 +409,14 @@ When anyone else types `!stop`, it's treated as normal chat, so the bot just ans
 **Live settings** (`!set`) persist in `data/brain.json` and override `config.json` until reset:
 - **Chat:** `chat.mode`, `chat.respondTo`, `chat.unaddressedReplyChance`, `chat.unprompted.chance`, `chat.unprompted.intervalSeconds`, `chat.reactionsInRespondMode`, `chat.goalChangeInterrupts`
 - **Reactions:** `reactions.enabled`, `reactions.gestures`
+- **Obedience:** `obedience.levels.owner/admin/trusted/player`, `obedience.whoCanInstruct`, `obedience.overrideConscience`
+- **Pacing:** `chat.stopToType`, `busyWork.enabled`
 - **Emotions:** `emotions.enabled`, `emotions.volatility`, `emotions.decayPerMinute`, `emotions.lock`, `emotions.lockIntensity`
 - **Trust:** `trust.enabled`, `trust.initial`, `trust.recoveryPerHour`, `trust.ignoreHostileChance`
 - **PvP:** `pvp.mode`, `pvp.allowSparring`, `pvp.neverAttackOwners`
 - **Learning:** `learning.reflect`, `learning.epsilon`
 
-Keys under `trust.`, `pvp.` and `learning.` are owner-only (`commands.ownerOnlySettings`). Requests and liking have no in-game dials on purpose.
+Keys under `trust.`, `pvp.` and `learning.`, plus the owner/admin obedience levels, `whoCanInstruct` and the conscience override, are owner-only (`commands.ownerOnlySettings`).
 
 ## Safety switches
 
@@ -357,5 +431,6 @@ Keys under `trust.`, `pvp.` and `learning.` are owner-only (`commands.ownerOnlyS
 - **"Server version … is not supported" / "Outdated client"**: see [Minecraft 26.3 and other newer versions](#minecraft-263-and-other-newer-versions).
 - **Slow decisions**: use a smaller model, lower `llm.numCtx`, or raise `loop.minLlmIntervalMs`.
 - **Kicked for spam**: raise `chat.minSecondsBetweenMessages` and lower `chat.maxMessagesPerMinute`.
+- **Builds stall** with "missing materials": give it the materials, or let it gather them. `!build` shows what's left, and `!build cancel` drops the plan.
 - **Online-mode servers**: set `"auth": "microsoft"` and use your account email as `username`.
 - **Start relationships over**: stop the bot and delete `data/brain.json`, or use `!forget <player>` / `!trust <player> reset`.

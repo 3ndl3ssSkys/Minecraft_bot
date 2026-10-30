@@ -3,9 +3,8 @@
 /**
  * tasks.js — things other players asked the bot to do, and whether it wants to.
  *
- * There is no "obey chance" dial. When someone asks for something, the bot
- * appraises the request the way a person would, and the answer depends on
- * WHAT is asked:
+ * When someone asks for something, the bot appraises the request the way a
+ * person would, and the answer depends on WHAT is asked:
  *
  *   - favours (gather / craft / give / come / follow): mostly how much it
  *     LIKES the person, how much work it is, how risky, how busy it is and
@@ -14,6 +13,12 @@
  *     against the target, friendship with them, whether it would conflict with
  *     something it already promised (protecting or helping that person),
  *     whether it could even win, and its own appetite for violence.
+ *
+ * On top of its own willingness sits an obedience level (per role, or per
+ * player, set by owners/admins): chance = own + (1 - own) × obedience. At 0
+ * it's purely its own call; at 1 it does whatever it physically can — though
+ * its conscience (not killing friends, keeping promises) still holds unless
+ * obedience.overrideConscience is on.
  *
  * Accepted requests become tasks with progress, a patience budget and a
  * "salience" that fades: queued tasks can be forgotten (and remembered again
@@ -69,6 +74,32 @@ class TaskManager {
   }
 
   get cfg () { return this.agent.config.judgment }
+  get obey () { return this.agent.config.obedience }
+
+  /** Obedience level for this player: their own override, else their role's level. */
+  obedienceFor (name) {
+    const o = this.obey
+    const own = o.players?.[String(name).toLowerCase()]
+    if (Number.isFinite(own)) return clamp(own, 0, 1)
+    const { social, config } = this.agent
+    const role = social.role(name)
+    const p = social.profile(name)
+    const tier = role !== 'player' ? role : (p.trust >= config.trust.trustedAbove || p.affinity >= 70) ? 'trusted' : 'player'
+    return clamp(o.levels[tier] ?? 0, 0, 1)
+  }
+
+  /** May this player ask at all (obedience.whoCanInstruct)? Others only get favours. */
+  mayInstruct (name) {
+    const { social, config } = this.agent
+    const who = this.obey.whoCanInstruct
+    const role = social.role(name)
+    if (who === 'nobody') return false
+    if (who === 'everyone' || role === 'owner') return true
+    if (who === 'owners') return false
+    if (who === 'admins') return role === 'admin'
+    const p = social.profile(name)
+    return role === 'admin' || p.trust >= config.trust.trustedAbove || p.affinity >= 70 // 'trusted'
+  }
   get personality () { return this.agent.personality }
 
   active () { return this.tasks.find((t) => t.status === 'active' || t.status === 'delivering') || null }
@@ -145,7 +176,10 @@ class TaskManager {
     const verdict = (outcome, chance, reason, extra = {}) => ({ outcome, chance: Math.round(chance * 100) / 100, reason, sideEffects, req, ...extra })
 
     if (social.isHostile(from)) return verdict('refuse', 0, `you don't do anything for ${from} after what they did to you`)
-    if (req.kind === 'attack') return this.appraiseFight(from, req, verdict, sideEffects)
+    const authorized = this.mayInstruct(from)
+    const ob = authorized ? this.obedienceFor(from) : 0
+    const blend = (c) => clamp(c + (1 - c) * ob, 0, 1)
+    if (req.kind === 'attack') return this.appraiseFight(from, req, verdict, sideEffects, { ob, blend, authorized })
 
     // ---- Favours: mostly "do I like this person enough for this much work?"
     const liking = clamp((me.affinity - 25) / 50, 0, 1.2) // 50 → 0.5, 75 → 1
@@ -178,8 +212,8 @@ class TaskManager {
       base *= 0.6 + 0.6 * clamp((t.affinity - 25) / 50, 0, 1)
     }
 
-    let chance = base * factors.effort * factors.risk * factors.trust * factors.mood * factors.busy * factors.needs
-    chance = clamp(chance + (Math.random() * 2 - 1) * this.cfg.randomness, 0, 1)
+    let chance = base * factors.effort * factors.risk * factors.trust * factors.mood * factors.busy * factors.needs * (authorized ? 1 : 0.6)
+    chance = blend(clamp(chance + (Math.random() * 2 - 1) * this.cfg.randomness, 0, 1))
 
     // The weakest factor explains a "no" (or a "some of it").
     const reasons = {
@@ -191,9 +225,9 @@ class TaskManager {
       needs: 'you need to take care of yourself first (food/health)'
     }
     const weakest = Object.entries(factors).sort((a, b) => a[1] - b[1])[0]
-    const reason = liking < 0.4 && weakest[1] > 0.7
-      ? `you don't know or like ${from} that well`
-      : reasons[weakest[0]]
+    const reason = !authorized ? `${from} isn't someone you take requests from — it'd only be a favour`
+      : liking < 0.4 && weakest[1] > 0.7 ? `you don't know or like ${from} that well`
+        : reasons[weakest[0]]
 
     const measurable = ['gather', 'craft', 'give_item'].includes(req.kind)
     const roll = Math.random()
@@ -215,7 +249,7 @@ class TaskManager {
   }
 
   /** "Go kill X": would the bot actually want to? */
-  appraiseFight (from, req, verdict, sideEffects) {
+  appraiseFight (from, req, verdict, sideEffects, { ob = 0, blend = (c) => c } = {}) {
     const { social, config, bot, emotions } = this.agent
     const p = this.personality
     const target = req.target
@@ -230,7 +264,7 @@ class TaskManager {
       // A mob: a normal favour with risk.
       const liking = clamp((requester.affinity - 25) / 50, 0, 1.2)
       let chance = (0.3 + 0.5 * liking + 0.2 * (p.violence ?? 0.35)) * RISK_FACTOR[req.risk] * emotions.modifiers().compliance
-      chance = clamp(chance + (Math.random() * 2 - 1) * this.cfg.randomness, 0, 1)
+      chance = blend(clamp(chance + (Math.random() * 2 - 1) * this.cfg.randomness, 0, 1))
       return Math.random() < chance
         ? verdict('comply', chance, '')
         : verdict('refuse', chance, req.risk === 'high' ? `a ${target} is too dangerous to go after` : 'you can\'t be bothered')
@@ -254,7 +288,8 @@ class TaskManager {
     // Would it conflict with something we already promised?
     const conflict = this.tasks.find((x) => ['active', 'queued', 'delivering'].includes(x.status) &&
       ((x.kind === 'protect' && x.target.toLowerCase() === name.toLowerCase()) || x.from.toLowerCase() === name.toLowerCase()))
-    if (conflict) {
+    const conscienceOff = this.obey.overrideConscience && ob >= 0.9
+    if (conflict && !conscienceOff) {
       return verdict('refuse', 0, conflict.kind === 'protect'
         ? `you promised ${conflict.from} you'd protect ${name}`
         : `you're in the middle of doing something for ${name} (${conflict.description})`)
@@ -264,7 +299,7 @@ class TaskManager {
     const grudge = clamp(clamp((config.trust.initial - t.trust) / 50, 0, 1) + (social.isHostile(name) ? 0.5 : 0) +
       (t.stats.harmedNearby > 0 ? 0.2 : 0) + (t.stats.killedMe > 0 ? 0.3 : 0), 0, 1)
     const friendship = clamp((t.affinity - 50) / 35, 0, 1) + (t.trust >= config.trust.trustedAbove ? 0.3 : 0)
-    if (friendship >= 0.6 && grudge < 0.5) {
+    if (friendship >= 0.6 && grudge < 0.5 && !conscienceOff) {
       sideEffects.push(['trust', -4, `asked you to kill ${name}, your friend`], ['like', -8, `asked you to kill your friend ${name}`])
       this.agent.emotions.stimulate({ anger: 0.15, surprise: 0.15 }, `${from} wants you to kill ${name}`)
       return verdict('refuse', 0, `${name} is your friend`)
@@ -282,7 +317,7 @@ class TaskManager {
     if (entity && brain) outmatched = brain.fightOrFlight(entity) === 'flee'
     if (outmatched) want *= 0.35 // a grudge isn't worth dying for — maybe later, with better gear
 
-    const chance = clamp(want + (Math.random() * 2 - 1) * this.cfg.randomness, 0, 1)
+    const chance = blend(clamp(want + (Math.random() * 2 - 1) * this.cfg.randomness, 0, 1))
     if (Math.random() < chance) return verdict('comply', chance, '')
     const reason = outmatched ? `${name} would probably beat you`
       : grudge < 0.3 ? `${name} never did anything to you`

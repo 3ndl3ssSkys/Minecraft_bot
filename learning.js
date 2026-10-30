@@ -61,7 +61,10 @@ const COMBAT_STYLES = {
   aggressive: { crit: true, wtap: true, strafe: false, shield: false, retreatHealth: 4, desc: 'rush in, jump-crit and sprint-reset every hit' },
   balanced: { crit: true, wtap: true, strafe: true, shield: true, retreatHealth: 7, desc: 'crit when possible, strafe, block with shield' },
   cautious: { crit: false, wtap: false, strafe: true, shield: true, retreatHealth: 10, desc: 'strafe and block, take safe hits only' },
-  hitAndRun: { crit: false, wtap: true, strafe: true, shield: false, retreatHealth: 8, backOff: true, desc: 'hit once then back off out of reach' }
+  hitAndRun: { crit: false, wtap: true, strafe: true, shield: false, retreatHealth: 8, backOff: true, desc: 'hit once then back off out of reach' },
+  comboAxe: { crit: true, wtap: true, strafe: true, shield: true, combo: true, retreatHealth: 7, desc: 'heavy axe crit, then quick sword hits; axe on raised shields' },
+  ranged: { crit: true, wtap: false, strafe: true, shield: true, ranged: true, retreatHealth: 8, desc: 'bow/crossbow at range, sword when they close in' },
+  mace: { crit: true, wtap: false, strafe: false, shield: false, mace: true, retreatHealth: 6, desc: 'wind charge launch and mace smash attacks' }
 }
 
 class CombatLearner {
@@ -82,18 +85,19 @@ class CombatLearner {
   }
 
   /** Pick a style: mostly the best known one, sometimes explore another. */
-  chooseStyle (key, { forced } = {}) {
-    if (forced && COMBAT_STYLES[forced]) return this.styleObject(forced, key)
-    if (key === 'creeper') return this.styleObject('hitAndRun', key)
+  chooseStyle (key, { forced, available } = {}) {
+    const usable = available?.length ? available : Object.keys(COMBAT_STYLES)
+    if (forced && COMBAT_STYLES[forced] && usable.includes(forced)) return this.styleObject(forced, key)
+    if (key === 'creeper') return this.styleObject(usable.includes('ranged') ? 'ranged' : 'hitAndRun', key)
     const epsilon = this.getSettings().epsilon
-    const names = Object.keys(COMBAT_STYLES)
+    const names = Object.keys(COMBAT_STYLES).filter((n) => usable.includes(n))
     // Use specific stats when we have them, else the group (all players / this mob type).
     const table = this.mergedStats(key)
     const untried = names.filter((n) => !table[n]?.n)
     let pick
     if (untried.length && Math.random() < Math.min(0.5, epsilon * 2)) pick = untried[Math.floor(Math.random() * untried.length)]
     else if (Math.random() < epsilon) pick = names[Math.floor(Math.random() * names.length)]
-    else pick = names.reduce((best, n) => (this.avg(table[n]) > this.avg(table[best]) ? n : best), 'balanced')
+    else pick = names.reduce((best, n) => (this.avg(table[n]) > this.avg(table[best]) ? n : best), names.includes('balanced') ? 'balanced' : names[0])
     return this.styleObject(pick, key)
   }
 
@@ -324,6 +328,9 @@ class Learning {
       social: a.social?.toJSON(),
       emotions: a.emotions?.toJSON(),
       tasks: a.tasks?.toJSON(),
+      building: a.builder ? { current: a.builder.current, history: a.builder.history.slice(-20) } : undefined,
+      containers: a.memory?.containersToJSON?.(),
+      obeyPlayers: a.config.obedience?.players,
       combat: this.combat.toJSON(),
       movement: this.movement.toJSON(),
       lessons: this.lessons.toJSON(),

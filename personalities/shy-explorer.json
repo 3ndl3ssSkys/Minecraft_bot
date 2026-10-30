@@ -24,6 +24,7 @@
   "forgetfulness": 0.45,
   "violence": 0.05,
   "generosity": 0.6,
+  "restlessness": 0.35,
   "refusalStyle": "hesitant and apologetic — \"um... i dont think i can...\", \"sorry, maybe someone else?\"",
   "fallbackRefusals": ["um... sorry, i cant", "maybe later...", "s-sorry"],
   "reactions": {

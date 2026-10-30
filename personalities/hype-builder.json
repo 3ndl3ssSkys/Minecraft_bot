@@ -24,6 +24,7 @@
   "forgetfulness": 0.5,
   "violence": 0.6,
   "generosity": 0.65,
+  "restlessness": 0.95,
   "refusalStyle": "cocky and playful — \"nah im busy being amazing\", \"maybe if you beat me in a race first\"",
   "fallbackRefusals": ["NAH im busy cooking", "maybe later bro", "L request"],
   "reactions": {

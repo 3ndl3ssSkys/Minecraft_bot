@@ -32,6 +32,9 @@ const { EmotionEngine, LABEL_TO_CORE } = require('./emotions')
 const { SocialModel, WEAPON, PROMISE_KINDS } = require('./social')
 const { Learning, COMBAT_STYLES } = require('./learning')
 const { TaskManager, KINDS: TASK_KINDS, EFFORTS, RISKS } = require('./tasks')
+const combat = require('./combat')
+const knowledge = require('./knowledge')
+const building = require('./building')
 
 // ===========================================================================
 // Logging
@@ -97,7 +100,12 @@ const DEFAULT_CONFIG = {
     unaddressedReplyChance: 0.15, // respondTo=everyone: chance to chime in on chatter not aimed at us
     conversationWindowSec: 45, // after we talk to someone, their follow-ups count as addressed
     replyDelayMs: [1000, 2500], // human "reading" delay; also batches rapid messages
-    typingCharsPerSecond: 14, // simulated typing time; 0 = instant
+    typingCharsPerSecond: 9, // simulated typing speed; 0 = instant
+    stopToType: true, // stand still while typing, like a player with the chat box open
+    danger: {
+      maxChars: 24, // in a fight / low health, replies are cut to a few words
+      postponeChance: 0.6 // ...or put off until it's safe ("sorry, was fighting")
+    },
     maxMessageLength: 200,
     minSecondsBetweenMessages: 3,
     maxMessagesPerMinute: 8,
@@ -146,7 +154,8 @@ const DEFAULT_CONFIG = {
       lostFight: { enabled: true, chance: 0.5, cooldownSec: 60, style: 'template', templates: ['nope, not today', 'gotta heal'] },
       taskDone: { enabled: true, chance: 1, cooldownSec: 0, style: 'llm', templates: ['there you go {player}', 'done!'] },
       taskPartial: { enabled: true, chance: 1, cooldownSec: 0, style: 'llm', templates: ["that's all i got time for {player}", 'got you some, not all of it'] },
-      taskAbandoned: { enabled: true, chance: 0.8, cooldownSec: 0, style: 'llm', templates: ["sorry {player}, couldn't do it", 'gonna pass on that one after all'] }
+      taskAbandoned: { enabled: true, chance: 0.8, cooldownSec: 0, style: 'llm', templates: ["sorry {player}, couldn't do it", 'gonna pass on that one after all'] },
+      buildDone: { enabled: true, chance: 1, cooldownSec: 0, style: 'llm', templates: ['finally finished my {name}', 'done building!'] }
     }
   },
   behavior: {
@@ -186,6 +195,16 @@ const DEFAULT_CONFIG = {
     forgetting: true, // queued tasks can be forgotten (and remembered when brought up)
     requestedFights: true // consider "go kill X" requests at all (still its own call, and pvp.mode applies)
   },
+  // Obedience on top of the bot's own judgment (owners/admins set these with !obey).
+  // chance = own willingness + (1 - own willingness) × level. 0 = purely its own call, 1 = does whatever it can.
+  obedience: {
+    levels: { owner: 0.5, admin: 0.3, trusted: 0.15, player: 0 },
+    players: {}, // per-player levels, e.g. { "steve": 0.8 }
+    whoCanInstruct: 'everyone', // 'everyone' | 'trusted' | 'admins' | 'owners' | 'nobody' — others only get favours
+    overrideConscience: false // if true, obedience ≥ 0.9 can make it attack friends or break its own promises
+  },
+  // Useful little things to do while the LLM is thinking (checking chests, grabbing drops, mining a visible ore, parkour).
+  busyWork: { enabled: true },
   // How much the bot likes each player — chemistry, not politeness. Drives favours.
   affinity: {
     initial: 50, // strangers: no strong feelings
@@ -230,10 +249,10 @@ const DEFAULT_CONFIG = {
     permissions: {
       help: 'admin', status: 'admin', stop: 'admin', pause: 'admin', resume: 'admin', come: 'admin', follow: 'admin',
       goal: 'admin', mode: 'admin', emotion: 'admin', trust: 'admin', tasks: 'admin', settings: 'admin', get: 'admin', set: 'admin',
-      reactions: 'admin', lessons: 'admin', admin: 'owner', persona: 'owner', forget: 'owner', save: 'owner'
+      reactions: 'admin', lessons: 'admin', obey: 'admin', build: 'admin', admin: 'owner', persona: 'owner', forget: 'owner', save: 'owner'
     },
-    // Settings under these prefixes can only be changed by owners, even with !set.
-    ownerOnlySettings: ['trust.', 'pvp.', 'learning.']
+    // Settings under these prefixes can only be changed by owners, even with !set / !obey.
+    ownerOnlySettings: ['trust.', 'pvp.', 'learning.', 'obedience.levels.owner', 'obedience.levels.admin', 'obedience.overrideConscience', 'obedience.whoCanInstruct']
   },
   perception: {
     intervalMs: 2000,
@@ -287,6 +306,7 @@ const DEFAULT_PERSONALITY = {
   forgetfulness: 0.3, // 0 = never forgets a request, 1 = scatterbrained
   violence: 0.35, // appetite for fighting people when someone asks it to
   generosity: 0.5, // willingness to give away valuable things
+  restlessness: 0.5, // how much it fidgets (parkour, hopping around) while thinking
   refusalStyle: 'casual — a quick excuse, a joke, or a plain "nah" depending on mood',
   fallbackRefusals: ['nah', 'maybe later', 'not rn', "i'm good"],
   reactions: {} // per-event overrides, e.g. { "death": { "templates": ["..."] } }
@@ -358,7 +378,9 @@ function loadConfig (log) {
 
   // Backwards compatibility with older config files.
   if (user.behavior?.allowPvp === true && !user.pvp?.mode) config.pvp.mode = 'always'
-  if (user.obedience || user.behavior?.obeyPlayers) log.warn('"obedience" settings are no longer used: the bot now judges each request itself (see README "Requests").')
+  if (user.behavior?.obeyPlayers && !user.obedience?.whoCanInstruct) {
+    config.obedience.whoCanInstruct = { everyone: 'everyone', owners: 'owners', nobody: 'nobody' }[user.behavior.obeyPlayers] || 'everyone'
+  }
 
   if (!CHAT_MODES.includes(config.chat.mode)) {
     log.warn(`Unknown chat.mode "${config.chat.mode}", falling back to "respond".`)
@@ -390,6 +412,33 @@ class Memory {
   }
 
   addEvent (type, text) { this.push(this.events, { type, text }, 20) }
+
+  /** Chest memory: what's where, from checking containers. */
+  rememberContainer (pos, type, contents) {
+    this.containers ||= new Map()
+    this.containers.set(`${pos.x},${pos.y},${pos.z}`, { x: pos.x, y: pos.y, z: pos.z, type, contents, seenAt: Date.now() })
+    if (this.containers.size > 60) this.containers.delete(this.containers.keys().next().value)
+  }
+
+  containerSeenRecently (pos, ms = 10 * 60000) {
+    const c = this.containers?.get(`${pos.x},${pos.y},${pos.z}`)
+    return Boolean(c && Date.now() - c.seenAt < ms)
+  }
+
+  nearestContainers (pos, n = 4) {
+    return [...(this.containers?.values() || [])]
+      .map((c) => ({ c, d: Math.hypot(c.x - pos.x, c.y - pos.y, c.z - pos.z) }))
+      .filter((x) => x.d < 64)
+      .sort((a, b) => a.d - b.d)
+      .slice(0, n)
+      .map(({ c }) => `${c.type} at (${c.x}, ${c.y}, ${c.z}), checked ${ago(c.seenAt)}: ${Object.entries(c.contents).slice(0, 8).map(([k, v]) => `${v} ${k}`).join(', ') || 'empty'}`)
+  }
+
+  containersToJSON () { return [...(this.containers?.values() || [])] }
+
+  loadContainers (list) {
+    this.containers = new Map((list || []).map((c) => [`${c.x},${c.y},${c.z}`, c]))
+  }
 
   addChat (from, text, { self = false, whisper = false } = {}) {
     this.push(this.chat, { from, text, self, whisper }, 30)
@@ -603,6 +652,10 @@ class Perception {
         goalSetBy: memory.goalSource || null,
         feelings: emotions.describe(),
         ...this.agent.tasks.statusForPrompt(),
+        danger: this.agent.dangerLevel(),
+        combatKit: combat.describeKit(bot),
+        building: this.agent.builder.current ? building.describePlan(this.agent.builder.current) : null,
+        knownContainers: memory.nearestContainers(e.position),
         dangerZonesNearby: learning.movement.nearbyDangers(e.position)
       },
       recentActions: memory.actions.slice(-recent).map((a) => ({
@@ -879,7 +932,9 @@ function buildDecisionPrompt (agent, toolDocs) {
 - Read recentActions: if an action failed, understand the error code and try something different instead of repeating it.
 - If a player asked you for something and you agreed (see status.goal / recentChat), prioritise it.
 - Survive: eat when hungry, avoid lava, deep falls and status.dangerZonesNearby, fight or flee from hostile mobs, be careful at night.
-- Use the game's systems: smelt ores and cook food (smeltItem), store loot in chests, sleep in a bed at night, open doors, fish.
+- Use the game's systems: smelt ores and cook food (smeltItem), store loot in chests (status.knownContainers remembers what's where), sleep in a bed at night, open doors, fish, and useItem for potions, pearls, buckets, bone meal and the like. If you're unsure how something works or how to get an item, use knowledge — it's instant.
+- Fights: attackTarget already uses your whole kit (status.combatKit) — bows at range, axe vs shields, mace + wind charges, potions, golden apples, totems. Carry good stuff before risky trips.
+- Building: when you want a home, base or lookout, use planBuilding with your own concept (what YOU would like, fitting the place), then build repeatedly; gather what it says is missing. status.building shows progress.
 - People: each player in nearbyEntities has your trust in them and how they seem. Be generous with friends (giveItem, help them), polite but guarded with strangers, and keep your distance from people who hurt you. You may fight players who attack you; never attack someone just because you dislike them. Accept a duel only when a player asks for one (attackTarget with sparring: true).
 - Your feelings (status.feelings) should colour how you play: scared → careful, angry → blunt and aggressive, happy → social and generous, bored → go do something new.
 - status.task is something you agreed to do for another player. Work on it (gather/craft: mineBlock, craftItem, smeltItem…; the hand-over happens automatically when you have enough). Take care of urgent needs first. If it's done (for non-item tasks) set taskUpdate.status "done"; if you honestly don't want to keep going — it's dragging on, or you have something you need or want to do — set "gave_up" with a short note. Otherwise "working" (or "none" if you have no task).
@@ -978,6 +1033,14 @@ class ChatManager {
       msg = this.sanitize(pick(lines))
     }
 
+    // In a fight nobody types paragraphs.
+    const danger = this.agent.dangerLevel()
+    if (danger === 'high' && category !== 'system') {
+      if (category === 'unprompted') return null
+      msg = shortenForDanger(msg, this.cfg.danger.maxChars)
+      if (!msg) return null
+    }
+
     const now = Date.now()
     this.sentTimes = this.sentTimes.filter((t) => now - t < 60000)
     if (category !== 'system' && this.sentTimes.length >= this.cfg.maxMessagesPerMinute) {
@@ -996,7 +1059,10 @@ class ChatManager {
       await sleep(gap)
     }
     if (this.cfg.typingCharsPerSecond > 0 && category !== 'system') {
-      await sleep(Math.min(5000, (msg.length / this.cfg.typingCharsPerSecond) * 1000))
+      // The chat box is open: the bot stands still while it types (quickly, if it's in danger).
+      const ms = Math.min(danger === 'high' ? 700 : 6000, (msg.length / this.cfg.typingCharsPerSecond) * 1000)
+      if (this.cfg.stopToType && this.agent.executor) await this.agent.executor.pauseFor(ms)
+      else await sleep(ms)
     }
     if (!bot.entity) return null // disconnected while "typing"
 
@@ -1018,6 +1084,15 @@ class ChatManager {
   }
 }
 
+/** Cut a message down to what you'd type mid-fight: the first few words. */
+function shortenForDanger (msg, maxChars) {
+  if (msg.length <= maxChars) return msg
+  // Keep the first natural chunk ("hey whats up"), else the first few words.
+  const first = msg.split(/[,.;:!?]| - /)[0].trim()
+  if (first && first.length <= maxChars) return first
+  return msg.split(' ').slice(0, 3).join(' ').slice(0, maxChars)
+}
+
 /** Assistant-style phrasing that no real player would type. */
 const ROBOTIC = /\b(as an ai|language model|i('m| am) (unable|not able|not permitted|not allowed) to|i (cannot|can't) (comply|assist|fulfill|help with that)|i must (decline|refuse)|my (programming|instructions|guidelines)|i apologi[sz]e,? but)\b/i
 
@@ -1033,11 +1108,39 @@ const pick = (arr) => arr[Math.floor(Math.random() * arr.length)]
 // ChatResponder — incoming chat, replies, task requests and owner commands
 // ===========================================================================
 
+const URGENT = /\b(help|run|behind you|watch out|look out|creeper|danger|stop|wait|duck)\b/i
+
 class ChatResponder {
   constructor (agent) {
     this.agent = agent
     this.pending = []
     this.timer = null
+    this.postponed = [] // messages we couldn't answer mid-fight
+    this.postponeTimer = null
+  }
+
+  /** Answer later, once it's safe (or after a minute and a half regardless). */
+  postpone (batch) {
+    this.postponed.push(...batch)
+    if (this.postponeTimer) return
+    const since = Date.now()
+    this.postponeTimer = setInterval(() => {
+      if (this.agent.dangerLevel() === 'high' && Date.now() - since < 90000) return
+      clearInterval(this.postponeTimer)
+      this.postponeTimer = null
+      const later = this.postponed.splice(0)
+      this.pending.unshift(...later)
+      this.delayed = true
+      this.flush().catch((err) => this.agent.log.warn(`Reply failed: ${err.message}`))
+    }, 2000)
+  }
+
+  /** Prompt line about being in danger (or about answering late). */
+  dangerNote () {
+    const { level, reason } = this.agent.dangerInfo()
+    if (level === 'high') return `You're in danger right now (${reason}). You can only type 1-3 words — like "busy", "not now", "help!", "one sec" — or "".`
+    if (this.delayed) return 'You couldn\'t answer right away because you were in danger. It\'s safe now; you can mention that briefly if it fits.'
+    return ''
   }
 
   get cfg () { return this.agent.config.chat }
@@ -1117,6 +1220,12 @@ class ChatResponder {
     if (batch.length === 0) return
     const agent = this.agent
     const { bot, memory, personality, social, emotions, tasks } = agent
+    // Mid-fight: either a couple of words now, or answer once it's safe.
+    if (!this.delayed && agent.dangerLevel() === 'high' && !batch.some((b) => URGENT.test(b.message)) && Math.random() < this.cfg.danger.postponeChance) {
+      return this.postpone(batch)
+    }
+    const dangerNote = this.dangerNote()
+    this.delayed = false
     const speaker = batch[batch.length - 1].username
     const whisper = batch.every((b) => b.whisper)
     const said = batch.filter((b) => b.username === speaker).map((b) => b.message)
@@ -1128,7 +1237,7 @@ class ChatResponder {
     const system = `${personaBlock(personality, bot.username)}
 
 You are reading Minecraft chat as yourself. Write like a real player typing in game chat: short (usually under 15 words), casual, in character. No emojis, no markdown, no quotation marks, don't prefix your name.
-${mods.talkativeness < 0.6 ? "You're not in a chatty mood: keep it very short.\n" : ''}Let your feelings and your history with this person show in your tone: warm with people you like, cool or curt with people you don't, angry with people who hurt you.
+${dangerNote ? `${dangerNote}\n` : ''}${mods.talkativeness < 0.6 ? "You're not in a chatty mood: keep it very short.\n" : ''}Let your feelings and your history with this person show in your tone: warm with people you like, cool or curt with people you don't, angry with people who hurt you.
 
 First: are they asking you to DO something in the game (gather or craft something, give them items, come, follow, fight or kill someone/something, protect someone, build, explore...)?
 - If yes: isRequest=true and fill "request" (kind; description in a few words; item as an exact Minecraft id like oak_log or iron_ingot; count; target = the player or mob name if any; effort = how much work it honestly is; risk = how dangerous). Leave reply "" — you'll answer once you've thought about whether you want to.
@@ -1158,7 +1267,7 @@ ${speaker}'s latest message${said.length > 1 ? 's' : ''}: ${said.map((m) => `"${
     memory.lastTalkedWith.set(speaker, Date.now())
     const recalled = out.remindsOfTask ? tasks.recall(speaker) : null
 
-    if (out.isRequest && out.request) return this.handleRequest(speaker, out.request, { whisper, message: said.join(' ') })
+    if (out.isRequest && out.request) return this.handleRequest(speaker, out.request, { whisper, message: said.join(' '), dangerNote })
     if (recalled && !out.reply) {
       return this.sayNaturally(speaker, `${speaker} reminded you about "${recalled.description}" — you had completely forgotten. You'll get on it.`, whisper)
     }
@@ -1169,7 +1278,7 @@ ${speaker}'s latest message${said.length > 1 ? 's' : ''}: ${said.map((m) => `"${
    * Someone asked for something: make up our mind (tasks.appraise — task-specific,
    * not a fixed obey chance), then say it like a person.
    */
-  async handleRequest (speaker, rawReq, { whisper = false, message = '' } = {}) {
+  async handleRequest (speaker, rawReq, { whisper = false, message = '', dangerNote = '' } = {}) {
     const agent = this.agent
     const { tasks, personality, bot, emotions, social, log } = agent
     const decision = tasks.appraise(speaker, rawReq)
@@ -1192,7 +1301,7 @@ ${speaker}'s latest message${said.length > 1 ? 's' : ''}: ${said.map((m) => `"${
     }[decision.outcome]
 
     const out = await agent.llm.chat([
-      { role: 'system', content: `${personaBlock(personality, bot.username)}\n\nReply to a request in Minecraft chat: ONE short message (under 15 words), in character. No emojis, no quotes.\nRespond with ONLY JSON: {"message": "...", "emotion": "<${EMOTIONS.join('|')}>", "emotionIntensity": 1-10}` },
+      { role: 'system', content: `${personaBlock(personality, bot.username)}\n\nReply to a request in Minecraft chat: ONE short message (under 15 words), in character. No emojis, no quotes.${dangerNote ? `\n${dangerNote}` : ''}\nRespond with ONLY JSON: {"message": "...", "emotion": "<${EMOTIONS.join('|')}>", "emotionIntensity": 1-10}` },
       {
         role: 'user',
         content: `${speaker} said: "${message || req.description}"\nWhat they want: ${what}\nHow you feel: ${emotions.describe()}\n` +
@@ -1318,6 +1427,40 @@ ${speaker}'s latest message${said.length > 1 ? 's' : ''}: ${said.map((m) => `"${
         social.forget(arg)
         return reply(`forgot everything about ${arg}.`)
 
+      case 'obey': {
+        // !obey | !obey <owner|admin|trusted|player> <0-1> | !obey <player> <0-1|reset> | !obey who <...> | !obey conscience on|off
+        const [what, value] = rest
+        const o = config.obedience
+        if (!what) {
+          const per = Object.entries(o.players || {}).map(([k, v]) => `${k}:${v}`).join(' ')
+          return reply(`levels owner ${o.levels.owner} admin ${o.levels.admin} trusted ${o.levels.trusted} player ${o.levels.player} | who: ${o.whoCanInstruct} | conscience override: ${o.overrideConscience ? 'on' : 'off'}${per ? ` | players: ${per}` : ''}`)
+        }
+        if (what === 'who') { const r = agent.applySetting('obedience.whoCanInstruct', value, username); return reply(r.ok ? `requests now from: ${r.value}` : r.error) }
+        if (what === 'conscience') { const r = agent.applySetting('obedience.overrideConscience', value, username); return reply(r.ok ? `conscience override ${r.value ? 'on' : 'off'}` : r.error) }
+        if (['owner', 'admin', 'trusted', 'player'].includes(what)) {
+          const r = agent.applySetting(`obedience.levels.${what}`, value, username)
+          return reply(r.ok ? `${what} obedience = ${r.value}` : r.error)
+        }
+        // A specific player.
+        const target = social.role(what)
+        if (target !== 'player' && social.role(username) !== 'owner') return reply(`only owners can set obedience for ${target}s.`)
+        if (value === 'reset') { delete o.players[what.toLowerCase()]; agent.learning.markDirty(); return reply(`${what} uses their role's level again.`) }
+        const n = Number(String(value).replace('%', '')) / (String(value).endsWith('%') ? 100 : 1)
+        if (!Number.isFinite(n)) return reply('usage: obey <owner|admin|trusted|player|name> <0-1>  ·  obey who <everyone|trusted|admins|owners|nobody>')
+        o.players[what.toLowerCase()] = Math.min(1, Math.max(0, n))
+        agent.learning.markDirty()
+        return reply(`${what} obedience = ${o.players[what.toLowerCase()]}`)
+      }
+
+      case 'build': {
+        const plan = agent.builder.current
+        if (rest[0] === 'cancel') { agent.builder.current = null; agent.learning.markDirty(); return reply(plan ? `dropped ${plan.name}.` : 'no plan.') }
+        if (!plan) return reply(`no building plan. built so far: ${agent.builder.history.map((h) => h.name).join(', ') || 'nothing'}`)
+        const { missing } = building.remaining(plan, bot)
+        const miss = Object.entries(missing).map(([k, v]) => `${v} ${k}`).join(', ')
+        return reply(`${building.describePlan(plan)}${miss ? ` missing: ${miss}` : ''}`.slice(0, 250))
+      }
+
       case 'tasks': {
         if (rest[0] === 'clear') {
           for (const t of [...agent.tasks.tasks]) agent.tasks.forget(t, `cleared by ${username}`)
@@ -1372,7 +1515,7 @@ ${speaker}'s latest message${said.length > 1 ? 's' : ''}: ${said.map((m) => `"${
 
       case 'help':
       default:
-        return reply('commands: status stop pause resume come follow goal mode emotion trust tasks admin set get settings persona reactions lessons forget save')
+        return reply('commands: status stop pause resume come follow goal mode emotion trust obey tasks build admin set get settings persona reactions lessons forget save')
     }
   }
 }
@@ -1395,6 +1538,14 @@ const SETTABLE = {
   'chat.goalChangeInterrupts': BOOL,
   'reactions.enabled': BOOL,
   'reactions.gestures': BOOL,
+  'obedience.levels.owner': num(0, 1),
+  'obedience.levels.admin': num(0, 1),
+  'obedience.levels.trusted': num(0, 1),
+  'obedience.levels.player': num(0, 1),
+  'obedience.whoCanInstruct': oneOf('everyone', 'trusted', 'admins', 'owners', 'nobody'),
+  'obedience.overrideConscience': BOOL,
+  'chat.stopToType': BOOL,
+  'busyWork.enabled': BOOL,
   'emotions.enabled': BOOL,
   'emotions.volatility': num(0, 3),
   'emotions.decayPerMinute': num(0, 1),
@@ -1482,7 +1633,7 @@ class SmallTalk {
     const agent = this.agent
     const { bot, memory, personality, config } = agent
     const cfg = config.chat.unprompted
-    if (!agent.chat.allows('unprompted') || !bot.entity || agent.dead) return
+    if (!agent.chat.allows('unprompted') || !bot.entity || agent.dead || agent.dangerLevel() !== 'none') return
     if (Date.now() - memory.lastSelfChatAt < cfg.minSilenceSeconds * 1000) return
     const others = Object.keys(bot.players).filter((n) => n !== bot.username)
     if (cfg.requirePlayersOnline && others.length === 0) return
@@ -1753,6 +1904,7 @@ class EventReactor {
       case 'wonFight': return `You won a fight against ${d.label}.`
       case 'lostFight': return `You had to back off from a fight with ${d.label}.`
       case 'taskDone': return `You finished what ${d.player} asked: ${d.task}.`
+      case 'buildDone': return `You finished building ${d.name}.`
       case 'taskPartial': return `You only partly did what ${d.player} asked (${d.task}): ${d.done} of ${d.count}${d.reason ? ` — ${d.reason}` : ''}.`
       case 'taskAbandoned': return `You gave up on what ${d.player} asked (${d.task})${d.reason ? ` — ${d.reason}` : ''}.`
       default: return `${type} happened.`
@@ -1836,8 +1988,8 @@ Respond with ONLY JSON: {"message": "...", "emotion": "<${EMOTIONS.join('|')}>",
 }
 
 // These already write a (more detailed) memory event through social.js.
-const ALWAYS_REACT = new Set(['spawn', 'taskDone', 'taskPartial', 'taskAbandoned'])
-const REMEMBERED_BY_SOCIAL = new Set(['attackedByPlayer', 'gift', 'promiseKept', 'promiseBroken', 'harmNearby', 'taskDone', 'taskPartial', 'taskAbandoned'])
+const ALWAYS_REACT = new Set(['spawn', 'taskDone', 'taskPartial', 'taskAbandoned', 'buildDone'])
+const REMEMBERED_BY_SOCIAL = new Set(['attackedByPlayer', 'gift', 'promiseKept', 'promiseBroken', 'harmNearby', 'taskDone', 'taskPartial', 'taskAbandoned', 'buildDone'])
 
 // ===========================================================================
 // Brain — the throttled perceive → decide → act loop
@@ -1946,7 +2098,7 @@ class Brain {
           if (!this.running || this.paused || agent.dead) continue
           if (this.forced.length) continue // a command arrived while we waited
           this.lastLlmAt = Date.now()
-          decision = await this.decide()
+          decision = await this.thinkWhileBusy()
         }
 
         const { name, args } = decision.action
@@ -1968,6 +2120,61 @@ class Brain {
       }
     }
     log.info('Brain loop stopped.')
+  }
+
+  /**
+   * Ask the LLM, and meanwhile do something small and useful — like a player
+   * who keeps playing while deciding what to do next. The busy work is
+   * interrupted the moment the decision arrives.
+   */
+  async thinkWhileBusy () {
+    const agent = this.agent
+    const busy = agent.config.busyWork.enabled ? this.pickBusyWork() : null
+    const work = busy ? agent.executor.execute(busy.name, busy.args) : null
+    try {
+      return await this.decide()
+    } finally {
+      if (work) {
+        agent.executor.abort('done thinking', { quiet: true })
+        const r = await work.catch(() => null)
+        if (r?.ok && busy.name !== 'wait' && busy.name !== 'parkour') {
+          agent.memory.addEvent('busy', `While thinking, you ${busy.label}: ${r.message}`)
+          agent.log.debug(`busy work ${busy.name}: ${r.message}`)
+        }
+        if (r) agent.tasks.onActionResult(busy.name, busy.args, r)
+      }
+    }
+  }
+
+  /** Something small, safe and interruptible to do right now. */
+  pickBusyWork () {
+    const agent = this.agent
+    const { bot, memory, personality, tasks } = agent
+    if (!bot.entity || bot.isSleeping || agent.dead || agent.dangerLevel() !== 'none') return null
+    const state = agent.perception?.latest
+    const options = []
+    const add = (w, name, args, label) => options.push({ w, name, args, label })
+    const me = bot.entity.position
+
+    if (Object.values(bot.entities).some((e) => e.name === 'item' && e.position.distanceTo(me) < 6)) add(3, 'collectDrops', { radius: 6 }, 'picked up items lying around')
+    const ids = ['chest', 'trapped_chest', 'barrel'].map((n) => bot.registry.blocksByName[n]?.id).filter((x) => x !== undefined)
+    const chest = bot.findBlocks({ matching: ids, maxDistance: 12, count: 6 }).find((p) => !memory.containerSeenRecently(p))
+    if (chest) add(2.5, 'inspectContainer', { x: chest.x, y: chest.y, z: chest.z }, 'checked a chest')
+    const t = tasks.active()
+    if (t && ['gather', 'craft'].includes(t.kind) && t.item && state?.nearbyBlocks) {
+      const near = Object.entries(state.nearbyBlocks).find(([n, b]) => (n === t.item || n.includes(t.item)) && b.distance <= 8)
+      if (near) add(4, 'mineBlock', { blockType: near[0], count: 2, maxDistance: 8 }, `grabbed some ${near[0]} for ${t.from}`)
+    }
+    if (state?.nearbyBlocks) {
+      const ore = Object.entries(state.nearbyBlocks).find(([n, b]) => /_ore$/.test(n) && b.distance <= 6 && b.visible)
+      if (ore) add(2, 'mineBlock', { blockType: ore[0], count: 1, maxDistance: 6 }, `mined a bit of ${ore[0]}`)
+    }
+    add(0.6 + (personality.restlessness ?? 0.5) * 2, 'parkour', { seconds: 8 }, 'hopped around')
+    add(1, 'wait', { seconds: 6 }, 'looked around')
+
+    let r = Math.random() * options.reduce((a, o) => a + o.w, 0)
+    for (const o of options) { r -= o.w; if (r <= 0) return o }
+    return options[options.length - 1]
   }
 
   /** Feelings and movement lessons from every action result. */
@@ -2074,6 +2281,10 @@ class Brain {
     const state = agent.perception.snapshot()
     const tools = executor.availableTools()
     const learned = [...learning.lessons.top(8), ...learning.combat.summary(4)]
+    const knowhow = knowledge.relevantFacts([
+      memory.goal, state.status.task?.what, state.status.building, Object.keys(state.inventory.items).join(' '),
+      Object.keys(state.nearbyBlocks).join(' '), state.nearbyEntities.map((e) => e.name).join(' '), state.world.phase, state.self.dimension
+    ].filter(Boolean).join(' '), 4)
 
     const nudges = []
     const streak = memory.failureStreak()
@@ -2087,6 +2298,7 @@ class Brain {
         content: `Current state:\n${JSON.stringify(state)}\n\n` +
           `People you know (online):\n${social.peopleSummary(state.onlinePlayers.slice(0, 6)) || '- nobody else is online'}\n\n` +
           `What you've learned from experience:\n${learned.map((l) => `- ${l}`).join('\n') || '- nothing yet'}\n\n` +
+          `Minecraft know-how that might matter now:\n${knowhow.map((l) => `- ${l}`).join('\n') || '- (nothing in particular)'}\n\n` +
           `${nudges.join('\n')}\nChoose your next action.`
       }
     ]
@@ -2143,6 +2355,9 @@ class Agent {
     const saved = this.learning.data
     this.social = new SocialModel(this, saved.social)
     this.tasks = new TaskManager(this, saved.tasks)
+    this.builder = { current: saved.building?.current || null, history: saved.building?.history || [], owner: config.server.username }
+    this.memory.loadContainers(saved.containers)
+    if (saved.obeyPlayers) this.config.obedience.players = { ...saved.obeyPlayers, ...this.config.obedience.players }
     this.emotions.load(saved.emotions)
     this.runtimeAdmins = saved.admins || []
     this.settingOverrides = {}
@@ -2154,6 +2369,35 @@ class Agent {
     }
     if (Object.keys(this.settingOverrides).length) log.info(`In-game settings restored: ${Object.keys(this.settingOverrides).join(', ')}`)
   }
+
+  /**
+   * How much danger the bot is in right now — drives how it types and whether it fidgets.
+   * @returns {{ level: 'none'|'medium'|'high', reason: string }}
+   */
+  dangerInfo () {
+    const bot = this.bot
+    if (!bot?.entity || this.dead) return { level: 'none', reason: '' }
+    const me = bot.entity.position
+    const current = this.executor?.current?.name
+    if (current === 'attackTarget' || current === 'retreat') return { level: 'high', reason: current === 'retreat' ? 'running away from something' : 'in the middle of a fight' }
+    if (bot.health <= 6) return { level: 'high', reason: `almost dead (${Math.round(bot.health)}/20 health)` }
+    if (Date.now() - (this.lastHurtAt || 0) < 3000) return { level: 'high', reason: 'just got hit' }
+    const feet = bot.blockAt(me)
+    if (feet && /lava|fire/.test(feet.name)) return { level: 'high', reason: 'burning' }
+    let medium = null
+    for (const e of Object.values(bot.entities)) {
+      if (e === bot.entity || !e.position) continue
+      const d = e.position.distanceTo(me)
+      const hostile = e.kind === 'Hostile mobs' || (e.type === 'player' && this.social.isHostile(e.username))
+      if (!hostile) continue
+      if (d < 6) return { level: 'high', reason: `a ${e.username || e.name} is right next to you` }
+      if (d < 14) medium = `a ${e.username || e.name} is nearby`
+    }
+    if (medium || bot.health <= 10) return { level: 'medium', reason: medium || 'low on health' }
+    return { level: 'none', reason: '' }
+  }
+
+  dangerLevel () { return this.dangerInfo().level }
 
   /** Change a runtime setting (from !set, !emotion...). Persists across restarts. */
   applySetting (key, raw, by) {
@@ -2255,6 +2499,7 @@ class Agent {
       learning: this.learning,
       memory: this.memory,
       tasks: this.tasks,
+      builder: this.builder,
       notify: (type, data) => this.onActionEvent(type, data)
     })
     this.reactor = new EventReactor(this)
@@ -2275,6 +2520,12 @@ class Agent {
     bot.on('physicsTick', () => {
       const vy = bot.entity?.velocity?.y ?? 0
       this.recentFallSpeed = Math.min(vy, this.recentFallSpeed * 0.9)
+      // Water-bucket clutch when falling hard toward the ground.
+      if (vy < -0.75 && !this.clutching && Date.now() - (this.lastClutchAt || 0) > 3000) {
+        this.clutching = true
+        combat.fallClutch(bot).then((did) => { if (did) { this.lastClutchAt = Date.now(); this.log.info('Water-bucket clutch!') } })
+          .catch(() => {}).finally(() => { this.clutching = false })
+      }
     })
     bot.on('chat', (username, message) => this.responder.onMessage(username, message))
     bot.on('whisper', (username, message) => this.responder.onMessage(username, message, { whisper: true }))
@@ -2308,6 +2559,13 @@ class Agent {
         learning.reflect(`Fight against ${data.label} using the "${data.style}" style (${COMBAT_STYLES[data.style]?.desc}): ${data.outcome}. ` +
           `${data.hitsLanded ?? '?'} hits landed, ${data.hitsTaken ?? '?'} taken, ${data.healthLost ?? '?'} health lost.`)
       }
+      return
+    }
+    if (type === 'buildDone') {
+      emotions.stimulate({ joy: 0.35 }, `you finished building your ${data.name}`)
+      memory.addEvent('build', `You finished building ${data.name}.`)
+      this.learning.reflect(`You finished building ${data.name} (${data.placed} blocks).`)
+      this.reactor.trigger('buildDone', data)
       return
     }
     if (type === 'gaveItem') {
