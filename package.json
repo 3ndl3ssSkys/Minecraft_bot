@@ -7,9 +7,10 @@
   "scripts": {
     "start": "node index.js",
     "start:debug": "BOT_DEBUG=1 node index.js",
-    "check": "node --check index.js && node --check actions.js && node --check social.js && node --check emotions.js && node --check learning.js && node --check tasks.js && node --check combat.js && node --check knowledge.js && node --check building.js && node --check util.js && node --check intelligence.js && node --check senses.js && node --check containers.js && node --check doctor.js",
+    "check": "node --check index.js && node --check actions.js && node --check social.js && node --check emotions.js && node --check learning.js && node --check tasks.js && node --check combat.js && node --check knowledge.js && node --check building.js && node --check util.js && node --check intelligence.js && node --check senses.js && node --check containers.js && node --check doctor.js && node --check scripts/regen-config.js && node --check test/tools/harness.js && node --check test/tools/mock-ollama.js",
     "update-mc": "npm install mineflayer@latest minecraft-protocol@latest minecraft-data@latest mineflayer-pathfinder@latest",
-    "doctor": "node doctor.js"
+    "doctor": "node doctor.js",
+    "test": "node test/run.js"
   },
   "keywords": [
     "minecraft",

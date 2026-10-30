@@ -26,6 +26,8 @@ Perception (every 2s) ──► state JSON + feelings + relationships + lessons 
         └──────────── result fed back into the next prompt ◄──── ActionExecutor (one action at a time)
 ```
 
+> **New here?** [SETUP.md](SETUP.md) walks through everything from an empty PC to a running bot. [CLAUDE.md](CLAUDE.md) holds the project's design notes and lessons learned.
+
 ## Quick start
 
 1. Install **Node.js 22+** and [Ollama](https://ollama.com), then pull the model:
@@ -182,7 +184,9 @@ You can also pin a version with `"server": { "version": "26.1" }`. If you're kic
 | `containers.js` | Chest classification, contents memory, signs |
 | `util.js` | Small shared helpers |
 | `doctor.js` | `npm run doctor`: checks Node, config, Ollama (with a speed/VRAM benchmark) and the server |
-| `scripts/` | `start-bot.bat` / `start-bot.sh` (auto-restart) and a systemd service file |
+| `scripts/` | `start-bot.bat` / `start-bot.sh` (auto-restart), a systemd service file, `regen-config.js` |
+| `test/` | `npm test` unit suites; `test/tools/` live-test tools (mock Ollama, test server, test player, scenario harness) |
+| `SETUP.md` / `CLAUDE.md` | step-by-step setup guide / design notes and lessons learned |
 | `learning.js` | Combat-style learning, danger zones, LLM-written lessons, and persistence |
 | `config.json` | All settings (every key has a default in code, so you can delete the ones you don't change) |
 | `personalities/*.json` | Presets: `friendly`, `grumpy-miner`, `shy-explorer`, `hype-builder` |

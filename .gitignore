@@ -3,3 +3,8 @@ node_modules/
 .env
 config.local.json
 data/
+
+# test tool leftovers
+mock-ollama.log
+test-config.json
+test-brain.json
