@@ -74,8 +74,11 @@ const DEFAULT_CONFIG = {
   server: {
     host: 'localhost',
     port: 25565,
-    username: 'Wanderer',
-    auth: 'offline', // 'offline' or 'microsoft'
+    username: 'Wanderer', // a player name, or a Microsoft account email to sign in with a real Java account
+    // 'auto' = sign in with Microsoft when username is an email, otherwise play as an offline account
+    // (and drop to offline if the Microsoft sign-in fails). Or force 'offline' / 'microsoft'.
+    auth: 'auto',
+    offlineName: '', // the name to use offline when username is an email (default: the part before the @)
     version: false, // false = auto-detect, or e.g. "26.1"
     // If the server is newer than Mineflayer supports (e.g. 26.3), connect as the newest supported
     // version instead. The server then needs ViaBackwards, or the bot must go through ViaProxy.
@@ -88,6 +91,10 @@ const DEFAULT_CONFIG = {
     chatPatterns: [], // extra regexes (named groups "user" and "msg") for plugin chat formats
     authFolder: 'data/auth', // cached Microsoft sign-in tokens
     platform: 'java', // 'bedrock' when joining through ViaProxy → Geyser: disables what ViaBedrock can't translate yet
+    // Backup route: the name of a "servers" profile (e.g. Bedrock through ViaProxy) to switch to when this
+    // login is refused because of the account (online-mode rejection, failed Java sign-in, or you logging
+    // in with the same account). Empty = off. It never switches back on its own: restart the bot for that.
+    fallback: '',
     reconnect: true,
     reconnectDelayMs: 10000,
     maxReconnectDelayMs: 120000
@@ -369,6 +376,44 @@ function deepMerge (base, override) {
   return out
 }
 
+/** How to log in: { auth, username }. offlineOnly = the Microsoft sign-in already failed this run. */
+function loginFor (server, offlineOnly = false) {
+  const email = /@/.test(server.username || '')
+  const auth = server.auth === 'auto' || !server.auth ? (email && !offlineOnly ? 'microsoft' : 'offline') : server.auth
+  return { auth, username: auth === 'offline' ? offlineName(server) : server.username }
+}
+
+/** A valid Minecraft name (3–16 letters, digits or _) for offline play. */
+function offlineName (server) {
+  const user = server.username || ''
+  const raw = server.offlineName || (user.includes('@') ? user.split('@')[0] : user)
+  const name = raw.replace(/[^A-Za-z0-9_]/g, '').slice(0, 16)
+  return name.length >= 3 ? name : 'Wanderer'
+}
+
+/** The server settings for the backup route named by server.fallback, or null if there is none. */
+function fallbackServer (server, servers) {
+  const name = server?.fallback
+  const profile = name && servers?.[name]
+  if (!isPlainObject(profile)) return null
+  // Settings that only belong to the main route don't carry over, and a backup has no backup of its own.
+  const base = { ...server, realm: '', password: '', version: false, platform: 'java' }
+  return { name, server: deepMerge(base, { ...profile, fallback: '' }) }
+}
+
+/** What a server ping says about mods: Forge and NeoForge list theirs; vanilla, Paper and Fabric don't. */
+function serverMods (ping) {
+  if (ping?.forgeData) return { loader: 'Forge/NeoForge', count: (ping.forgeData.mods || []).length }
+  if (ping?.modinfo) return { loader: ping.modinfo.type || 'FML', count: (ping.modinfo.modList || []).length }
+  return null
+}
+
+// Kicks and errors that are about the login route rather than the server.
+const ONLINE_MODE_KICK = /verify username|invalid session|not authenticated|premium account|bad login/i
+const DUPLICATE_LOGIN = /logged in from another location|another location|duplicate (login|name)|already (connected|online|playing|logged in)/i
+const JAVA_SIGNIN_ERROR = /does the account own minecraft|failed to obtain profile|profile not found|xsts|xbox live|minecraft (java )?(profile|ownership)/i
+const MODDED_KICK = /mods? (rejected|mismatch|missing)|missing (required )?mods?|requires? (forge|neoforge|fabric|quilt)|\bfml\b|incompatible (mod|client)|channels? (mismatch|missing)|network version/i
+
 function readJson (file) {
   try {
     return JSON.parse(fs.readFileSync(file, 'utf8'))
@@ -425,6 +470,9 @@ function loadConfig (log) {
     if (!profile) throw new Error(`No server profile "${cli.server}" in config.servers (have: ${Object.keys(config.servers || {}).join(', ') || 'none'})`)
     config.server = deepMerge(config.server, profile)
     log.info(`Using server profile "${cli.server}" (${profile.realm ? `realm ${profile.realm}` : `${config.server.host}:${config.server.port}`})`)
+  }
+  if (config.server.fallback && !config.servers?.[config.server.fallback]) {
+    log.warn(`server.fallback is "${config.server.fallback}", but there is no such profile in config.servers; the backup route is off.`)
   }
 
   const env = process.env
@@ -2705,6 +2753,8 @@ class Agent {
     const latest = mineflayer.latestSupportedVersion
     try {
       const res = await mc.ping({ host: s.host, port: s.port, closeTimeout: 5000, noPongTimeout: 5000 })
+      const mods = serverMods(res)
+      if (mods) this.log.warn(`This is a ${mods.loader} server with ${mods.count} mods. The bot is a vanilla client, so it only gets in if those mods are all server-side (see README "Modded servers").`)
       const protocol = res?.version?.protocol
       const latestProtocol = minecraftData.versionsByMinecraftVersion.pc[latest]?.version
       if (protocol && latestProtocol && protocol > latestProtocol) {
@@ -2723,12 +2773,13 @@ class Agent {
   async connect () {
     const s = this.config.server
     const version = await this.resolveVersion()
-    this.log.info(`Connecting to ${s.host}:${s.port} as ${s.username}${version ? ` (protocol ${version})` : ''}...`)
+    const login = loginFor(s, this.offlineOnly)
+    this.log.info(`Connecting to ${s.realm ? `realm ${s.realm}` : `${s.host}:${s.port}`} as ${login.username} (${login.auth === 'microsoft' ? 'Microsoft account' : 'offline account'})${version ? ` (protocol ${version})` : ''}...`)
     const options = {
       host: s.host,
       port: s.port,
-      username: s.username,
-      auth: s.auth,
+      username: login.username,
+      auth: login.auth,
       version,
       checkTimeoutInterval: 60000,
       hideErrors: true,
@@ -2794,19 +2845,26 @@ class Agent {
     bot.on('kicked', (reason) => {
       const text = typeof reason === 'string' ? reason : JSON.stringify(reason)
       this.log.warn(`Kicked: ${text}`)
+      if (MODDED_KICK.test(text)) {
+        this.stopReconnecting = true
+        this.log.warn('The server wants client mods. The bot is a vanilla client and can\'t load mods, so it can only join servers whose mods are all server-side (see README "Modded servers"). Not retrying.')
+        return
+      }
       if (/outdated|incompatible|version/i.test(text)) {
         this.log.warn('That looks like a version mismatch. Pin server.version, or install ViaVersion + ViaBackwards on the server / use ViaProxy (see README).')
       }
       // Never fight a real person for the same account, and don't hammer a server that doesn't want us.
-      if (/logged in from another location|another location|duplicate (login|name)|already (connected|online|playing|logged in)/i.test(text)) {
+      if (DUPLICATE_LOGIN.test(text)) {
+        if (this.useFallback('Someone else logged in with this account (maybe you).')) return
         this.stopReconnecting = true
         this.log.warn('Someone else logged in with this account (maybe you). The bot will not reconnect and kick you off.')
       } else if (/white-?list|not allowed on this server|banned|ban\b/i.test(text)) {
         this.stopReconnecting = true
         this.log.warn('The server does not let this account in (whitelist/ban). Not retrying.')
-      } else if (/verify username|invalid session|not authenticated|premium account|bad login/i.test(text)) {
+      } else if (ONLINE_MODE_KICK.test(text)) {
+        if (this.useFallback('This online-mode server refused the offline account.')) return
         this.stopReconnecting = true
-        this.log.warn('This is an online-mode server: it rejected an offline account. Use a Java account ("auth": "microsoft"), or a Bedrock account through ViaProxy if the server has Geyser + Floodgate (see README).')
+        this.log.warn('This is an online-mode server: it rejected an offline account. Ask the host about FastLogin (SETUP.md "Offline Java bot on an online-mode server"), use a Java account (email as username), or a Bedrock account through ViaProxy if the server has Geyser + Floodgate.')
       } else if (/java edition account|log ?in with (your )?(java|microsoft)|microsoft\.com\/link|link your (java )?account/i.test(text)) {
         this.stopReconnecting = true
         this.log.warn('This Geyser server has no Floodgate: Bedrock players must sign in with a Java account, so a Bedrock-only account can\'t get in (see README "Geyser without Floodgate").')
@@ -2814,8 +2872,36 @@ class Agent {
         this.reconnectAttempts += 2 // back off harder
       }
     })
-    bot.on('error', (err) => this.log.error(`Connection error: ${err.message}`))
-    bot.on('end', (reason) => this.onEnd(reason))
+    // A failed Microsoft sign-in never opens a connection, so no 'end' follows: end it here.
+    let ended = false
+    const end = (reason) => { if (!ended) { ended = true; this.onEnd(reason) } }
+    bot.on('error', (err) => {
+      this.log.error(`Connection error: ${err.message}`)
+      if (login.auth === 'microsoft' && JAVA_SIGNIN_ERROR.test(err.message)) {
+        this.log.warn('The Java sign-in failed: that Microsoft account may not own Minecraft Java, or the sign-in expired (delete data/auth and sign in again).')
+        if (s.auth !== 'microsoft') {
+          // auth "auto": no usable Java account, so play as an offline account instead.
+          this.offlineOnly = true
+          this.reconnectNow = true
+          this.log.warn(`Playing as the offline account "${offlineName(s)}" instead (works on offline-mode servers).`)
+          end('Java sign-in failed')
+        } else if (this.useFallback('Java sign-in failed.')) end('Java sign-in failed')
+      }
+    })
+    bot.on('end', end)
+  }
+
+  /** Switch to the backup route (server.fallback), e.g. Bedrock through ViaProxy. True if it did. */
+  useFallback (why) {
+    const next = fallbackServer(this.config.server, this.config.servers)
+    if (!next) return false
+    const s = next.server
+    this.log.warn(`${why} Switching to the backup route "${next.name}" (${s.platform}, ${s.realm ? `realm ${s.realm}` : `${s.host}:${s.port}`}). Restart the bot to go back.`)
+    this.config.server = s
+    this.offlineOnly = false // the backup decides its own login
+    this.reconnectAttempts = 0
+    this.reconnectNow = true
+    return true
   }
 
   /** Events raised by actions (fights, gifts, kills...). */
@@ -2950,10 +3036,12 @@ class Agent {
     this.llm.clear('disconnected')
     this.learning.save()
     for (const id of this.intervals.splice(0)) clearInterval(id)
-    if (this.shuttingDown || !this.config.server.reconnect || this.stopReconnecting) return
+    const switched = this.reconnectNow
+    this.reconnectNow = false
+    if (this.shuttingDown || this.stopReconnecting || (!this.config.server.reconnect && !switched)) return
 
     const s = this.config.server
-    const delay = Math.min(s.maxReconnectDelayMs, s.reconnectDelayMs * 2 ** this.reconnectAttempts)
+    const delay = switched ? 3000 : Math.min(s.maxReconnectDelayMs, s.reconnectDelayMs * 2 ** this.reconnectAttempts)
     this.reconnectAttempts++
     this.log.info(`Reconnecting in ${Math.round(delay / 1000)}s (attempt ${this.reconnectAttempts})...`)
     setTimeout(() => {
@@ -3023,4 +3111,4 @@ function main () {
 
 if (require.main === module) main()
 
-module.exports = { Agent, Brain, Perception, ChatManager, EventReactor, OllamaClient, loadConfig, deepMerge, parsePluginChat, DEFAULT_CONFIG }
+module.exports = { Agent, Brain, Perception, ChatManager, EventReactor, OllamaClient, loadConfig, deepMerge, parsePluginChat, loginFor, fallbackServer, serverMods, DEFAULT_CONFIG }

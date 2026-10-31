@@ -646,18 +646,32 @@ Keys under `trust.`, `pvp.`, `learning.`, `intelligence.` and `mind.`, plus the 
 
 ## Accounts and joining servers
 
-**Which account can the bot use?**
+**Java is the main route, and it needs no account.** `server.auth` defaults to `"auto"`:
+- a player name as `username` → an **offline account** (the same thing as a PrismLauncher offline account);
+- a Microsoft email as `username` → it signs in with that **Java account** (once, in a browser; the token is cached in `data/auth`);
+- if that sign-in fails → it plays as the offline account instead (`server.offlineName`, default: the part of the email before the `@`).
+
+`"offline"` or `"microsoft"` force one of them.
 
 | Server type | What the bot needs |
 | --- | --- |
-| **Offline-mode** (`online-mode=false`, often with a login plugin) | Nothing: `"auth": "offline"` and any username. Set `server.password` and it answers `/register` and `/login` prompts automatically (AuthMe, nLogin, ...). This is the same as a PrismLauncher offline account. |
-| **Normal (online-mode) Java server** | Its own Java account (`"auth": "microsoft"`, email as `username`; you sign in once in a browser and the token is cached in `data/auth`). |
+| **Offline-mode** (`online-mode=false`, often with a login plugin) | Nothing: the default offline account. Set `server.password` and it answers `/register` and `/login` prompts automatically (AuthMe, nLogin, ...). |
+| **Online-mode, with FastLogin** installed by the host | The offline account + `server.password`. FastLogin keeps paid players on their own UUIDs, so their saves stay; see SETUP.md 6D. |
+| **Normal (online-mode) Java server** | Its own Java account (email as `username`), or the Bedrock route below. |
 | **Realms** | A Java account invited to the Realm: `"realm": "Realm name"`. |
 
-- **Your own Java account** works, but one account can only be online once. If you log in while the bot is on, it's kicked with "logged in from another location". It then **stops reconnecting**, so it never kicks you back off. Use it when you aren't playing.
+- **Your own Java account** works, but one account can only be online once. If you log in while the bot is on, it's kicked with "logged in from another location". It then **stops reconnecting** (or switches to its `fallback` route), so it never kicks you back off. Use it when you aren't playing.
 - **Bedrock accounts can't sign into Java servers directly.** Mineflayer only speaks the Java protocol. The route that works is through ViaProxy and a server running Geyser + Floodgate — see [Using a Bedrock account (ViaProxy)](#using-a-bedrock-account-viaproxy).
 - PrismLauncher "offline" accounts are just offline mode: they only work on offline-mode servers.
 - Note: Minecraft for PC has been sold as "Java & Bedrock Edition" since 2022 — if you bought it on PC since then, you already own Java (on your own account, which you're using).
+
+### Backup route (`server.fallback`)
+
+Keep Java as the main route and a Bedrock (or any other) profile as a backup: set `server.fallback` to the name of a `servers` profile. The bot switches to it when the server refuses the offline account, when a forced Microsoft sign-in fails, or when someone logs in with the same Java account (then it keeps playing as the backup account instead of kicking you). It never switches back by itself; restart to try the main route again. `npm run doctor` checks that the backup answers. Example in SETUP.md 6C.
+
+### Modded servers
+
+The bot is a vanilla Java client: it can't load mods. It joins servers whose mods are **server-side** (Fabric with Lithium and the like, Paper plugins, datapacks), and it can't join Forge/NeoForge modpacks that need the mods on the player's side. When a server's ping lists Forge/NeoForge mods, the bot and the doctor warn about it. If it's kicked for missing mods, it says so and stops retrying.
 
 ### Using a Bedrock account (ViaProxy)
 
@@ -731,8 +745,8 @@ Without them setting anything up:
 - Put each server in `servers` and pick one with `--server`:
   ```json
   "servers": {
-    "sam": { "host": "sam.example.net", "port": 25565, "auth": "microsoft", "username": "botaccount@example.com" },
-    "lan": { "host": "192.168.1.20", "port": 25565, "auth": "offline", "username": "Wanderer", "password": "s3cret" }
+    "sam": { "host": "sam.example.net", "port": 25565, "username": "botaccount@example.com" },
+    "lan": { "host": "192.168.1.20", "port": 25565, "username": "Wanderer", "password": "s3cret" }
   }
   ```
   ```bash
@@ -756,5 +770,5 @@ Without them setting anything up:
 - **Slow decisions**: use a smaller model, lower `llm.numCtx`, or raise `loop.minLlmIntervalMs`.
 - **Kicked for spam**: raise `chat.minSecondsBetweenMessages` and lower `chat.maxMessagesPerMinute`.
 - **Builds stall** with "missing materials": give it the materials, or let it gather them. `!build` shows what's left, and `!build cancel` drops the plan.
-- **Online-mode servers**: set `"auth": "microsoft"` and use your account email as `username`.
+- **Online-mode servers** ("Failed to verify username"): the offline account was refused. Use a Java account email as `username`, ask the host about FastLogin (SETUP.md 6D), or set a Bedrock `server.fallback`.
 - **Start relationships over**: stop the bot and delete `data/brain.json`, or use `!forget <player>` / `!trust <player> reset`.

@@ -3,7 +3,8 @@
     "host": "localhost",
     "port": 25565,
     "username": "Wanderer",
-    "auth": "offline",
+    "auth": "auto",
+    "offlineName": "",
     "version": false,
     "viaFallback": true,
     "password": "",
@@ -14,6 +15,7 @@
     "chatPatterns": [],
     "authFolder": "data/auth",
     "platform": "java",
+    "fallback": "",
     "reconnect": true,
     "reconnectDelayMs": 10000,
     "maxReconnectDelayMs": 120000

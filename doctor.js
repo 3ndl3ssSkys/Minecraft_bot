@@ -15,7 +15,7 @@
 const fs = require('fs')
 const path = require('path')
 const mc = require('minecraft-protocol')
-const { loadConfig } = require('./index.js')
+const { loadConfig, loginFor, fallbackServer, serverMods } = require('./index.js')
 const knowledge = require('./knowledge')
 
 const ok = (m) => console.log(`  \x1b[32m✓\x1b[0m ${m}`)
@@ -40,11 +40,12 @@ async function main () {
   try {
     config = loadConfig(quiet)
     const s = config.server
-    ok(`server: ${s.realm ? `realm "${s.realm}"` : `${s.host}:${s.port}`} · auth ${s.auth} · platform ${s.platform} · intelligence ${config.intelligence.level} · chat ${config.chat.mode}`)
+    const login = loginFor(s)
+    ok(`server: ${s.realm ? `realm "${s.realm}"` : `${s.host}:${s.port}`} · ${login.auth === 'microsoft' ? `Microsoft account ${login.username}` : `offline account "${login.username}"`} · platform ${s.platform} · intelligence ${config.intelligence.level} · chat ${config.chat.mode}`)
     if (!config.behavior.owners.length) warn('behavior.owners is empty — add your in-game name so you can use !commands')
     const preset = typeof config.personality === 'string' && path.join(__dirname, 'personalities', `${config.personality}.json`)
     if (preset && !fs.existsSync(preset)) warn(`personality preset "${config.personality}" not found in personalities/`)
-    if (s.auth === 'microsoft') {
+    if (login.auth === 'microsoft') {
       const folder = path.isAbsolute(s.authFolder) ? s.authFolder : path.join(__dirname, s.authFolder)
       if (fs.existsSync(folder) && fs.readdirSync(folder).length) ok('Microsoft sign-in is cached')
       else warn('Microsoft sign-in not done yet — the first start prints a code to enter at microsoft.com/link (run it once by hand, not as a service)')
@@ -84,12 +85,28 @@ async function main () {
       const motd = typeof res.description === 'string' ? res.description : (res.description?.text || '')
       ok(`${s.host}:${s.port} answers — ${res.version?.name} (protocol ${res.version?.protocol}), ${res.players?.online ?? '?'}/${res.players?.max ?? '?'} online${motd ? `, "${String(motd).replace(/§./g, '').slice(0, 60)}"` : ''}`)
       if (s.platform === 'bedrock') tip('That is ViaProxy answering for the Bedrock server — good.')
+      const mods = serverMods(res)
+      if (mods) {
+        warn(`modded server: ${mods.loader} with ${mods.count} mods. The bot is a vanilla client, so it can only join if every mod is server-side.`)
+        tip('Fabric/Paper servers with server-side mods or plugins are fine; Forge/NeoForge modpacks that need the mods on your side are not.')
+      }
     } catch (err) {
       bad(`${s.host}:${s.port} doesn't answer (${err.message}).`)
       if (s.platform === 'bedrock') tip('Is ViaProxy started (default port 25568) and pointed at the Geyser port?')
       else tip('Check host/port, that the server is running, and firewalls.')
     }
     if (probeLogin && s.platform !== 'bedrock') await probe(s)
+  }
+  const backup = fallbackServer(s, config.servers)
+  if (backup) {
+    const b = backup.server
+    try {
+      await mc.ping({ host: b.host, port: b.port, closeTimeout: 6000, noPongTimeout: 6000 })
+      ok(`backup route "${backup.name}" (${b.platform}) answers at ${b.host}:${b.port}`)
+    } catch (err) {
+      warn(`backup route "${backup.name}" doesn't answer at ${b.host}:${b.port} (${err.message}). That's fine unless the main route gets refused.`)
+      if (b.platform === 'bedrock') tip('Start ViaProxy if you want the backup to be ready.')
+    }
   }
   console.log('')
   process.exit(0)

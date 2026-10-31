@@ -13,10 +13,10 @@ Everything learned while building this bot: what it is, how it's put together, w
   - It has feelings, trust and liking, its own judgment, skill levels and realistic senses.
   - It's a good guest on friends' servers.
 - **Hardware:** a dedicated server PC with a **GTX 1660 Super (6 GB VRAM) and 32 GB RAM**. Nobody plays Minecraft on that PC, so the whole GPU goes to Ollama. The bot is headless and needs no GPU.
-- **Accounts:** the user plays on their own Java account, so the bot can't use it at the same time. The bot joins either:
-  - **offline-mode servers**;
-  - **Geyser + Floodgate servers through ViaProxy with the user's Bedrock account** (`server.platform: "bedrock"`);
-  - or with a separate Java account.
+- **Accounts:** the user plays on their own Java account, so the bot can't use it at the same time.
+  - **Java is the main route, and it must not require an account:** `server.auth: "auto"` (default) plays as an **offline account** unless `username` is a Microsoft email, and drops to offline if that sign-in fails. Java gives the bot every feature.
+  - **Bedrock stays as a backup:** Geyser + Floodgate servers through ViaProxy with the user's Bedrock account (`server.platform: "bedrock"`), usually set as `server.fallback`.
+  - Online-mode servers refuse offline accounts. The friend's host offered a plugin as long as **it never touches other players' saves**: FastLogin with premium UUIDs kept (SETUP.md 6D), or Geyser + Floodgate. Never suggest plain `online-mode=false` (it changes every UUID).
   
   Geyser **without** Floodgate (`auth-type: online`) needs a Java account. That's server authentication, and we do not try to bypass it.
 - **Friends' servers:** the bot should be able to join without the friends setting anything up for it.
@@ -79,6 +79,8 @@ Perception (2s tick) → state JSON + feelings + relationships + lessons + know-
   - **In danger** it types 1–3 words fast or postpones the reply ("sorry, was fighting").
 - **Voice:** `HUMAN_VOICE` + `refusalStyle` + the `ROBOTIC` regex guard: never "I cannot comply".
 - **Good guest:** `noGrief` (pathfinder can't break player-built blocks; `mineBlock` skips them), `respectPrivateChests`, sign/chat rules, rate limits, and **no reconnect on duplicate login** (never kick the user's own session), whitelist, ban, or online-mode rejection.
+- **Backup route:** `server.fallback` names a `servers` profile. `fallbackServer()` merges it over the main settings (clearing realm, password, version, platform; no chains). Triggers: online-mode kick, failed forced Microsoft sign-in, duplicate login. It never switches back by itself (that could kick the user).
+- **Mods:** Mineflayer is a vanilla client. `serverMods()` reads Forge/NeoForge mod lists from the ping; mod-mismatch kicks stop reconnects.
 - **Versions:** Mineflayer tops out at 26.1. Against newer servers (26.3) it pings and connects as 26.1 (`viaFallback`), which needs ViaBackwards or ViaProxy. ViaProxy itself supports Java servers up to 26.3.
 - **Bedrock route limits** (ViaBedrock): no block breaking, no inventories, no mob sounds. `platform: "bedrock"` hides those actions and stops digging.
 
@@ -93,6 +95,7 @@ Perception (2s tick) → state JSON + feelings + relationships + lessons + know-
 - `entityHurt(entity, source)`: `source` (the attacker) only exists on 1.20+ (`damage_event`). Older versions guess from arm swings.
 - Mineflayer **does not surface `world_event`** (block break 2001, splash potions, spawners, anvils, global wither/dragon/end portal events). Listen on `bot._client.on('world_event')`.
 - `bot.blockAt` needs a **Vec3** (it calls `.floored()`).
+- A failed Microsoft sign-in (prismarine-auth) emits `error` but **never `end`**: no connection was opened. `Agent.connect` ends it by hand, once.
 - `bot.setControlState(name, value)` **asserts a boolean**: `false || undefined` crashes it.
 - `bot.look(..., false)` resolves on physics ticks, and **physics stops on death** until the server sends a position. Race it with a timeout.
 
@@ -116,7 +119,7 @@ Perception (2s tick) → state JSON + feelings + relationships + lessons + know-
 
 ## Testing
 
-- **Unit tests:** `npm test` (social, tasks, senses + chests + chat formats + intelligence gates); `npm run check` (syntax).
+- **Unit tests:** `npm test` (social, tasks, senses + chests + chat formats + intelligence gates, login/backup routes/mods); `npm run check` (syntax).
 - **Live tools:** `test/tools/` (see its README for how to run them and for **flying-squid's quirks**: players only see later joiners, no PvP damage or tossing, no sneak/invisibility metadata or break sounds, 1.21.4 inventory corruption, `/give` count concatenation, `/tp` crash on 1.21.4).
 - **Verified live on flying-squid 1.16.5 / 1.21.4:**
   - movement, mining, placing, chat in and out, replies and requests;
@@ -127,12 +130,14 @@ Perception (2s tick) → state JSON + feelings + relationships + lessons + know-
   - building plans and first ~10% of a build;
   - sight occlusion, hearing → suspicion → investigation, name tags through walls / sneaking / invisible;
   - the version fallback against a fake 26.3 server;
+  - the backup route: a fake online-mode server refuses the offline bot → it switches to the backup profile and spawns;
   - the doctor.
 - **Not verified yet:**
   - real Qwen output (all runs used the mock);
   - a full build, the mace combo and potion/totem use in a real fight;
   - shield-blocking detection;
-  - Realms, login plugins and Microsoft sign-in;
+  - Realms, login plugins and Microsoft sign-in (including `auto` dropping to offline after a failed sign-in);
+  - FastLogin on a real server;
   - the ViaProxy + Geyser + Floodgate Bedrock route;
   - real performance on the 1660 Super (estimated 4–8 s per decision for 7B).
 

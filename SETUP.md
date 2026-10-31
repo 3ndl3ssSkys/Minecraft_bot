@@ -53,16 +53,26 @@ This walks through everything, in order, from an empty PC to the bot playing on 
 
 ## 2. Decide how the bot joins
 
-The bot needs a way to log into the server. Pick the first row that fits:
+**The bot plays Java by default and doesn't need an account.** With the default `"auth": "auto"`:
+- if `username` is a **name** (like `Wanderer`), it joins as an **offline account** — no Microsoft login, nothing to buy;
+- if `username` is a **Microsoft account email**, it signs in with that Java account instead;
+- if that sign-in fails (the account doesn't own Java, or the login expired), it drops back to the offline account.
+
+Offline accounts are accepted by **offline-mode** servers. Normal (online-mode) servers check every login with Microsoft, so there the host either installs FastLogin (step 6D, keeps everyone's saves) or the bot uses another route. Pick the first row that fits:
 
 | Situation | Route | Bot features |
 | --- | --- | --- |
-| Server is **offline-mode** (no Microsoft login), with or without a login plugin like AuthMe | Join directly, `"auth": "offline"` (+ `password` for the plugin) | everything |
-| You have a **spare Java account** for the bot | Join directly, `"auth": "microsoft"` | everything |
-| Server has **Geyser + Floodgate**, and you have a **Bedrock account** | **ViaProxy** with your Bedrock account (step 6B) | no mining, chests, crafting or building (translation limits); walking, chatting, fighting and items work |
-| A **Realm** your bot's Java account is invited to | `"realm": "Name"`, `"auth": "microsoft"` | everything |
-| Server has **Geyser without Floodgate**, and you only have Bedrock | Not possible: Geyser asks every Bedrock player for a Java login. Ask for Floodgate, or use a Java account. | — |
-| Your own Java account, only when you're **not** playing | `"auth": "microsoft"` with your account | everything (it backs off if you log in) |
+| Server is **offline-mode** (no Microsoft login), with or without a login plugin like AuthMe | Java, offline account — the default (+ `password` for the plugin) | everything |
+| Online-mode server whose host installed **FastLogin + a login plugin** (step 6D) | Java, offline account + `password` | everything |
+| You have a **spare Java account** for the bot | Java, its email as `username` | everything |
+| Server has **Geyser + Floodgate**, and you have a **Bedrock account** | **ViaProxy** with your Bedrock account (step 6B), e.g. as the **backup route** (step 6C) | no mining, chests, crafting or building (translation limits); walking, chatting, fighting and items work |
+| A **Realm** your bot's Java account is invited to | `"realm": "Name"`, email as `username` | everything |
+| Server has **Geyser without Floodgate**, and you only have Bedrock | Not possible: Geyser asks every Bedrock player for a Java login. Ask for Floodgate, or use a Java route. | — |
+| Your own Java account, only when you're **not** playing | your email as `username` | everything (it backs off, or switches to its backup route, when you log in) |
+
+**Java is the better route** whenever it's possible: the bot can mine, use chests, craft and build there, and every skill works. Keep Bedrock as the backup (step 6C).
+
+**Modded servers:** the bot is a vanilla Java client and can't load mods. It joins Fabric or Paper servers whose mods and plugins are server-side (most performance mods, plugins, datapacks), but not Forge/NeoForge modpacks that need the mods installed on the player's side. The doctor and the bot's log say when a server is like that.
 
 **Not sure which kind of server it is?** After step 5, run `npm run doctor -- --probe-login`. It tells you if the server is online- or offline-mode.
 
@@ -154,18 +164,20 @@ npm test
 
 Everything goes in `config.json`. You can keep several servers as **profiles** and pick one when starting (`node index.js --server <name>`).
 
-### 6A. Direct connection (offline-mode server, Java account, or Realm)
+### 6A. Java (offline account, Java account, or Realm)
 
 ```json
 "servers": {
-  "home":   { "host": "127.0.0.1", "port": 25565, "auth": "offline", "username": "Wanderer" },
-  "sam":    { "host": "sam.example.net", "port": 25565, "auth": "microsoft", "username": "bot-account@example.com" },
-  "authme": { "host": "play.example.net", "port": 25565, "auth": "offline", "username": "Wanderer", "password": "pick-a-password" },
-  "realm":  { "realm": "Our Realm", "auth": "microsoft", "username": "bot-account@example.com" }
+  "home":   { "host": "127.0.0.1", "port": 25565, "username": "Wanderer" },
+  "authme": { "host": "play.example.net", "port": 25565, "username": "Wanderer", "password": "pick-a-password" },
+  "sam":    { "host": "sam.example.net", "port": 25565, "username": "bot-account@example.com" },
+  "realm":  { "realm": "Our Realm", "username": "bot-account@example.com" }
 }
 ```
 
-- **`username`:** with `"auth": "microsoft"` it's the account's email. The first start prints a code to enter at microsoft.com/link, and the sign-in is then remembered in `data/auth`.
+- **`username`:** a player name plays offline. A Microsoft email signs in with that Java account: the first start prints a code to enter at microsoft.com/link, and the sign-in is then remembered in `data/auth`.
+- **`offlineName`:** the name it uses offline when `username` is an email and the sign-in fails (default: the part before the `@`).
+- **`auth`:** leave it out (`"auto"`). Set `"offline"` or `"microsoft"` only to force one.
 - **`password`:** for login plugins. The bot answers `/register` and `/login` prompts itself (`loginCommand`/`registerCommand` if the server uses different commands).
 - **Server version:** detected automatically. If the server is newer than the bot supports (26.2+), it connects as 26.1, so the server needs ViaVersion + ViaBackwards, or you put ViaProxy in between (6B, with a Java target).
 
@@ -200,6 +212,43 @@ Everything goes in `config.json`. You can keep several servers as **profiles** a
    - `auth-method: account`
    - `minecraft-account-index: 0` (the first account in the GUI list)
 3. Run the same command again: now it starts the proxy with those settings.
+
+### 6C. Java first, Bedrock as the backup
+
+Keep the Java route as the main one and the Bedrock route (6B) ready in case Java gets refused. Set `fallback` to the name of the backup profile:
+
+```json
+"server": { "host": "friend.example.net", "port": 25565, "username": "Wanderer", "fallback": "friend-bedrock" },
+"servers": {
+  "friend-bedrock": { "host": "127.0.0.1", "port": 25568, "auth": "offline", "username": "Wanderer", "version": "1.21.4", "platform": "bedrock" }
+}
+```
+
+It switches to the backup, a few seconds later, when:
+- the server refuses the offline account (it's online-mode);
+- the Java sign-in fails with `"auth": "microsoft"` (with `"auto"` it first tries the offline account, then the backup if that's refused too);
+- someone logs in with the same Java account — probably you — so it keeps playing as the Bedrock account instead of fighting you for yours.
+
+It never switches back on its own (that could kick you): restart the bot to try Java again. ViaProxy only has to be running when the backup is actually needed; `npm run doctor` says whether it answers. To go straight to Bedrock, start it with that profile: `node index.js --server friend-bedrock`.
+
+### 6D. Offline Java bot on an online-mode server (for the server host)
+
+An online-mode server checks every login with Microsoft, so an offline account gets "Failed to verify username". If the host is willing to install plugins, there are two options that leave other players' saves alone. **Either way: back up the server first.**
+
+**Option 1 — FastLogin (full Java bot).** The server lets offline accounts in with a password, but still verifies paid accounts with Microsoft and keeps their normal UUIDs. Each player's save (`world/playerdata/<uuid>.dat`) is tied to that UUID, so nobody loses anything.
+1. Install a login plugin ([AuthMe Reloaded](https://www.spigotmc.org/resources/authmereloaded.6269/) or nLogin), [FastLogin](https://www.spigotmc.org/resources/fastlogin.14153/), and FastLogin's requirement ([ProtocolLib](https://www.spigotmc.org/resources/protocollib.1997/) on Paper/Spigot). On a Velocity/BungeeCord network, install FastLogin on the proxy as its page describes.
+2. In FastLogin's `config.yml`, make sure paid players keep their **premium UUID** (the `premiumUuid` setting). **This is the setting that protects the saves.** If it's off, Java players get new offline UUIDs and arrive with empty inventories.
+3. Set `online-mode=false` in `server.properties` and restart.
+4. **Test before anyone else joins:** one Java player logs in and checks that their inventory and position are still there. If not, set `online-mode=true` again (nothing is lost; the old save is still under the old UUID) and fix the FastLogin setting.
+5. Give the bot a name that isn't a paid Minecraft account name (FastLogin asks paid names for a Microsoft login), and its password in the bot's profile:
+   ```json
+   "friend": { "host": "friend.example.net", "port": 25565, "username": "WandererBot", "password": "pick-a-password" }
+   ```
+   The bot answers `/register` and `/login` itself.
+
+This changes how the server checks logins, so it's the host's call. Option 2 doesn't touch login checking at all.
+
+**Option 2 — Geyser + Floodgate (Bedrock backup only).** Install Geyser and Floodgate (geysermc.org/download), keep `auth-type: floodgate`, and open UDP port 19132. Bedrock players get their own UUIDs and `.`-prefixed names, so Java saves are never touched. The bot then joins through ViaProxy (6B) with the Bedrock limits. Don't link the bot's Bedrock account to a Java account at link.geysermc.org: a linked Bedrock player plays as that Java profile and shares its save.
 
 ---
 
@@ -385,9 +434,10 @@ Then restart the bot. If a new version adds options, they get defaults automatic
 | The doctor says the model is only partly on the GPU | Set the step 4 variables, lower `llm.numCtx` to 6144, close other GPU programs, or use `qwen2.5:3b`. |
 | Very slow decisions | Same as above; also raise `loop.minLlmIntervalMs`. |
 | "Server version … not supported" / "Outdated client" | The server is newer than 26.1: it needs ViaVersion + ViaBackwards, or use ViaProxy in between. |
-| "Failed to verify username" / it stops after one try | The server is online-mode: use a Java account, or the Bedrock route if it has Geyser + Floodgate. |
+| "Failed to verify username" / it stops after one try | The server is online-mode and refused the offline account: ask the host about step 6D, use a Java account email as `username`, or set a Bedrock `fallback` (6C). |
+| "The server wants client mods" | A Forge/NeoForge modpack server: the bot is a vanilla client and can't join it. |
 | Kicked with a Geyser message about Java accounts | That Geyser has no Floodgate; a Bedrock-only account can't join it. |
-| "Logged in from another location" | Someone (probably you) logged in with the same account. The bot stops reconnecting on purpose. |
+| "Logged in from another location" | Someone (probably you) logged in with the same account. The bot stops reconnecting on purpose, or switches to its `fallback` route if it has one. |
 | Whitelist / banned | The server owner has to whitelist or unban the bot's name. |
 | It doesn't answer chat | Check `chat.mode`; say its name in the message; on plugin servers add a pattern to `server.chatPatterns` if the format is unusual. |
 | `!commands` don't work | Your name must be in `behavior.owners` (or admins) exactly as it appears in game (Bedrock players have a `.` in front). |
