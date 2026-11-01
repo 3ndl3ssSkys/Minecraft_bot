@@ -241,6 +241,8 @@ You can also put the whole object inline: `"personality": { "name": "...", ... }
 | `typingCharsPerSecond`, `stopToType` | It stands still and "types" at this speed; in danger it types 1-3 words or answers later. |
 | `unprompted.intervalSeconds` / `chance` | How often it starts small talk. |
 
+**No emojis:** it types like a player. The prompts forbid emojis, and anything a model slips in is removed before sending (text faces like `:)` stay).
+
 **Chat and what it does are linked.** Every reply sees what just happened: a fight it started or stopped, a truce, a clutch save, a death, a finished goal. So when it says "fine, truce", it really has stopped. A request in chat ("get me 10 logs") becomes a task, which it may accept, put off, half-do or refuse, in character.
 
 ### Reactions to events

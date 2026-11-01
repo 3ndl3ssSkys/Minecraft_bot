@@ -81,6 +81,15 @@ server.listen(0, async () => {
   console.log('reasoning stripped, answer parsed; warned:', warnings[0].slice(0, 70) + '...')
   console.log('ok')
 
+  console.log('\n== no emojis in chat ==')
+  const { ChatManager } = require(R + 'index.js')
+  const chat = new ChatManager({ config: DEFAULT_CONFIG, personality: { name: 'Wanderer', lowercase: false }, bot: { username: 'Wanderer' } })
+  for (const [said, sent] of [['Hello! Nice to meet you! 😊', 'Hello! Nice to meet you!'], ['gg 👍🏽 that was close 🔥🔥', 'gg that was close'], ['❤️ thanks', 'thanks'], ['ok :)', 'ok :)'], ['🇺🇸 lol 👨‍👩‍👧', 'lol']]) {
+    assert.equal(chat.sanitize(said), sent)
+  }
+  console.log('"Hello! Nice to meet you! 😊" →', JSON.stringify(chat.sanitize('Hello! Nice to meet you! 😊')))
+  console.log('ok')
+
   console.log('\nAll LLM checks passed')
   server.close()
 })

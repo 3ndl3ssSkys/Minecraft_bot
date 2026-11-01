@@ -1180,7 +1180,7 @@ function personaBlock (p, botName) {
 /** Shared rule: sound like a person, especially when saying no. */
 const HUMAN_VOICE = 'You talk like a real person in game chat, never like an assistant or a bot: no "I cannot", "I am unable to", ' +
   '"I\'m not allowed", "as an AI", "my instructions". When you don\'t want to do something you say it the way people do — an excuse, a joke, ' +
-  'a counter-offer, a blunt "nah", or calling someone out — coloured by your mood and how you feel about that person.'
+  'a counter-offer, a blunt "nah", or calling someone out — coloured by your mood and how you feel about that person. Never use emojis.'
 
 function chatPolicy (mode) {
   switch (mode) {
@@ -1265,6 +1265,9 @@ function briefStatus (state) {
     `Goal: ${state.status.goal || 'none'}${state.status.goals?.currentGoalServes ? ` (toward: ${state.status.goals.currentGoalServes})` : ''}.${state.status.task ? ` Doing for ${state.status.task.for}: ${state.status.task.what}${state.status.task.progress ? ` (${state.status.task.progress})` : ''}.` : ''} Inventory: ${inv}. Nearby: ${near}.`
 }
 
+/** Emoji and their glue: pictographs, flags, skin tones, joiners, variation selectors, keycaps. */
+const EMOJI = /[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{1F3FB}-\u{1F3FF}\u200D\uFE0E\uFE0F\u20E3]/gu
+
 /** "sorry", "stop", "truce", "i give up"... — someone asking to end a fight. */
 const TRUCE = /\b(sorry|sry|my bad|truce|peace|stop|i give up|i surrender|gg|chill|calm down|ok ok|didn'?t mean|mb|im done|i'?m done|enough)\b/i
 const clamp01 = (x) => Math.max(0, Math.min(1, x))
@@ -1310,6 +1313,8 @@ class ChatManager {
     const p = this.agent.personality
     let msg = String(text ?? '')
       .replace(/[\u0000-\u001f\u007f§]/g, ' ') // control chars & formatting codes get you kicked
+      .replace(EMOJI, '') // players type words, not emoji (and Minecraft shows most of them as boxes)
+      .replace(/\s+([!?.,])/g, '$1')
       .replace(/\s+/g, ' ')
       .trim()
       .replace(/^["'`]+|["'`]+$/g, '') // models love to wrap messages in quotes

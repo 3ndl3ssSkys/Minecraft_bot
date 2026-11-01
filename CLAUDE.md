@@ -10,12 +10,15 @@ Everything learned while building this bot: what it is, how it's put together, w
 - Address the user as **EndlessSkys** (or Endless). Never use their real first name, which shows up in their Windows paths (`C:\Users\<name>`): write "your user folder" or `%USERPROFILE%` instead.
 - **Goal:** a fully autonomous Minecraft Java bot that plays and talks **like a real person**, driven by a local LLM (Ollama + Qwen 2.5).
   - It refuses like a human, never like an assistant.
+  - **It never uses emojis** (the user asked). The prompts say so, and `ChatManager.sanitize` strips them (`EMOJI` regex) because small models add them anyway.
   - It has feelings, trust and liking, its own judgment, skill levels and realistic senses.
   - It's a good guest on friends' servers.
 - **Hardware:** a dedicated server PC with a **GTX 1660 Super (6 GB VRAM) and 32 GB RAM**, running **Windows** (Command Prompt), Node 26. Nobody plays Minecraft on that PC, so the whole GPU goes to Ollama. The bot is headless and needs no GPU.
   - **Measured on it:**
     - `qwen2.5:7b` does **not** fully fit: `ollama ps` showed 5.2–5.4 GB at `18–21%/79–82% CPU/GPU`, because Windows uses part of the VRAM for the screen.
-    - **`qwen3:4b` fits (3.2 GB, 100% GPU), but it's a thinking-only version:** even `ollama run qwen3:4b --think=false` reasoned for pages and ended with `</think>`. Use **`qwen3:4b-instruct`** (same size, answers directly) with `llm.think: false`.
+    - **`qwen3:4b` fits (3.2 GB, 100% GPU), but it's a thinking-only version:** even `ollama run qwen3:4b --think=false` reasoned for pages and ended with `</think>`. Use **`qwen3:4b-instruct`** (same size, answers directly) with `llm.think: false`. **Confirmed on the user's PC:** 3.2 GB, 100% GPU, answers directly.
+    - `ollama ps` still showed "4 minutes from now" afterwards, so `OLLAMA_KEEP_ALIVE=24h` (and probably the other `setx` values) wasn't active yet: Ollama hadn't fully restarted. The bot sends `keep_alive: 24h` itself anyway.
+    - Verdict given to the user: this one model is enough on that card. Reflexes don't use it; chat ~1–2 s; decisions a few seconds. Optional: add `qwen3:1.7b` as `fastModel` if replies feel slow while it's deciding (both fit). Bigger 7–8B models spill onto the CPU there; a 1.7B for everything would make worse decisions.
     - It's not known yet whether the `setx` Ollama variables (flash attention, q8_0 KV) took effect.
 - **Accounts:** the user plays on their own Java account, so the bot can't use it at the same time.
   - **Java is the main route, and it must not require an account:** `server.auth: "auto"` (default) plays as an **offline account** unless `username` is a Microsoft email, and drops to offline if that sign-in fails. Java gives the bot every feature.
