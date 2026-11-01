@@ -201,6 +201,9 @@ class Reflexes {
     this.busy = false
   }
 
+  /** Let it happen: it chose to fall / burn on purpose (the respawn action). 0 = back to normal. */
+  standDown (ms) { this.standDownUntil = ms ? Date.now() + ms : 0 }
+
   // -------------------------------------------------------------------------
   // Knowledge and skill
   // -------------------------------------------------------------------------
@@ -327,6 +330,7 @@ class Reflexes {
       this.fallDistance += this.prevY - e.position.y
     }
     this.prevY = e.position.y
+    if (Date.now() < (this.standDownUntil || 0)) return
 
     if (this.cfg.falls && !this.grounded() && !e.elytraFlying && e.velocity.y < -0.15 && !this.busy) {
       if (!this.fall) {
@@ -1046,7 +1050,7 @@ class Reflexes {
    */
   onHurt ({ attacker, serious }) {
     const { bot, agent } = this
-    if (!this.cfg.enabled || !this.cfg.hitReactions || !bot?.entity || this.busy || agent.dead) return
+    if (!this.cfg.enabled || !this.cfg.hitReactions || !bot?.entity || this.busy || agent.dead || Date.now() < (this.standDownUntil || 0)) return
     const kb = bot.entity.velocity.clone()
     // Crouch at the edge before the knockback carries us off (PvP habit, so it's quicker than a normal reaction).
     if (this.knows('edgeSneak') && bot.entity.onGround) {

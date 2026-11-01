@@ -264,7 +264,7 @@ This changes how the server checks logins, so it's the host's call. Option 2 doe
 
 ## 7. Configure the bot
 
-Open `config.json`. Every option has a sensible default, so you only need what you want to change. The important ones:
+Open `config.json`. Every option has a sensible default, so you only need what you want to change. The important ones are below. **[CONFIGURING.md](CONFIGURING.md) explains everything else**: goals (overall → long-term → current → steps), feelings, writing your own personality, reactions, obedience, fighting and the in-game commands for all of them.
 
 ### Who you are
 

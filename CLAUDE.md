@@ -2,7 +2,7 @@
 
 Everything learned while building this bot: what it is, how it's put together, why things are the way they are, and the traps already found. Claude Code loads this file automatically; it's also meant for humans picking the project up later.
 
-- **Setup for users:** [SETUP.md](SETUP.md).
+- **Setup for users:** [SETUP.md](SETUP.md). **Configuring** (goals, feelings, personality, chat, reactions, fighting): [CONFIGURING.md](CONFIGURING.md).
 - **Feature reference:** [README.md](README.md).
 
 ## The user and what they want
@@ -38,8 +38,9 @@ Reflexes (every physics tick, 20/s, no LLM): falls, lava, drowning, hits → tak
 
 | File | Owns |
 | --- | --- |
-| `index.js` (~3000 lines) | `DEFAULT_CONFIG` (the source of truth for every option), `loadConfig` (+ `--server` profiles, env overrides, compatibility), `Memory`, `Perception`, `OllamaClient` (Ollama or OpenAI-compatible; two lanes when `llm.fastModel` is set — chat (reply 0, reaction 1, smalltalk 3) on the fast model, decisions 2 and reflect 4 on the main one; each lane one request at a time, priority-sorted; the fast lane can use another provider), prompt builders (`personaBlock`, `mindBlock`, `buildDecisionPrompt`, `HUMAN_VOICE`), schemas, `ChatManager` (rate limits, danger shortening, robot-speak guard, stop-to-type), `ChatResponder` (analysis → appraisal → phrasing; !commands; postponing in danger), `SETTABLE` + `parseSetting` (in-game settings), `SmallTalk`, `EventReactor` (all game events → memory, social, emotions, reactions), `Brain` (loop, decision-level reflexes like fight/flee, busy work while thinking — the LLM wait is raced against `interruptFn` so a hit acts at once, `considerTruce`, XP), `Agent` (wiring, connection, server helpers, kick handling, saving), `parsePluginChat`. |
+| `index.js` (~3000 lines) | `DEFAULT_CONFIG` (the source of truth for every option), `loadConfig` (+ `--server` profiles, env overrides, compatibility), `Memory`, `Perception`, `OllamaClient` (Ollama or OpenAI-compatible; two lanes when `llm.fastModel` is set — chat (reply 0, reaction 1, smalltalk 3) on the fast model, decisions 2 and reflect 4 on the main one; each lane one request at a time, priority-sorted; the fast lane can use another provider), prompt builders (`personaBlock`, `mindBlock`, `buildDecisionPrompt`, `HUMAN_VOICE`), schemas, `ChatManager` (rate limits, danger shortening, robot-speak guard, stop-to-type), `ChatResponder` (analysis → appraisal → phrasing; !commands; postponing in danger), `SETTABLE` + `parseSetting` (in-game settings), `SmallTalk`, `EventReactor` (all game events → memory, social, emotions, reactions), `Brain` (loop, decision-level reflexes like fight/flee, busy work while thinking — the LLM wait is raced against `interruptFn` so a hit acts at once, `considerTruce`, `watchFight`/`rethinkFight` (the mind can stop or flee mid-fight), XP), `Agent` (wiring, connection, server helpers, kick handling, saving), `parsePluginChat`. |
 | `actions.js` | `ACTIONS` registry (30 tools: move, follow, explore, mine, place, chat, equip, attack, retreat, eat, collect, craft, give, sleep, smelt, store/take, activate, fish, useItem, knowledge, readSigns, inspectContainer, parkour, planBuilding/build/cancelBuilding, emote, wait), `gotoGoal` (our own pathfinder driver), `placeAt`, `ActionExecutor` (availability filters, hard timeout, `pauseFor`, ctx with social/learning/tasks/builder/intel/containers). |
+| `goals.js` | The goal tree: overall (`life`) → long-term (≤4) → current (with `steps`, `now`, `detour`) → history. Sources: config / owner name / self; set goals are `fixed`. `onDecision` (goal, subgoal, goalStatus incl. `new_goal`), detours (own goals taken over after 3 min), `needsPlan`/`maybePlan`/`applyPlan` (low-priority planner call, keeps fixed goals), `forPrompt` (status.goals). |
 | `reflexes.js` | The fast layer: `predictLanding` (tick simulation), `fallDamage` (Feather Falling/Protection EPF), `TRICKS` (17 saves + hazard tricks with level and `need`), `fallOptions` → expected-damage choice, executors (placeBelow, edge clutch, boat, pearl, elytra, mace, mount, wall pearl), hazards (lava, fire, drowning, suffocation, TNT), `onHurt` (startle, weapon out, edge sneak), learning saves (`discover`, `learnFromText`), `avoidHazards` for the pathfinder. |
 | `combat.js` | The fight loop: kit reading, ballistics, mace + wind charge, bows/crossbows, axe vs shield, combos, potions (undead-aware), golden apples, totems, cobweb, pearl escape, water clutch, mob tactics. Gated by `ctx.intel.combatProfile()`. |
 | `intelligence.js` | 8 levels, the concave `skillAt` curve, `UNLOCKS`, `BASE_ONLY` (mace and seeing through walls depend on the configured level, not practice), per-domain XP learning, mindset texts. |
@@ -55,7 +56,7 @@ Reflexes (every physics tick, 20/s, no LLM): falls, lava, drowning, hits → tak
 | `test/` | `npm test` unit suites; `test/tools/` live tools (mock Ollama, flying-squid server, test player, scenario harness). |
 | `scripts/` | Start scripts (Windows/Linux), systemd unit, `regen-config.js`. |
 
-**What gets saved** (`data/brain.json`, every 30 s and on shutdown): `social` (players: trust, affinity, notes, promises, stats), `emotions`, `tasks` + history, `building` (current plan + history), `obeyPlayers`, `intelligence` (xp), `reflexes` (learned saves + practice), `chests`, `knownFacts`, `learnedItems`, `combat`, `movement` (danger zones), `lessons`, `stats`, `admins`, `settings` (in-game overrides, which win over config.json until reset).
+**What gets saved** (`data/brain.json`, every 30 s and on shutdown): `social` (players: trust, affinity, notes, promises, stats), `emotions`, `tasks` + history, `building` (current plan + history), `obeyPlayers`, `intelligence` (xp), `reflexes` (learned saves + practice), `goals` (tree + history + last config), `chests`, `knownFacts`, `learnedItems`, `combat`, `movement` (danger zones), `lessons`, `stats`, `admins`, `settings` (in-game overrides, which win over config.json until reset).
 
 **Adding things:**
 - **An option:** add it to `DEFAULT_CONFIG`, then run `node scripts/regen-config.js`. To make it settable in game, add it to `SETTABLE` (types number, boolean, enum, string).
@@ -74,6 +75,9 @@ Reflexes (every physics tick, 20/s, no LLM): falls, lava, drowning, hits → tak
 - **Intelligence:** the skill curve is concave — big early gains, small later ones (0.08 → 0.41 → … → 0.97 → 1.00). **Mace PvP only for Hardcore+, good mace only for Master/Impossible**, by configured level. A Beginner learns slowly but without a cap (`maxGain` 7, xp scale 120: ~2 levels at 40 xp, past Master around 300) — the user wants a Beginner to be able to end up better than a Master. X-ray is opt-in and Impossible-only (counts as cheating on most servers).
 - **Speed: two layers.** The user said reactions can't wait 2–4 s. Anything time-critical (falls, lava, drowning, hits) is code in `reflexes.js` with a human reaction delay from skill (≈420 → 70 ms); the LLM only plans and talks. Fall saves by level as the user listed: Advanced knows the common saves (water, blocks, pearl, elytra) but executes imperfectly; Master knows boat, ladder/vine, mace-on-mob, mounting; Impossible crouch-clutches, wall-pearls and is frame-perfect. Success = `sigmoid(14 × (skill − need))`, × 0.65 under 1.2 ticks of window and × 0.3 under 0.8 (except Impossible). A fumble is decided up front and acted out (late click). Beginners discover saves from bad falls (trick level ≤ own level + 3) or from chat.
 - **Truce:** "sorry/stop/truce" from the opponent is judged instantly in `Brain.considerTruce` (affinity, trust, forgiveness, hits, still swinging, broken truce before).
+- **The mind keeps a say** (user asked "can the AI still decide to stop attacking?"): reflexes start fights, but `pvp.rethinkSeconds` check-ins (reaction priority → fast lane) can stop or flee; chat replies get the last 90 s of memory events so words match actions.
+- **Goals** (user's design): overall → encompassing/long-term → goal → subgoals, each set or self-made; set goals stay (detours instead), own goals can change (`new_goal`). Config goals re-apply only when the config changed (`lastConfig`).
+- **Dying on purpose** (user asked for it): the `respawn` action, never on hardcore, 10-min cooldown, `reflexes.standDown` so it doesn't clutch out of its own choice; its death isn't mourned, recorded as a danger zone, or turned into a lesson.
 - **Senses:**
   - Realistic by default: entities only with line of sight; blocks only once seen.
   - Invisibility works, except through armor, swirls right in front, or touching.
@@ -127,7 +131,7 @@ Reflexes (every physics tick, 20/s, no LLM): falls, lava, drowning, hits → tak
 
 ## Testing
 
-- **Unit tests:** `npm test` (social, tasks, senses + chests + chat formats + intelligence gates, login/backup routes/mods); `npm run check` (syntax).
+- **Unit tests:** `npm test` (social, tasks, senses + chests + chat formats + intelligence gates, login/backup routes/mods, reflexes, LLM lanes, goals); `npm run check` (syntax).
 - **Live tools:** `test/tools/` (see its README for how to run them and for **flying-squid's quirks**: players only see later joiners, no PvP damage or tossing, no sneak/invisibility metadata or break sounds, 1.21.4 inventory corruption, `/give` count concatenation, `/tp` crash on 1.21.4).
 - **Verified live on flying-squid 1.16.5 / 1.21.4:**
   - movement, mining, placing, chat in and out, replies and requests;
@@ -142,6 +146,8 @@ Reflexes (every physics tick, 20/s, no LLM): falls, lava, drowning, hits → tak
   - fall reflexes: teleported 25 up, Mediocre places a slime block on the landing spot (Beginner doesn't); startle looks (Beginner ~70° off, Advanced/Impossible on target in 0.2 s), weapon out on a serious hit;
   - interrupting the LLM: with a 5 s decision pending, a hit starts the escape immediately and the late answer is dropped;
   - the LLM lanes (unit test with a stub server): a reply returns in ~100 ms while a 600 ms decision runs; OpenAI-format requests; mixed providers;
+  - goals live (mock): the planner made an overall goal, kept the config's long-term goal and added steps; decisions advanced steps;
+  - the fight check-in live: in a fight with the Tester, after "sorry" the next check-in stopped the fight and it said "fine. truce";
   - the doctor.
 - **Not verified yet:**
   - real Qwen output (all runs used the mock);
@@ -152,6 +158,8 @@ Reflexes (every physics tick, 20/s, no LLM): falls, lava, drowning, hits → tak
   - the ViaProxy + Geyser + Floodgate Bedrock route;
   - fall saves on a real server (flying-squid has no fall damage and no buckets/boats/pearls): water bucket, boat, pearl, elytra, ladder, mace, mount, wall pearl, edge clutch; lava/drowning escapes;
   - real speeds of qwen3:4b + qwen3:1.7b on the 1660 Super, and hosted APIs;
+  - the `respawn` action on a real server (lava/drop finding, /kill);
+  - how well a real small model keeps to the goal tree (detours vs new_goal).
   - real performance on the 1660 Super (estimated 4–8 s per decision for 7B).
 
 ## Environment notes (for Claude cloud sessions)

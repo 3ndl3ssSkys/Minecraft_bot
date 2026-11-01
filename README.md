@@ -4,6 +4,7 @@ An autonomous Minecraft Java Edition player built on **Mineflayer** + **mineflay
 
 On top of that it has an inner life:
 
+- **Goals** on four levels (overall → long-term → current → steps), set by you or made up by itself, revised as it plays.
 - **Feelings** rise and fall with what happens to it.
 - **Trust** in each player (are they safe?) changes with what that player *does*.
 - **Liking** for each player (do I enjoy them?) grows from chemistry and time spent together, not from politeness.
@@ -26,7 +27,7 @@ Perception (every 2s) ──► state JSON + feelings + relationships + lessons 
         └──────────── result fed back into the next prompt ◄──── ActionExecutor (one action at a time)
 ```
 
-> **New here?** [SETUP.md](SETUP.md) walks through everything from an empty PC to a running bot. [CLAUDE.md](CLAUDE.md) holds the project's design notes and lessons learned.
+> **New here?** [SETUP.md](SETUP.md) walks through everything from an empty PC to a running bot. [CONFIGURING.md](CONFIGURING.md) shows how to set goals, feelings, personality, chat, reactions, fighting and reflexes. [CLAUDE.md](CLAUDE.md) holds the project's design notes and lessons learned.
 
 ## Quick start
 
@@ -478,6 +479,26 @@ At `0` it's purely its own call. At `1` it does whatever it physically can. Hard
 | `obedience.whoCanInstruct` | `everyone` | who may ask at all; others only get favours (lower chance, no obedience) |
 | `obedience.overrideConscience` | false | let very high obedience override loyalty and promises |
 
+## Goals (`goals`)
+
+It always knows what it's working toward, on four levels:
+- an **overall goal** ("become the best builder on the server");
+- a few **long-term goals** that serve it ("build a castle on the hill");
+- the **current goal** ("gather 64 cobblestone");
+- the **steps** for that ("craft a stone pickaxe → find a cave → mine cobblestone").
+
+**Where goals come from:**
+- **Set** in `config.json` or by an owner in chat (`!goal`). Set goals stay until they're done or an owner changes them.
+- **Made up by the bot** from its personality, ambitions and situation, if `goals.selfDirected` is on. It changes its own goals as it goes.
+
+**How it works toward them:**
+- Every decision aims at the current step, and reports progress: step done, goal done, stuck, or "changed my mind".
+- Something urgent becomes a **detour** (eat, flee, help someone) and the plan waits, so it comes back to what it was doing.
+- A detour that lasts a few minutes means it really did change its mind (its own goals only).
+- Now and then, and whenever a goal finishes or gets stuck, a low-priority planning call steps back and revises the whole tree. It never blocks playing.
+
+All of it is saved in `data/brain.json` and shows in every decision prompt. **How to set it:** [CONFIGURING.md → Goals](CONFIGURING.md#goals).
+
 ## Reflexes (`reflexes`)
 
 The LLM is far too slow for danger: even a fast model takes most of a second, and on a 6 GB card a decision takes seconds. So falls, lava and getting hit never go through it. `reflexes.js` checks the body **20 times a second** and acts after a human reaction time (≈420 ms for a Beginner, ≈70 ms for Impossible). It stops the current action, and the LLM hears about it afterwards ("you fell 22 blocks and water-bucket clutched").
@@ -519,6 +540,8 @@ The LLM is far too slow for danger: even a fast model takes most of a second, an
 - **One punch:** it flinches, stops for a moment and turns toward the hit. Sharp players look straight at the attacker. A Beginner turns roughly the right way and then looks around ("where did that come from?").
 - **A real attack** (a weapon, repeated hits, or someone it already distrusts): weapon in hand and shield to the off-hand. The fight-or-flight decision follows at once, even if the LLM is in the middle of thinking (that answer is thrown away).
 - **Talking it down:** a player can talk it out of a fight ("ok ok sorry, truce"). It decides on the spot, from how much it likes and trusts them, its forgiveness, how hard they hit it, and whether they're still swinging. Someone who breaks a truce won't get another one easily.
+- **The mind still decides:** reflexes start fights fast, but every `pvp.rethinkSeconds` (6) during a fight with a player, the LLM is asked whether to keep going, stop or run. The fight carries on while it thinks, so it doesn't lag. It can stop because they apologised, it's pointless, or they're a friend, and it can say something while doing it.
+- **Chat and actions stay in step:** what just happened (fights, saves, truces, goal changes, deaths) goes into every chat reply. So when it says "fine, truce", it really has stopped, and it can tell people how it survived that fall.
 
 | Option | Default | |
 | --- | --- | --- |
@@ -625,6 +648,7 @@ The bot knows Minecraft the way an experienced player does:
 | `cancelBuilding` | — |
 | `emote` | `gesture`: wave, jump, nod, shake_head, crouch, spin, look_around |
 | `wait` | `seconds` |
+| `respawn` | `reason` — die on purpose to respawn (stuck, trapped, lost with nothing valuable). Uses `behavior.respawnCommand` if set, otherwise lava or a big drop nearby; the reflexes stand down while it does. Never on hardcore worlds, at most once per 10 minutes, off with `behavior.allowRespawnOnPurpose: false`. |
 
 Every action has its arguments checked, a timeout scaled to distance, and a global hard timeout. Every action can be cancelled.
 
@@ -707,6 +731,7 @@ When anyone else types `!stop`, it's treated as normal chat, so the bot just ans
 | `!status`, `!help` | admin | health, food, action, goal, feeling |
 | `!stop` `!pause` `!resume` | admin | control the brain |
 | `!come` `!follow` `!goal <text\|clear>` | admin | from an **owner**: done directly. From an **admin**: treated as a request and judged like any other. |
+| `!goals`, `!goal life\|add\|done\|drop\|steps\|replan …` | admin (setting: owner) | the whole goal tree, and changing any level of it — see [CONFIGURING.md](CONFIGURING.md#goals) |
 | `!mode <silent\|respond\|unprompted\|both>` | admin | chat mode |
 | `!emotion` | admin | `!emotion` (show) · `!emotion angry 8` (set) · `!emotion lock happy` · `!emotion unlock` · `!emotion volatility 0.5` |
 | `!trust [player] [0-100\|reset]` | admin | view a relationship (trust, liking, history), or set trust; no player = list |

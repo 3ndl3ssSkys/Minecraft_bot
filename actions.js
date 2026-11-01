@@ -1363,7 +1363,94 @@ const ACTIONS = {
       }
       return `Waited ${seconds}s.`
     }
+  },
+
+  respawn: {
+    description: 'Die on purpose so you respawn at your bed or the world spawn. Only when it really makes sense: hopelessly stuck or trapped, ' +
+      'lost far from home with nothing valuable on you, or someone you trust asks. You drop everything you carry where you die.',
+    params: { reason: 'string — why' },
+    async run (ctx, args) {
+      const { bot, config, signal } = ctx
+      const reason = argString(args, 'reason', { def: 'felt like starting over', maxLength: 120 })
+      if (!config.behavior.allowRespawnOnPurpose) throw new ActionError('NOT_ALLOWED', 'You decided against it after all (dying on purpose is switched off).')
+      if (bot.game?.hardcore) throw new ActionError('NOT_ALLOWED', 'This is a hardcore world: dying would be the end. Find another way.')
+      if (Date.now() - lastRespawnAt < 10 * 60000) throw new ActionError('TOO_SOON', 'You only just did that. Find another way.')
+      ctx.memory?.addEvent('respawn', `You decided to die on purpose and respawn (${reason}).`)
+      ctx.reflexes?.standDown(40000) // don't clutch or climb out of it
+      try {
+        if (config.behavior.respawnCommand) {
+          bot.chat(config.behavior.respawnCommand)
+          if (await diedWithin(bot, 3000, signal)) return done(reason)
+        }
+        const lavaId = bot.registry.blocksByName.lava?.id
+        const lava = lavaId !== undefined && bot.findBlock({ matching: lavaId, maxDistance: 24 })
+        if (lava) {
+          await gotoGoal(ctx, new goals.GoalNear(lava.position.x, lava.position.y, lava.position.z, 2), { timeoutMs: 30000, label: 'the lava' })
+          await bot.lookAt(lava.position.offset(0.5, 0.5, 0.5), true)
+          bot.setControlState('forward', true)
+          if (await diedWithin(bot, 12000, signal)) return done(reason)
+          bot.setControlState('forward', false)
+        }
+        const drop = findDrop(bot, 16, 26)
+        if (drop) {
+          await gotoGoal(ctx, new goals.GoalBlock(drop.stand.x, drop.stand.y, drop.stand.z), { timeoutMs: 30000, label: 'the edge' })
+          await bot.look(Math.atan2(-drop.dir.x, -drop.dir.z), 0, true)
+          bot.setControlState('forward', true)
+          if (await diedWithin(bot, 10000, signal)) return done(reason)
+        }
+        throw new ActionError('NOT_FOUND', 'There is no lava or big enough drop around here to do it with.')
+      } finally {
+        bot.clearControlStates()
+        ctx.reflexes?.standDown(0)
+      }
+    }
   }
+}
+
+let lastRespawnAt = 0
+function done (reason) {
+  lastRespawnAt = Date.now()
+  return `Died on purpose (${reason}); respawning.`
+}
+
+/** Resolves true when the bot dies (the executor aborts with "died" first — that counts too). */
+function diedWithin (bot, ms, signal) {
+  return new Promise((resolve) => {
+    const finish = (v) => { clearTimeout(timer); bot.removeListener('death', onDeath); signal?.removeEventListener('abort', onAbort); resolve(v) }
+    const onDeath = () => finish(true)
+    const onAbort = () => finish(signal.reason === 'died')
+    const timer = setTimeout(() => finish(false), ms)
+    bot.once('death', onDeath)
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+/** A spot at about our level next to a drop of at least `minDrop` blocks (not into water). */
+function findDrop (bot, radius, minDrop) {
+  const me = bot.entity.position.floored()
+  const ground = (x, z, fromY) => {
+    for (let y = fromY; y > fromY - 80; y--) {
+      const b = bot.blockAt(new Vec3(x, y, z))
+      if (!b) return null
+      if (/water|bubble_column|cobweb|slime|hay_block|powder_snow|ladder|vine|scaffolding/.test(b.name)) return null // soft landing
+      if (b.boundingBox === 'block') return y
+    }
+    return -Infinity // the void
+  }
+  let best = null
+  for (let dx = -radius; dx <= radius; dx += 2) {
+    for (let dz = -radius; dz <= radius; dz += 2) {
+      const g = ground(me.x + dx, me.z + dz, me.y + 3)
+      if (g === null || !Number.isFinite(g) || Math.abs(g - (me.y - 1)) > 6) continue
+      for (const [ox, oz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const n = ground(me.x + dx + ox, me.z + dz + oz, g + 2)
+        if (n === null || g - n < minDrop) continue
+        const d = Math.hypot(dx, dz)
+        if (!best || d < best.d) best = { stand: new Vec3(me.x + dx, g + 1, me.z + dz), dir: new Vec3(ox, 0, oz), d }
+      }
+    }
+  }
+  return best
 }
 
 // ---------------------------------------------------------------------------
@@ -1471,8 +1558,8 @@ class ActionExecutor {
    * @param {object} [deps.memory]   Memory (recent chat, e.g. duel invitations)
    * @param {object} [deps.tasks]    TaskManager (fights the bot agreed to)
    */
-  constructor ({ bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts }) {
-    Object.assign(this, { bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts })
+  constructor ({ bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes }) {
+    Object.assign(this, { bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes })
     this.current = null // { name, args, startedAt, controller }
     this.pauseUntil = 0
     this.pauseListeners = new Set()
@@ -1552,6 +1639,7 @@ class ActionExecutor {
       intel: this.intel,
       containers: this.containers,
       knowledgeOpts: this.knowledgeOpts,
+      reflexes: this.reflexes,
       isPaused: () => this.paused,
       onPause: (fn) => { this.pauseListeners.add(fn); return () => this.pauseListeners.delete(fn) },
       signal: controller.signal

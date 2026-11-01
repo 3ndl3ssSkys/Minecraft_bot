@@ -39,6 +39,7 @@ const { Intelligence, LEVELS: IQ_LEVELS, LABELS: IQ_LABELS } = require('./intell
 const { Senses } = require('./senses')
 const { ContainerIntel, signText } = require('./containers')
 const { Reflexes, avoidHazards } = require('./reflexes')
+const { Goals, STATUSES: GOAL_STATUSES } = require('./goals')
 
 // ===========================================================================
 // Logging
@@ -155,6 +156,17 @@ const DEFAULT_CONFIG = {
     suspicionThreshold: 1.0, // how much unexplained noise before it investigates
     investigate: true
   },
+  // What it works toward (goals.js): overarching goal → long-term goals → current goal → steps.
+  // Leave any of them empty and it makes its own up (if selfDirected). Owners can change them in game (!goal).
+  goals: {
+    overarching: '', // the point of it all, e.g. "become the best builder on the server"
+    longTerm: [], // big goals that serve it, e.g. ["build a castle on the hill", "get full diamond armor"]
+    current: '', // what to start with, e.g. "gather 64 cobblestone"
+    selfDirected: true, // make up its own goals and steps where none are set, and change them as it goes
+    keepSetGoals: true, // goals from config/owners stay until done or changed by an owner; urgent things become detours
+    plan: true, // step back now and then (low-priority LLM call) and revise the whole plan
+    replanMinutes: 10 // how often it reviews the plan anyway (0 = only when a goal finishes or gets stuck)
+  },
   // The fast layer (reflexes.js): runs every game tick, never waits for the LLM.
   reflexes: {
     enabled: true,
@@ -237,7 +249,9 @@ const DEFAULT_CONFIG = {
     owners: [], // full control over !commands. Their chat requests are still judged, with judgment.ownerLoyalty on top.
     admins: [], // most !commands (owners can add more with !admin add). Their *requests* are judged like anyone's.
     commandPrefix: '!',
-    startingGoal: '',
+    startingGoal: '', // old name for goals.current (still works)
+    allowRespawnOnPurpose: true, // it may choose to die to respawn (stuck, trapped, lost) — never on hardcore worlds
+    respawnCommand: '', // e.g. "/kill" if the server lets it use that; otherwise it uses lava or a big drop nearby
     protectedPlayers: [], // never attacked, no matter what
     respectPrivateChests: true, // never take from someone else's private chest
     noGrief: true, // don't mine or dig through blocks that are part of other players' builds
@@ -311,6 +325,7 @@ const DEFAULT_CONFIG = {
   },
   pvp: {
     mode: 'defensive', // 'never' | 'defensive' (fight players who attack it) | 'always'
+    rethinkSeconds: 6, // during a fight with a player, ask the mind every N s whether to keep going (0 = never)
     allowSparring: true, // accept friendly duels when a player asks ("1v1 me")
     neverAttackOwners: true
   },
@@ -325,7 +340,7 @@ const DEFAULT_CONFIG = {
     // Minimum role per !command. 'admin' commands also work for owners.
     permissions: {
       help: 'admin', status: 'admin', stop: 'admin', pause: 'admin', resume: 'admin', come: 'admin', follow: 'admin',
-      goal: 'admin', mode: 'admin', emotion: 'admin', trust: 'admin', tasks: 'admin', settings: 'admin', get: 'admin', set: 'admin',
+      goal: 'admin', goals: 'admin', mode: 'admin', emotion: 'admin', trust: 'admin', tasks: 'admin', settings: 'admin', get: 'admin', set: 'admin',
       reactions: 'admin', lessons: 'admin', obey: 'admin', build: 'admin', admin: 'owner', persona: 'owner', forget: 'owner', save: 'owner',
       iq: 'owner', intelligence: 'owner', mind: 'owner', chests: 'admin', senses: 'admin'
     },
@@ -521,6 +536,7 @@ function loadConfig (log) {
 
   // Backwards compatibility with older config files.
   if (user.behavior?.allowPvp === true && !user.pvp?.mode) config.pvp.mode = 'always'
+  if (user.behavior?.startingGoal && !user.goals?.current) config.goals.current = user.behavior.startingGoal
   if (user.behavior?.obeyPlayers && !user.obedience?.whoCanInstruct) {
     config.obedience.whoCanInstruct = { everyone: 'everyone', owners: 'owners', nobody: 'nobody' }[user.behavior.obeyPlayers] || 'everyone'
   }
@@ -547,8 +563,7 @@ class Memory {
     this.events = [] // { at, type, text }
     this.chat = [] // { at, from, text, self, whisper }
     this.actions = [] // { at, source, action, args, ok, code, message, thought }
-    this.goal = config.behavior.startingGoal || ''
-    this.goalSource = this.goal ? 'config' : ''
+    this.goals = null // the Agent's Goals; memory.goal is its current goal
     this.lastSelfChatAt = 0
     this.lastTalkedWith = new Map() // username -> timestamp
   }
@@ -577,10 +592,10 @@ class Memory {
     }, 30)
   }
 
-  setGoal (goal, source = 'self') {
-    this.goal = String(goal || '').slice(0, 200)
-    this.goalSource = this.goal ? source : ''
-  }
+  get goal () { return this.goals?.currentText() || '' }
+  get goalSource () { return this.goals?.currentSource() || '' }
+
+  setGoal (goal, source = 'self') { this.goals?.setCurrent(goal, source) }
 
 
   /** Number of consecutive failed actions (used to nudge the LLM to change approach). */
@@ -806,7 +821,7 @@ class Perception {
       status: {
         currentAction: executor.current ? executor.current.name : null,
         goal: memory.goal || null,
-        goalSetBy: memory.goalSource || null,
+        goals: this.agent.goals.forPrompt(),
         feelings: emotions.describe(),
         ...this.agent.tasks.statusForPrompt(),
         danger: this.agent.dangerLevel(),
@@ -1031,7 +1046,9 @@ function decisionSchema (toolNames) {
       thought: { type: 'string', description: 'Brief reasoning about the situation and why this action.' },
       emotion: { type: 'string', enum: EMOTIONS },
       emotionIntensity: { type: 'integer', minimum: 1, maximum: 10 },
-      goal: { type: 'string', description: 'Your current short-term goal (keep it while still pursuing it).' },
+      goal: { type: 'string', description: 'Your current goal (keep it while still pursuing it; something urgent can come first).' },
+      subgoal: { type: 'string', description: 'The step of that goal you are on right now.' },
+      goalStatus: { type: 'string', enum: GOAL_STATUSES },
       action: {
         type: 'object',
         properties: { name: { type: 'string', enum: toolNames }, args: { type: 'object' } },
@@ -1044,7 +1061,7 @@ function decisionSchema (toolNames) {
         required: ['status', 'note']
       }
     },
-    required: ['thought', 'emotion', 'emotionIntensity', 'goal', 'action', 'taskUpdate']
+    required: ['thought', 'emotion', 'emotionIntensity', 'goal', 'subgoal', 'goalStatus', 'action', 'taskUpdate']
   }
 }
 
@@ -1178,7 +1195,8 @@ ${mindBlock(agent)}
 - Play like a thoughtful human survival player: punch trees → craft planks, sticks, a crafting table and tools → mine stone and ores → get food, armor and shelter. Pursue your goal and ambitions, but stay flexible.
 - Use exact coordinates, block names and entity ids from the state. Never invent ids or coordinates you have not seen.
 - Read recentActions: if an action failed, understand the error code and try something different instead of repeating it.
-- If a player asked you for something and you agreed (see status.goal / recentChat), prioritise it.
+- If a player asked you for something and you agreed (see status.task / recentChat), prioritise it.
+- Goals (status.goals): an overall goal → long-term goals → your current goal → its steps. Choose actions that move the current step forward, and keep the bigger goals in mind. Each turn report "goal" (your current goal), "subgoal" (the step you're on) and "goalStatus": working, subgoal_done (you just finished that step), goal_done (the whole current goal is finished), blocked (you can't make progress — say why in thought) or new_goal (you've changed your mind and are dropping the current goal for this one; not for goals set for you). Urgent things (danger, hunger, nightfall, a player's task) come first: just name them as your goal with "working" — that's a detour, and you get back to the current goal afterwards (status.goals.detour). The planner keeps the bigger goals up to date; you can still change your own whenever you want.
 - Survive: eat when hungry, avoid lava, deep falls and status.dangerZonesNearby, fight or flee from hostile mobs, be careful at night.
 - Use the game's systems: smelt ores and cook food (smeltItem), store loot in chests (status.knownContainers remembers what's where), sleep in a bed at night, open doors, fish, and useItem for potions, pearls, buckets, bone meal and the like. If you're unsure how something works or how to get an item, use knowledge — but you only know what a player of your skill knows; otherwise experiment or ask.
 - Your senses are realistic: nearbyEntities is what you can see or hear ("perceived" says how; "last seen" means it went out of sight). status.senses lists sounds and particles; "source unseen" means you can't see what made it. If something sounds wrong (footsteps, a chest opening, mining, with nobody visible), be cautious and check it out — less so if you know other players are around.
@@ -1199,7 +1217,7 @@ ${toolDocs}
 
 ## Response format
 Reply with ONLY a JSON object, no other text:
-{"thought": "...", "emotion": "<one of: ${EMOTIONS.join(', ')}>", "emotionIntensity": 1-10, "goal": "current short-term goal", "action": {"name": "<action name>", "args": { ... }}}`
+{"thought": "...", "emotion": "<one of: ${EMOTIONS.join(', ')}>", "emotionIntensity": 1-10, "goal": "current goal", "subgoal": "the step you're on", "goalStatus": "working|subgoal_done|goal_done|blocked|new_goal", "action": {"name": "<action name>", "args": { ... }}, "taskUpdate": {"status": "none|working|done|gave_up", "note": "..."}}`
 }
 
 /** Compact one-line status used by the chat-oriented prompts. */
@@ -1210,7 +1228,7 @@ function briefStatus (state) {
   const near = state.nearbyEntities.filter((e) => e.kind !== 'item').slice(0, 5).map((e) => `${e.name} (${e.distance}m)`).join(', ') || 'nobody'
   return `At ${s.position.x}, ${s.position.y}, ${s.position.z} (${state.world.phase}${state.world.raining ? ', raining' : ''}${state.world.biome ? `, ${state.world.biome}` : ''}). ` +
     `Health ${s.health}/20, food ${s.food}/20. Holding ${state.equipment.hand || 'nothing'}. Doing: ${state.status.currentAction || 'nothing'}. ` +
-    `Goal: ${state.status.goal || 'none'}.${state.status.task ? ` Doing for ${state.status.task.for}: ${state.status.task.what}${state.status.task.progress ? ` (${state.status.task.progress})` : ''}.` : ''} Inventory: ${inv}. Nearby: ${near}.`
+    `Goal: ${state.status.goal || 'none'}${state.status.goals?.currentGoalServes ? ` (toward: ${state.status.goals.currentGoalServes})` : ''}.${state.status.task ? ` Doing for ${state.status.task.for}: ${state.status.task.what}${state.status.task.progress ? ` (${state.status.task.progress})` : ''}.` : ''} Inventory: ${inv}. Nearby: ${near}.`
 }
 
 /** "sorry", "stop", "truce", "i give up"... — someone asking to end a fight. */
@@ -1529,9 +1547,11 @@ Then read the other player:
 - promise: if THEY promise to do something for you (${PROMISE_KINDS.join('|')}), made=true with details; otherwise made=false, kind "other", empty strings and 0s.
 Respond with ONLY the JSON object.`
 
+    // What just happened (fights, saves, truces, goals...), so what it says matches what it did.
+    const lately = memory.events.filter((e) => Date.now() - e.at < 90000).slice(-5).map((e) => `${ago(e.at)}: ${e.text}`)
     const user = `Your status: ${briefStatus(agent.perception?.latest)}
 How you feel: ${emotions.describe()}
-How you feel about ${speaker}: ${social.relationshipLine(speaker)}
+${lately.length ? `What just happened:\n${lately.join('\n')}\n` : ''}How you feel about ${speaker}: ${social.relationshipLine(speaker)}
 ${about ? `Things between you and ${speaker}:\n${about}\n` : ''}${others.length ? `Others online:\n${social.peopleSummary(others)}\n` : ''}Recent chat:
 ${history}
 
@@ -1634,12 +1654,60 @@ ${speaker}'s latest message${said.length > 1 ? 's' : ''}: ${said.map((m) => `"${
         if (!CHAT_MODES.includes(arg)) return reply(`chat mode is "${config.chat.mode}". options: ${CHAT_MODES.join(', ')}`)
         agent.applySetting('chat.mode', arg)
         return reply(`chat mode set to ${arg}.`)
-      case 'goal':
-        if (!arg) return reply(`goal: ${memory.goal || 'none'}`)
-        if (arg !== 'clear' && !isOwner) return this.handleRequest(username, { kind: 'other', description: arg, effort: 'medium', risk: 'low' }, { whisper, message: arg })
-        memory.setGoal(arg === 'clear' ? '' : arg, username)
-        brain.onNewGoal()
-        return reply(arg === 'clear' ? 'goal cleared.' : `new goal: ${arg}`)
+      case 'goals':
+        for (const line of agent.goals.describe()) reply(line)
+        return
+      case 'goal': {
+        // !goal <text> | clear | life <text>|clear | add <text> | done [n] | drop <n> | steps a; b; c | replan
+        const g = agent.goals
+        const [sub] = rest
+        const text = rest.slice(1).join(' ')
+        if (!arg) return reply(`goal: ${g.current?.text || 'none'}${g.current?.detour ? ` (detour: ${g.current.detour})` : ''}`)
+        const known = ['clear', 'life', 'overall', 'add', 'done', 'drop', 'steps', 'replan'].includes(sub)
+        // Admins who aren't owners ask, like anyone else; owners set.
+        if (!isOwner && !(known && sub === 'replan')) return this.handleRequest(username, { kind: 'other', description: arg, effort: 'medium', risk: 'low' }, { whisper, message: arg })
+        switch (known ? sub : '') {
+          case 'clear': g.setCurrent('', username); brain.onNewGoal(); return reply('goal cleared.')
+          case 'life':
+          case 'overall':
+            g.setOverarching(text === 'clear' ? '' : text, username)
+            return reply(text === 'clear' ? 'overall goal cleared.' : `overall goal: ${text}`)
+          case 'add': {
+            const added = g.addLongTerm(text, username)
+            return reply(added ? `working toward: ${added.text}` : 'add what?')
+          }
+          case 'done':
+          case 'drop': {
+            const n = Number(text)
+            const status = sub === 'done' ? 'done' : 'dropped'
+            if (Number.isInteger(n) && n > 0) {
+              const lt = g.activeLongTerm(n)
+              if (!lt) return reply(`no long-term goal #${n} (see !goals)`)
+              g.closeLongTerm(lt, status)
+              return reply(`${status}: ${lt.text}`)
+            }
+            if (!g.current) return reply('no current goal.')
+            const was = g.current.text
+            g.finishCurrent(sub === 'done' ? 'done' : 'gave_up')
+            brain.onNewGoal()
+            return reply(`${status}: ${was}`)
+          }
+          case 'steps': {
+            if (!g.current) return reply('set a goal first.')
+            g.setSteps(text.split(/\s*[;|]\s*/).filter(Boolean))
+            return reply(`steps: ${g.current.steps.map((x) => x.text).join(', ')}`)
+          }
+          case 'replan':
+            g.want(`${username} asked you to rethink your plans`)
+            g.lastPlanAt = 0
+            g.maybePlan()
+            return reply('thinking about it...')
+          default:
+            g.setCurrent(arg, username)
+            brain.onNewGoal()
+            return reply(`new goal: ${arg}`)
+        }
+      }
       case 'come':
       case 'follow': {
         if (username === '@console') return reply('the console has no position; use !goal instead.')
@@ -1826,7 +1894,7 @@ ${speaker}'s latest message${said.length > 1 ? 's' : ''}: ${said.map((m) => `"${
 
       case 'help':
       default:
-        return reply('commands: status stop pause resume come follow goal mode emotion trust obey tasks build chests senses iq mind admin set get settings persona reactions lessons forget save')
+        return reply('commands: status stop pause resume come follow goal goals mode emotion trust obey tasks build chests senses iq mind admin set get settings persona reactions lessons forget save')
     }
   }
 }
@@ -1849,6 +1917,12 @@ const SETTABLE = {
   'chat.goalChangeInterrupts': BOOL,
   'reactions.enabled': BOOL,
   'reflexes.enabled': BOOL,
+  'goals.selfDirected': BOOL,
+  'goals.keepSetGoals': BOOL,
+  'goals.plan': BOOL,
+  'goals.replanMinutes': num(0, 240),
+  'pvp.rethinkSeconds': num(0, 60),
+  'behavior.allowRespawnOnPurpose': BOOL,
   'reflexes.falls': BOOL,
   'reflexes.hitReactions': BOOL,
   'reflexes.truce': BOOL,
@@ -2075,6 +2149,14 @@ class EventReactor {
       learning.stats.deaths++
       learning.markDirty()
       agent.tasks.onDeath()
+      const onPurpose = agent.executor?.current?.name === 'respawn'
+      if (onPurpose) {
+        // Its own choice: no grief, no danger zone, no lesson about avoiding it.
+        this.trigger('death', { cause, onPurpose: agent.executor.current.args?.reason || 'it chose to' })
+        this.pendingDeathCause = null
+        this.pendingKiller = null
+        return
+      }
       if (killer) {
         social.onKilledBy(killer)
         this.trigger('killedByPlayer', { player: killer, cause })
@@ -2223,7 +2305,7 @@ class EventReactor {
       case 'playerJoined': return `${d.player} joined the game.`
       case 'playerLeft': return `${d.player} left the game.`
       case 'playerNearby': return `${d.player} came close to you.`
-      case 'death': return `You died (${d.cause}). You respawned and lost your items where you died.`
+      case 'death': return d.onPurpose ? `You died on purpose (${d.onPurpose}). You respawned; your items are where you died.` : `You died (${d.cause}). You respawned and lost your items where you died.`
       case 'killedByPlayer': return `${d.player} killed you (${d.cause}). You respawned and lost your items.`
       case 'hurt': return `You took damage from ${d.attacker} (health ${d.health}/20).`
       case 'attackedByPlayer': return `${d.player} hit you with ${d.item === 'fist' ? 'their fist' : `a ${d.item}`}${d.streak > 1 ? ` (${d.streak} hits in a row)` : ''}. Your trust in them: ${d.trust}/100.`
@@ -2361,15 +2443,6 @@ function armorTier (name) {
   return m ? (ARMOR_TIER[m[1]] || 1) : 0
 }
 
-function wordOverlap (a, b) {
-  const A = new Set(String(a).toLowerCase().match(/[a-z]+/g) || [])
-  const B = new Set(String(b).toLowerCase().match(/[a-z]+/g) || [])
-  if (!A.size || !B.size) return 0
-  let n = 0
-  for (const w of A) if (B.has(w)) n++
-  return n / Math.min(A.size, B.size)
-}
-
 // Classified as hostile by minecraft-data, but they leave you alone unless provoked.
 const NEUTRAL_MOBS = new Set(['enderman', 'zombified_piglin', 'piglin', 'spider', 'bee', 'wolf', 'polar_bear', 'llama', 'goat', 'iron_golem'])
 
@@ -2429,7 +2502,7 @@ class Brain {
   onDamage () {
     const { executor, config } = this.agent
     const current = executor.current?.name
-    if (config.behavior.interruptOnDamage && current && !['attackTarget', 'retreat', 'eatFood'].includes(current)) {
+    if (config.behavior.interruptOnDamage && current && !['attackTarget', 'retreat', 'eatFood', 'respawn'].includes(current)) {
       // Only interrupt if a reflex would actually do something about it.
       if (this.reflex(true)) executor.abort('took damage')
     }
@@ -2438,6 +2511,62 @@ class Brain {
       const now = this.reflex()
       if (now) this.interruptFn(now)
     }
+  }
+
+  /**
+   * Fights are started fast (often by reflex), but the mind gets a say: every few seconds
+   * of a fight with a player it's asked whether to keep going, stop or run — the fight
+   * carries on while it thinks, so there's no lag.
+   */
+  watchFight (args, decision) {
+    const agent = this.agent
+    const every = agent.config.pvp.rethinkSeconds
+    const target = agent.bot.entities[Number(args?.entityId)]
+    if (!every || !target || target.type !== 'player' || !target.username) return null
+    let thinking = false
+    const startedAt = Date.now()
+    const timer = setInterval(() => {
+      if (thinking || agent.executor.current?.name !== 'attackTarget' || agent.dead) return
+      thinking = true
+      this.rethinkFight(target, args, decision, startedAt)
+        .catch((err) => agent.log.debug(`fight rethink failed: ${err.message}`))
+        .finally(() => { thinking = false })
+    }, every * 1000)
+    return () => clearInterval(timer)
+  }
+
+  async rethinkFight (target, args, decision, startedAt) {
+    const agent = this.agent
+    const { bot, social, emotions, memory, personality, executor, llm } = agent
+    const name = target.username
+    const t = social.t(name)
+    const theirHealth = Number(agent.senses?.metaValue?.(bot, target, 'health'))
+    const said = memory.chat.filter((c) => c.from === name && Date.now() - c.at < 30000).map((c) => `"${c.text}"`).join(' ')
+    const system = `${personaBlock(personality, bot.username)}
+
+You're in the middle of a fight in Minecraft. Your body keeps fighting while you decide, in a split second, whether that's still what you want.
+Stop if it's no longer worth it, they've given up or apologised and you believe them, it's a friend, or it's turning pointless. Run if you're losing badly. Keep going if they deserve it or you're winning a fight you want.
+"say" is optional (a few words in chat, or ""). Respond with ONLY JSON: {"decision": "keep_fighting|stop|run", "say": "...", "thought": "..."}`
+    const user = `Fighting ${name}${args.sparring ? ' (a friendly duel they asked for)' : ''} for ${Math.round((Date.now() - startedAt) / 1000)}s. Why you started: ${decision.thought || 'they attacked you'}.
+Your health ${Math.round(bot.health)}/20${Number.isFinite(theirHealth) ? `, theirs about ${Math.round(theirHealth)}/20` : ''}. Hits you took from them recently: ${t.hits.filter((h) => Date.now() - h.at < 60000).length}${social.isAttackingNow(name, 3000) ? ' (still hitting you right now)' : ''}.
+How you feel: ${emotions.describe()}. About ${name}: ${social.relationshipLine(name)}
+${said ? `${name} just said: ${said}
+` : ''}Your current goal: ${memory.goal || 'none'}.`
+    const out = await llm.chat([{ role: 'system', content: system }, { role: 'user', content: user }], {
+      schema: { type: 'object', properties: { decision: { type: 'string', enum: ['keep_fighting', 'stop', 'run'] }, say: { type: 'string' }, thought: { type: 'string' } }, required: ['decision', 'say', 'thought'] },
+      priority: PRIORITY.reaction,
+      label: 'fight-rethink'
+    })
+    if (executor.current?.name !== 'attackTarget') return // it ended by itself meanwhile
+    if (out.say) agent.chat.send(String(out.say), 'reaction').catch(() => {})
+    if (out.decision === 'keep_fighting') return
+    const why = String(out.thought || '').slice(0, 160)
+    this.truces.set(name, Date.now()) // the fight reflex won't restart it unless they hit again
+    this.reflexCooldowns.set(`pvp:${name}`, Date.now() + 20000)
+    memory.addEvent('fight', `You decided to ${out.decision === 'run' ? 'run from' : 'stop fighting'} ${name}${why ? `: ${why}` : ''}.`)
+    agent.log.info(`Rethinking the fight with ${name}: ${out.decision}${why ? ` (${why})` : ''}`)
+    executor.abort(out.decision === 'run' ? `running from ${name}` : `decided to stop fighting ${name}`)
+    if (out.decision === 'run') this.queueAction({ name: 'retreat', args: { entityId: target.id, distance: 20 } }, `Getting away from ${name}.`)
   }
 
   /**
@@ -2495,7 +2624,9 @@ class Brain {
         while (agent.reflexes?.busy && this.running) await this.idle(100) // a save in progress finishes first
         const { name, args } = decision.action
         log.info(`▶ ${name}(${JSON.stringify(args)})${decision.source !== 'llm' ? ` [${decision.source}]` : ''}`)
+        const stopWatching = name === 'attackTarget' ? this.watchFight(args, decision) : null
         const result = await agent.executor.execute(name, args)
+        stopWatching?.()
         agent.memory.addAction(decision, result)
         if (result.ok) log.info(`✔ ${name}: ${result.message} (${(result.durationMs / 1000).toFixed(1)}s)`)
         else log.warn(`✘ ${name} [${result.code}]: ${result.message}`)
@@ -2695,6 +2826,7 @@ class Brain {
   async decide () {
     const agent = this.agent
     const { log, memory, executor, config, social, learning, emotions } = agent
+    agent.goals.maybePlan() // step back and plan in the background when it's time
 
     // Requests we promised to do "later" become the goal once our own plans allow it.
     const state = agent.perception.snapshot()
@@ -2736,12 +2868,7 @@ class Brain {
       memory.addEvent('error', `You tried to use "${decision.action.name}", which is not an available action.`)
       decision.action = { name: 'wait', args: { seconds: 2 } }
     }
-    if (typeof out.goal === 'string' && out.goal.trim() && out.goal.trim() !== memory.goal) {
-      // Rewording a player's task keeps them as its source; a genuinely new goal is our own.
-      const playerGoal = memory.goalSource && !['self', 'config'].includes(memory.goalSource)
-      const sameTask = playerGoal && wordOverlap(out.goal, memory.goal) >= 0.3
-      memory.setGoal(out.goal.trim(), sameTask ? memory.goalSource : 'self')
-    }
+    agent.goals.onDecision(out) // progress, detours, changed minds
     emotions.fromLabel(decision.emotion, decision.emotionIntensity)
     agent.tasks.onLlmUpdate(out.taskUpdate)
     if (config.logging.logThoughts) log.mind(`[${decision.emotion} ${decision.emotionIntensity}/10] ${decision.thought}`)
@@ -2784,6 +2911,8 @@ class Agent {
     this.containers = new ContainerIntel(this, legacy)
     this.knownFacts = new Set(saved.knownFacts || []) // facts above its level it has learned
     this.reflexes = new Reflexes(this, saved.reflexes)
+    this.goals = new Goals(this, saved.goals)
+    this.memory.goals = this.goals
     this.learnedItems = new Set(saved.learnedItems || []) // recipes it worked out itself
     this.builder = { current: saved.building?.current || null, history: saved.building?.history || [], owner: config.server.username }
     if (saved.obeyPlayers) this.config.obedience.players = { ...saved.obeyPlayers, ...this.config.obedience.players }
@@ -2969,6 +3098,7 @@ class Agent {
       intel: this.intelligence,
       containers: this.containers,
       knowledgeOpts: () => this.knowledgeOpts(),
+      reflexes: this.reflexes,
       notify: (type, data) => this.onActionEvent(type, data)
     })
     this.reactor = new EventReactor(this)

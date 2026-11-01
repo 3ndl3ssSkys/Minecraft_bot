@@ -64,6 +64,15 @@
     "suspicionThreshold": 1,
     "investigate": true
   },
+  "goals": {
+    "overarching": "",
+    "longTerm": [],
+    "current": "",
+    "selfDirected": true,
+    "keepSetGoals": true,
+    "plan": true,
+    "replanMinutes": 10
+  },
   "reflexes": {
     "enabled": true,
     "falls": true,
@@ -145,6 +154,8 @@
     "admins": [],
     "commandPrefix": "!",
     "startingGoal": "",
+    "allowRespawnOnPurpose": true,
+    "respawnCommand": "",
     "protectedPlayers": [],
     "respectPrivateChests": true,
     "noGrief": true,
@@ -217,6 +228,7 @@
   },
   "pvp": {
     "mode": "defensive",
+    "rethinkSeconds": 6,
     "allowSparring": true,
     "neverAttackOwners": true
   },
@@ -237,6 +249,7 @@
       "come": "admin",
       "follow": "admin",
       "goal": "admin",
+      "goals": "admin",
       "mode": "admin",
       "emotion": "admin",
       "trust": "admin",

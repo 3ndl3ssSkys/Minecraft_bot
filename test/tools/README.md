@@ -10,7 +10,7 @@ These tools are for **live** checks against a local test server.
 
 | File | What it is |
 | --- | --- |
-| `mock-ollama.js` | A stand-in for Ollama. It replays decisions from a JSON script, gives canned chat answers, returns realistic timing fields, and logs every prompt to `mock-ollama.log`. |
+| `mock-ollama.js` | A stand-in for Ollama. It replays decisions from a JSON script (entries may carry `goal`, `subgoal`, `goalStatus`), gives canned chat answers, a fixed plan for the planner, and fight check-ins that stop when the opponent said sorry. It returns realistic timing fields and logs every prompt to `mock-ollama.log`. `DELAY_MS` makes it slow. |
 | `test-server.js` | A throwaway local server (flying-squid): superflat world, everyone is op. |
 | `test-player.js` | A second player, "Tester", with modes `idle`, `sneak`, `dig` and `chat`. |
 | `harness.js` | Drives the real Agent through the scenarios `typing`, `sight`, `hearing`, `nametags`, `fall` (`LEVEL=mediocre` etc.) and `startle`. |

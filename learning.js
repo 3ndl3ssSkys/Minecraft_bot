@@ -333,6 +333,7 @@ class Learning {
       intelligence: a.intelligence?.toJSON(),
       chests: a.containers?.toJSON(),
       reflexes: a.reflexes?.toJSON(),
+      goals: a.goals?.toJSON(),
       knownFacts: a.knownFacts ? [...a.knownFacts] : undefined,
       learnedItems: a.learnedItems ? [...a.learnedItems] : undefined,
       combat: this.combat.toJSON(),

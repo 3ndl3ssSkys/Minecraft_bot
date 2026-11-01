@@ -34,8 +34,15 @@ http.createServer((req, res) => {
     log.write(`--- ${new Date().toISOString()} [${props.join(',') || 'json'}]\nSYSTEM:\n${data.messages?.[0]?.content}\nUSER:\n${user}\n`)
     let out
     if (props.includes('action')) {
-      const action = script[turn++] || { name: 'wait', args: { seconds: 3 } }
-      out = { thought: `scripted turn ${turn}`, emotion: 'calm', emotionIntensity: 4, goal: 'testing', action, taskUpdate: { status: 'none', note: '' } }
+      // Script entries are actions, optionally with goal fields: { name, args, goal, subgoal, goalStatus }
+      const step = script[turn++] || { name: 'wait', args: { seconds: 3 } }
+      const { goal = 'testing', subgoal = '', goalStatus = 'working', ...action } = step
+      out = { thought: `scripted turn ${turn}`, emotion: 'calm', emotionIntensity: 4, goal, subgoal, goalStatus, action, taskUpdate: { status: 'none', note: '' } }
+    } else if (props.includes('longTerm')) {
+      out = { overarching: 'have a cozy base and good gear', longTerm: [{ text: 'build a cozy base', status: 'active' }], current: 'gather 20 oak logs', steps: ['find trees', 'chop 20 oak logs'], why: 'wood first, then a base' }
+    } else if (props.includes('decision')) {
+      // Fight check-in: stop if the opponent said sorry, otherwise keep going.
+      out = /just said: .*sorry/i.test(user) ? { decision: 'stop', say: 'fine. truce', thought: 'they apologised' } : { decision: 'keep_fighting', say: '', thought: 'not done yet' }
     } else if (props.includes('isRequest')) {
       const last = user.slice(user.lastIndexOf('latest message'))
       const req = /get me|bring|gather/i.test(last) ? { ...none, kind: 'gather', description: 'get some dirt', item: 'dirt', count: 5, effort: 'small' }
