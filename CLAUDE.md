@@ -152,6 +152,7 @@ Reflexes (every physics tick, 20/s, no LLM): falls, lava, drowning, hits → tak
 - Decision prompts are ~3.4k tokens of fixed system text + 0.6–2.5k of state. `/api/chat` returns timing fields (the doctor uses them), and `/api/ps` gives `size_vram`.
 
 **Other**
+- **Offline-mode whitelists are case-sensitive by UUID:** the offline UUID is a hash of `OfflinePlayer:<exact name>`. On the user's Paper 26.1, `whitelist add TheBestWanderer` stored `thebestwanderer` (a different UUID), so the bot was still refused. Fix: `whitelist off`, or a `whitelist.json` entry with the exact-case UUID (TheBestWanderer = `6db913b6-f8a5-3118-949c-8ed39321b39c`). Editing `white-list=false` in server.properties only applies after a server restart.
 - Floodgate names have a `.` (or `*`) prefix. Chat parsing and own-name matching handle that.
 - Over ViaProxy the bot uses `auth: "offline"` to the proxy; ViaProxy's selected account authenticates upstream. Its default bind is `0.0.0.0:25568`.
 
