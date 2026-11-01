@@ -169,7 +169,7 @@ The bot runs alongside Ollama on any PC that can reach the Minecraft server; it 
 | Setup | VRAM | What to expect |
 | --- | --- | --- |
 | `qwen2.5:7b` alone (the default) | ≈ 5.5 GB | Good decisions, 4–8 s each; chat replies wait when a decision is running. |
-| **`qwen3:4b` + `fastModel: "qwen3:1.7b"`, `think: false`** (recommended to try) | ≈ 4.5 GB together | Both lanes on the GPU: roughly 2–4 s decisions and about a second for chat. |
+| **`qwen3:4b-instruct` + `fastModel: "qwen3:1.7b"`, `think: false`** (recommended) | ≈ 4.5 GB together | Both lanes on the GPU: roughly 2–4 s decisions and about a second for chat. Measured: `qwen3:4b-instruct`-sized models sit 100% on a 1660 Super under Windows, `qwen2.5:7b` only ~80%. |
 | `qwen2.5:3b` + `fastModel: "qwen2.5:1.5b"` | ≈ 3.5 GB | The fastest; a bit simpler in its choices. |
 
 These are estimates: `npm run doctor` measures both lanes on your card. Pull the models with `ollama pull`. For two models at once, set `OLLAMA_MAX_LOADED_MODELS=2` alongside the other Ollama variables in SETUP.md step 4.
@@ -179,9 +179,11 @@ These are estimates: `npm run doctor` measures both lanes on your card. Pull the
 | VRAM | Main model | Chat model |
 | --- | --- | --- |
 | 8 GB (RTX 3060 Ti, 4060, 3070) | `qwen3:8b` or `qwen2.5:7b` | `qwen3:1.7b` |
-| 12 GB (RTX 3060 12 GB, 4070) | `qwen3:14b` or `gemma3:12b` | `qwen3:4b` |
-| 16 GB (RTX 4060 Ti 16 GB, 4070 Ti Super, 4080, 5070 Ti) | `gpt-oss:20b` or `qwen3:14b` | `qwen3:4b` |
-| 24 GB+ (RTX 3090, 4090, 5090) | `qwen3:30b-a3b` (fast: only 3B active), `qwen3:32b`, `gemma3:27b` | `qwen3:4b` |
+| 12 GB (RTX 3060 12 GB, 4070) | `qwen3:14b` or `gemma3:12b` | `qwen3:4b-instruct` |
+| 16 GB (RTX 4060 Ti 16 GB, 4070 Ti Super, 4080, 5070 Ti) | `gpt-oss:20b` or `qwen3:14b` | `qwen3:4b-instruct` |
+| 24 GB+ (RTX 3090, 4090, 5090) | `qwen3:30b-a3b` (fast: only 3B active), `qwen3:32b`, `gemma3:27b` | `qwen3:4b-instruct` |
+
+**Thinking-only versions:** some models think out loud before every answer and can't be switched off. Plain `qwen3:4b` is one; it ends its answers with `</think>`. In the bot that means slow decisions, so use the `-instruct` version. `npm run setup` tests a model for this, the doctor warns about it, and the bot strips the reasoning and logs a warning if it happens anyway.
 
 New open models come out all the time, so check [ollama.com/library](https://ollama.com/library) for newer ones in these sizes. Compare them with the doctor (`OLLAMA_MODEL=<name> npm run doctor`). The model has to follow a JSON format and stay in character, and the Qwen and Gemma families are good at both.
 
@@ -196,7 +198,7 @@ New open models come out all the time, so check [ollama.com/library](https://oll
   Hosted models usually answer in well under a second.
 - **Watch the bill:** decisions send ~5,000 tokens every few seconds, which is millions of tokens per hour of play. The cheap split is **decisions on your GPU, chat on a hosted model**:
   ```json
-  "llm": { "model": "qwen3:4b", "think": false,
+  "llm": { "model": "qwen3:4b-instruct", "think": false,
            "fastModel": "<hosted model>", "fastProvider": "openai",
            "fastUrl": "https://api.groq.com/openai/v1/chat/completions", "fastApiKey": "..." }
   ```

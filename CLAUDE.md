@@ -15,7 +15,7 @@ Everything learned while building this bot: what it is, how it's put together, w
 - **Hardware:** a dedicated server PC with a **GTX 1660 Super (6 GB VRAM) and 32 GB RAM**, running **Windows** (Command Prompt), Node 26. Nobody plays Minecraft on that PC, so the whole GPU goes to Ollama. The bot is headless and needs no GPU.
   - **Measured on it:**
     - `qwen2.5:7b` does **not** fully fit: `ollama ps` showed 5.2–5.4 GB at `18–21%/79–82% CPU/GPU`, because Windows uses part of the VRAM for the screen.
-    - **`qwen3:4b` fits: 3.2 GB, 100% GPU.** That's the model to use there, with `llm.think: false` (setup adds it for Qwen3; otherwise Qwen3 writes long "Thinking..." text).
+    - **`qwen3:4b` fits (3.2 GB, 100% GPU), but it's a thinking-only version:** even `ollama run qwen3:4b --think=false` reasoned for pages and ended with `</think>`. Use **`qwen3:4b-instruct`** (same size, answers directly) with `llm.think: false`.
     - It's not known yet whether the `setx` Ollama variables (flash attention, q8_0 KV) took effect.
 - **Accounts:** the user plays on their own Java account, so the bot can't use it at the same time.
   - **Java is the main route, and it must not require an account:** `server.auth: "auto"` (default) plays as an **offline account** unless `username` is a Microsoft email, and drops to offline if that sign-in fails. Java gives the bot every feature.
@@ -30,8 +30,9 @@ Everything learned while building this bot: what it is, how it's put together, w
 
 - **The user's setup:**
   - Done so far: Ollama, Node and Git installed; the repo cloned to the user folder; `npm install`; `npm run setup`.
-  - `config.local.json`: owner `EndlessSkys`, bot name `TheBestWanderer`, level `complicated`, a custom friendly/cautious/PvE/explorer personality, server `localhost:25565`. The model should be switched to `qwen3:4b` by rerunning setup.
-  - **Next for the user:** `git pull`, `npm run setup` (choose `qwen3:4b`), `npm run doctor` (let the timing step finish), then the local Paper test server (START-HERE.md step 4, `online-mode=false` on a fresh world), then `npm start`.
+  - `config.local.json`: owner `EndlessSkys`, bot name `TheBestWanderer`, level `complicated`, a custom friendly/cautious/PvE/explorer personality, server `localhost:25565`. The model should be switched to `qwen3:4b-instruct` by rerunning setup (it detects the thinking problem and offers this).
+  - The user has run the three `setx` Ollama settings by hand; Ollama still needs a restart for them to apply.
+  - **Next for the user:** `git pull`, `npm run setup` (choose `qwen3:4b-instruct`; setup also applies the Ollama settings and tests the model), restart Ollama, check `ollama ps` shows 100% GPU, `npm run doctor` (let the timing step finish), then the local Paper test server (START-HERE.md step 4, `online-mode=false` on a fresh world), then `npm start`.
   - After that: the friend's server via FastLogin (SETUP.md 6D) or the Bedrock fallback.
 - **Nothing has run against a real Minecraft server yet.** All live tests used flying-squid and the mock LLM. Expect the first real sessions to surface prompt and behaviour issues: read the user's logs and tune from them.
 - **When the user pastes output:** it uses their real name in paths. Never repeat it (see the naming rule at the top).
@@ -140,7 +141,8 @@ Reflexes (every physics tick, 20/s, no LLM): falls, lava, drowning, hits → tak
 - `minecraft-data` lists 26.3 in its version list but has **no data** for it (dataPaths only to 26.1). Mineflayer refuses newer servers unless the version is pinned.
 
 **Ollama**
-- Qwen3 models think out loud by default; send `think: false` (the client drops it if a model or Ollama version rejects it). On the command line: `ollama run qwen3:4b --think=false`.
+- Hybrid Qwen3 models think out loud by default; send `think: false` (the client drops it if a model or Ollama version rejects it).
+- **Thinking-only versions** (plain `qwen3:4b` in Ollama is one) ignore `think: false` and end with a lone `</think>`. In that case `stripThinking()` cuts the reasoning before the JSON is parsed, the client warns once, the doctor flags it, and setup tests every model for it and offers the `-instruct` version.
 - Structured outputs: pass a JSON schema as `format` (Ollama ≥ 0.5). The client falls back to `format: "json"` if rejected.
 - Decision prompts are ~3.4k tokens of fixed system text + 0.6–2.5k of state. `/api/chat` returns timing fields (the doctor uses them), and `/api/ps` gives `size_vram`.
 
@@ -176,10 +178,10 @@ Reflexes (every physics tick, 20/s, no LLM): falls, lava, drowning, hits → tak
   - FastLogin on a real server;
   - the ViaProxy + Geyser + Floodgate Bedrock route;
   - fall saves on a real server (flying-squid has no fall damage and no buckets/boats/pearls): water bucket, boat, pearl, elytra, ladder, mace, mount, wall pearl, edge clutch; lava/drowning escapes;
-  - real speeds of qwen3:4b + qwen3:1.7b on the 1660 Super, and hosted APIs;
+  - real speeds of qwen3:4b-instruct + qwen3:1.7b on the 1660 Super, and hosted APIs;
   - the `respawn` action on a real server (lava/drop finding, /kill);
   - how well a real small model keeps to the goal tree (detours vs new_goal).
-  - real decision times on the 1660 Super (qwen3:4b fits fully on the GPU; the doctor hasn't been run to completion there yet).
+  - real decision times on the 1660 Super (qwen3:4b-sized models fit fully on the GPU; the doctor hasn't been run to completion there yet).
 
 ## Environment notes (for Claude cloud sessions)
 
@@ -187,7 +189,7 @@ Reflexes (every physics tick, 20/s, no LLM): falls, lava, drowning, hits → tak
 - **Test server:** install flying-squid outside the repo or with `npm install --no-save flying-squid@1.12.0`. Start test players **after** the bot.
 - **The user's machine is Windows** (Command Prompt). Give `cmd` commands; `npm` scripts must not use Unix-only syntax (e.g. `VAR=1 node …` — use a flag like `--debug` instead).
 - **Setup tooling for the user:**
-  - `npm run setup` strips `[brackets]`/quotes from answers, matches levels loosely, and turns a free-text personality into `{ base, setupDescription, traits, description, likes }` plus mind settings;
+  - `npm run setup` applies the Ollama `setx` settings (asks first, explains each, reads current values from `HKCU\Environment`), downloads a missing model (asks first), and tests that the model answers without thinking; it also strips `[brackets]`/quotes from answers, matches levels loosely, and turns a free-text personality into `{ base, setupDescription, traits, description, likes }` plus mind settings;
   - the doctor warns that its timing step takes a while (the user once Ctrl+C'd it);
   - the npm warnings (uuid deprecated, moderate vulnerabilities) are harmless — tell users not to run `npm audit fix --force`.
 - **Processes:** don't kill all `node` processes (the sandbox refuses it); run test processes under `timeout` instead.

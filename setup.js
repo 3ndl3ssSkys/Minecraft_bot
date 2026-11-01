@@ -10,6 +10,7 @@
 const fs = require('fs')
 const path = require('path')
 const readline = require('readline')
+const { execFileSync, spawnSync } = require('child_process')
 const { DEFAULT_CONFIG } = require('./index.js')
 const { LEVELS, LABELS } = require('./intelligence')
 
@@ -78,11 +79,34 @@ async function main () {
   } else {
     console.log('\n(Ollama isn\'t answering — is it running? You can still finish; the bot will wait for it.)')
   }
-  // Prefer what was chosen before, then a model that fits a 6 GB card entirely, then any Qwen.
-  const preferred = (old.llm?.model && models.find((m) => m.startsWith(old.llm.model))) || models.find((m) => /^qwen3:4b/.test(m)) ||
+  // Prefer what was chosen before, then a non-thinking model that fits a 6 GB card entirely, then any Qwen.
+  const preferred = (old.llm?.model && models.find((m) => m.startsWith(old.llm.model))) || models.find((m) => /^qwen3:4b-instruct/.test(m)) ||
     models.find((m) => m.startsWith(llm.model)) || models.find((m) => /qwen/.test(m)) || llm.model
-  const model = await ask('Model for decisions', preferred)
+  console.log('For a 6 GB card: qwen3:4b-instruct (fits entirely on the card). qwen2.5:7b is smarter but may not fit (check with: ollama ps).')
+  let model = await ask('Model for decisions', preferred)
   const fastModel = await ask('Small model for chat replies (optional, Enter to skip)', old.llm?.fastModel || '')
+
+  // Ollama's settings for a small card (Windows: setx; they only apply after Ollama restarts).
+  const restart = await ollamaSettings(ask, Boolean(fastModel))
+
+  // Make sure the model is there, and that it answers straight away instead of "thinking" out loud.
+  const base = new URL(llm.url).origin
+  for (let tries = 0; models.length && tries < 3; tries++) {
+    if (!models.some((m) => m === model || m === `${model}:latest`)) {
+      if (!yes(await ask(`${model} isn't downloaded yet. Download it now?`, 'Y'))) break
+      spawnSync('ollama', ['pull', model], { stdio: 'inherit', shell: process.platform === 'win32' })
+      models.push(model)
+    }
+    console.log(`Testing ${model}...`)
+    const t = await testModel(base, model)
+    if (t.error) { console.log(`  Couldn't test it: ${t.error}`); break }
+    if (!t.thinks) { console.log(`  ✓ answers straight away (${(t.ms / 1000).toFixed(1)}s, including loading it).`); break }
+    console.log(`  ✗ ${model} "thinks" out loud before every answer, even with thinking switched off. In the bot that means`)
+    console.log('    slow decisions, and often broken ones. It\'s a thinking-only version of the model.')
+    const other = /qwen3:4b/.test(model) ? 'qwen3:4b-instruct' : 'qwen2.5:3b'
+    if (!yes(await ask(`Use ${other} instead (the normal version)?`, 'Y'))) break
+    model = other
+  }
 
   const config = {
     ...old,
@@ -96,7 +120,73 @@ async function main () {
   fs.writeFileSync(FILE, JSON.stringify(config, null, 2) + '\n')
   rl.close()
   console.log(`\nSaved to ${FILE}`)
+  if (restart) console.log('Remember: restart Ollama now (llama icon by the clock → Quit Ollama, then start Ollama again), and open a new Command Prompt.')
   console.log('Next: npm run doctor   (checks everything)   then   npm start   (starts the bot)\n')
+}
+
+const yes = (a) => /^y(es)?$/i.test(String(a).trim())
+
+const TUNING = [
+  ['OLLAMA_FLASH_ATTENTION', '1', 'a faster way to run the model that also uses less memory'],
+  ['OLLAMA_KV_CACHE_TYPE', 'q8_0', "keeps the model's working memory (what it's reading) in half the space, so more fits on the card"],
+  ['OLLAMA_KEEP_ALIVE', '24h', 'keeps the model loaded, so the bot never waits for it to load again']
+]
+
+/** Offer Ollama's memory-saving settings. Returns true if Ollama needs a restart to use them. */
+async function ollamaSettings (ask, twoModels) {
+  const wanted = [...TUNING, ...(twoModels ? [['OLLAMA_MAX_LOADED_MODELS', '2', 'keeps the decision model and the chat model loaded together']] : [])]
+  const current = (name) => process.env[name] || winUserEnv(name)
+  const missing = wanted.filter(([name, value]) => current(name) !== value)
+  console.log('\nOllama settings that help a 6 GB graphics card:')
+  for (const [name, value, why] of wanted) console.log(`  ${current(name) === value ? '✓' : '·'} ${name}=${value} — ${why}`)
+  if (!missing.length) { console.log('  All set already.'); return false }
+  if (process.platform !== 'win32') {
+    console.log('  On Linux, add them to the Ollama service (sudo systemctl edit ollama), see SETUP.md step 4.')
+    return false
+  }
+  if (!yes(await ask('Set them now?', 'Y'))) return false
+  for (const [name, value] of missing) {
+    try {
+      execFileSync('setx', [name, value], { stdio: 'ignore' })
+      console.log(`  ✓ ${name}=${value}`)
+    } catch (err) {
+      console.log(`  ✗ couldn't set ${name} (${err.message}). Run by hand: setx ${name} ${value}`)
+    }
+  }
+  console.log('  Ollama only reads these when it starts: quit it from the llama icon by the clock and start it again.')
+  return true
+}
+
+/** A value saved with setx (it isn't in this window's environment until a new window opens). */
+function winUserEnv (name) {
+  if (process.platform !== 'win32') return undefined
+  try {
+    const out = execFileSync('reg', ['query', 'HKCU\\Environment', '/v', name], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+    return out.match(new RegExp(`${name}\\s+REG_\\w+\\s+(.+)`))?.[1]?.trim()
+  } catch {
+    return undefined
+  }
+}
+
+/** One tiny request with thinking off: does it answer straight away? */
+async function testModel (base, model) {
+  const started = Date.now()
+  const ask = (think) => fetch(`${base}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, stream: false, ...(think === undefined ? {} : { think }), options: { num_predict: 300 }, messages: [{ role: 'user', content: 'Reply with just the word: ok' }] }),
+    signal: AbortSignal.timeout(180000)
+  })
+  try {
+    let res = await ask(false)
+    if (res.status === 400) res = await ask(undefined) // models without a thinking switch
+    if (!res.ok) return { error: `HTTP ${res.status}: ${(await res.text()).slice(0, 120)}` }
+    const d = await res.json()
+    const content = d.message?.content || ''
+    return { thinks: Boolean(d.message?.thinking) || /<\/think>/.test(content) || content.length > 80, ms: Date.now() - started }
+  } catch (err) {
+    return { error: err.message }
+  }
 }
 
 /**

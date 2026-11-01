@@ -166,6 +166,10 @@ async function benchmark (config, base) {
       signal: AbortSignal.timeout(180000)
     })
     const d = await res.json()
+    if (d.message?.thinking || /<\/think>/.test(d.message?.content || '')) {
+      bad(`${config.llm.model} "thinks" out loud before answering${config.llm.think === false ? ', even with thinking switched off' : ''} — that makes every decision slow.`)
+      tip(config.llm.think === false ? 'It\'s a thinking-only version. Use a normal one: ollama pull qwen3:4b-instruct (or qwen2.5:3b), then npm run setup.' : 'Set "think": false under "llm" in config.local.json (npm run setup does this for Qwen3).')
+    }
     if (!d.prompt_eval_count || !d.eval_duration) { warn('the model answered, but Ollama returned no timing info (very old Ollama?)'); return }
     const s = (ns) => ns / 1e9
     const promptTps = d.prompt_eval_count / Math.max(0.001, s(d.prompt_eval_duration || 1))
@@ -190,7 +194,7 @@ async function benchmark (config, base) {
       else if (pct > 0) {
         warn(`only ${pct}% on the GPU (${gb(m.size_vram)} of ${gb(m.size)} GB) — the rest runs on the CPU, which is several times slower.`)
         tip('This model is a bit too big for this card (Windows also uses some of its memory for the screen).')
-        tip('Easiest fix: a smaller model that fits entirely —  ollama pull qwen3:4b  — then  npm run setup  and choose it.')
+        tip('Easiest fix: a smaller model that fits entirely —  npm run setup  and choose qwen3:4b-instruct (it downloads and tests it).')
         tip('Or: the Ollama settings in START-HERE.md step 1 (restart Ollama after setting them), and llm.numCtx 6144.')
       } else warn('running entirely on the CPU — check the GPU driver / that Ollama sees your GPU.')
     }

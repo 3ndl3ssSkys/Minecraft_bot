@@ -6,53 +6,7 @@ When this works, [SETUP.md](SETUP.md) has everything else (friends' servers, Bed
 
 ---
 
-## Step 1 — Make Ollama use your graphics card well (once)
-
-Paste these three lines into the Command Prompt, one at a time:
-
-```bat
-setx OLLAMA_FLASH_ATTENTION 1
-```
-```bat
-setx OLLAMA_KV_CACHE_TYPE q8_0
-```
-```bat
-setx OLLAMA_KEEP_ALIVE 24h
-```
-
-Each one should say `SUCCESS: Specified value was saved.`
-
-Then **restart Ollama**:
-1. Right-click the llama icon by the clock → **Quit Ollama**.
-2. Start → **Ollama** to open it again.
-3. **Close the Command Prompt and open a new one**, so it sees the new settings.
-
-**Check that the model runs on the GPU:**
-```bat
-ollama run qwen2.5:7b "say hi in five words"
-```
-The first time takes 5–20 seconds while it loads, then it answers. Now run:
-```bat
-ollama ps
-```
-The `PROCESSOR` column should say **100% GPU**:
-- **Something like `18%/82% CPU/GPU`:** the model is a little too big for a 6 GB card. Windows uses part of the card's memory for your screen, so `qwen2.5:7b` (5.2 GB) doesn't quite fit, and the part on the CPU makes every answer several times slower. Use a model that fits entirely:
-  ```bat
-  ollama pull qwen3:4b
-  ```
-  ```bat
-  ollama run qwen3:4b "say hi in five words"
-  ```
-  ```bat
-  ollama ps
-  ```
-  This one should say **100% GPU**. Choose `qwen3:4b` as the model in step 3 (setup turns its slow "thinking" mode off for you).
-- **Mostly or all CPU, even for qwen3:4b:** update the NVIDIA driver (nvidia.com or GeForce Experience), restart the PC, and check again.
-- **About the slow test earlier:** typing to the model with `ollama run` is only a test. You don't need to chat with it. The bot talks to Ollama by itself.
-
----
-
-## Step 2 — Download the bot
+## Step 1 — Download the bot
 
 ```bat
 cd %USERPROFILE%
@@ -74,25 +28,62 @@ That takes a minute and ends with something like `added 92 packages`.
 
 > **Every bot command runs inside this folder.** If you open a new Command Prompt later, first type `cd %USERPROFILE%\Minecraft_bot`.
 > The error `Could not read package.json` means you're not in that folder.
+> **Already downloaded it earlier?** Get the latest version with `git pull`.
 
 ---
 
-## Step 3 — Answer a few questions
+## Step 2 — Run setup
+
+Make sure Ollama is running (the llama icon by the clock), then:
 
 ```bat
 npm run setup
 ```
 
-It asks:
-- **your Minecraft name**, so the bot takes `!commands` from you;
-- **the server address**: use `localhost` for the test server in step 4;
-- **the bot's name**, e.g. `Wanderer`;
-- **its personality and skill level**;
-- **which model to use**: `qwen3:4b` if step 1 showed the 7B model partly on the CPU, otherwise `qwen2.5:7b`.
+It asks a few questions. Type plain words, without the `[brackets]`; press Enter alone to keep what's in brackets.
 
-Type plain words, without the `[brackets]`. Press Enter alone to keep what's in brackets. For the personality you can pick a preset, or describe one ("friendly, a bit cautious, loves exploring"); it builds a custom personality from your words.
+| Question | What to answer |
+| --- | --- |
+| Your Minecraft name | Your own name, so the bot takes `!commands` from you. |
+| Server address | `localhost` for the test server in step 4. |
+| The bot's name | Whatever it should be called in game, e.g. `Wanderer`. |
+| Personality | A preset (`friendly`, `grumpy-miner`, `hype-builder`, `shy-explorer`), or describe one in a few words, e.g. `friendly, a bit cautious, loves exploring`. |
+| How good a player | One of the listed levels, e.g. `complicated`. |
+| Model for decisions | **`qwen3:4b-instruct`** for a 6 GB card: it fits entirely on the card. (`qwen2.5:7b` is a bit smarter but usually doesn't quite fit; step 3 shows how to check.) |
+| Small model for chat | Press Enter to skip for now. |
+
+**Then it does the fiddly parts for you:**
+- **Ollama settings for a 6 GB card:** it lists three, says what each one does, and asks `Set them now? [Y]`. Press Enter.
+  - `OLLAMA_FLASH_ATTENTION=1`: a faster way to run the model that also uses less memory.
+  - `OLLAMA_KV_CACHE_TYPE=q8_0`: the model's working memory takes half the space, so more of the model fits on the card.
+  - `OLLAMA_KEEP_ALIVE=24h`: the model stays loaded, so the bot never waits for it to load again.
+- **Downloads the model** if you don't have it yet (it asks first).
+- **Tests the model:** it checks that the model answers straight away.
+  - Some versions "think out loud" for a long time before every answer, even with that switched off, like plain `qwen3:4b`. Setup spots that and offers the normal version instead.
 
 Your answers go into `config.local.json` in the bot folder. Run `npm run setup` again any time to change them.
+
+---
+
+## Step 3 — Restart Ollama, and check the model is on the graphics card
+
+Ollama only reads its settings when it starts:
+1. Right-click the llama icon by the clock → **Quit Ollama**.
+2. Start → **Ollama** to open it again.
+3. **Close the Command Prompt and open a new one,** then `cd %USERPROFILE%\Minecraft_bot` again.
+
+Now load the model once and look at where it runs (use the model you chose in setup):
+```bat
+ollama run qwen3:4b-instruct "say hi in five words"
+```
+```bat
+ollama ps
+```
+The `PROCESSOR` column should say **100% GPU**:
+- **Something like `18%/82% CPU/GPU`:** the model is a little too big for the card. Windows uses part of the card's memory for your screen, and the part on the CPU makes every answer several times slower. Run `npm run setup` again and pick a smaller model (`qwen3:4b-instruct`, or `qwen2.5:3b`).
+- **Mostly or all CPU, even for a small model:** update the NVIDIA driver (nvidia.com or GeForce Experience), restart the PC, and check again.
+
+Typing to the model with `ollama run` is only a test. You don't need to chat with it: the bot talks to Ollama by itself.
 
 ---
 
@@ -137,7 +128,7 @@ You want green ✓ marks for Node, the config, Ollama, the model, and the server
 | --- | --- |
 | Can't reach Ollama | Start Ollama from the Start menu. |
 | Model isn't downloaded | `ollama pull qwen2.5:7b` (or whatever name you gave in setup). |
-| Only part of the model is on the GPU | Step 1, then close other programs that use the GPU. |
+| Only part of the model is on the GPU | Step 3 (restart Ollama after setup), or pick a smaller model with `npm run setup`. |
 | The server doesn't answer | Is the server window from step 4 still running and showing `Done`? |
 
 ---
@@ -184,7 +175,7 @@ MIND [curious 5/10] Nobody's around. I'll punch a tree to get started.
 | `Connection error: connect ECONNREFUSED` and "Nothing is running at localhost:25565" | The Minecraft server isn't running (yet). Start it (step 4); the bot keeps retrying and joins once it's up. |
 | `Could not read package.json` | You're not in the bot folder: `cd %USERPROFILE%\Minecraft_bot` |
 | `'git' / 'node' / 'ollama' is not recognized` | Close the Command Prompt and open a new one (installers only take effect in new windows). |
-| Answers are very slow | `ollama ps` while the bot runs: it must say 100% GPU (step 1). |
+| Answers are very slow | `ollama ps` while the bot runs: it must say 100% GPU (step 3). If the bot's log says the model "keeps thinking", run `npm run setup` and take the model it offers. |
 | `Failed to verify username` | That server checks Microsoft accounts. Use the test server from step 4, or see SETUP.md step 2 for other servers. |
 | `Kicked: You are not white-listed` | On your test server, type `whitelist add Wanderer` in the server window. |
 | It doesn't answer in chat | Say its name in the message. |

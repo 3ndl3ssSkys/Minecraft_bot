@@ -126,12 +126,12 @@ ollama pull qwen2.5:7b
 
 That's the safe default. For **faster** decisions and chat, try a smaller main model plus a tiny chat model (README → "Which model, and making it fast"):
 ```bash
-ollama pull qwen3:4b
+ollama pull qwen3:4b-instruct
 ```
 ```bash
 ollama pull qwen3:1.7b
 ```
-and in `config.local.json`: `"llm": { "model": "qwen3:4b", "fastModel": "qwen3:1.7b", "think": false }`. `npm run doctor` (step 9) tells you which is quicker on your card.
+and in `config.local.json`: `"llm": { "model": "qwen3:4b-instruct", "fastModel": "qwen3:1.7b", "think": false }`. (Not plain `qwen3:4b`: that one always thinks out loud first, which is slow.) `npm run setup` sets all of this, plus the Ollama variables below, for you. `npm run doctor` (step 9) tells you which is quicker on your card.
 
 **Recommended for 6 GB cards:** these settings make the model's working memory smaller and keep it loaded.
 

@@ -993,7 +993,14 @@ class OllamaClient {
           throw err
         }
         const data = await res.json()
-        const content = openai ? data?.choices?.[0]?.message?.content : data?.message?.content
+        const raw = openai ? data?.choices?.[0]?.message?.content : data?.message?.content
+        // Some models ("thinking" versions) reason out loud even when told not to: slow, and it eats the answer.
+        const thought = Boolean(data?.message?.thinking) || /<\/think>/.test(raw || '')
+        if (thought && this.cfg.think === false && !this.warnedThinking) {
+          this.warnedThinking = true
+          this.log.warn(`${this.target(job.lane).model} keeps "thinking" even with think: false, which makes every answer slow. Use a non-thinking model (e.g. qwen3:4b-instruct or qwen2.5:3b): npm run setup.`)
+        }
+        const content = stripThinking(raw)
         if (!content) throw Object.assign(new Error(`${who} returned an empty message.`), { retryable: true })
         const parsed = parseJsonLoose(content)
         this.log.debug(`${label}: ${Date.now() - started}ms, ${data.eval_count ?? data.usage?.completion_tokens ?? '?'} tokens${job.lane === 'fast' ? ' (fast model)' : ''}`)
@@ -1039,6 +1046,13 @@ class OllamaClient {
       this.log.warn(`Ollama health check failed (${err.message}). The bot will keep retrying.`)
     }
   }
+}
+
+/** Drop a model's out-loud reasoning ("<think>…</think>", or everything up to a lone "</think>"). */
+function stripThinking (text) {
+  if (!text) return text
+  const end = text.lastIndexOf('</think>')
+  return (end === -1 ? text : text.slice(end + '</think>'.length)).trim()
 }
 
 /** Parse model output that should be JSON but may be wrapped in fences or prose. */
@@ -3419,4 +3433,4 @@ function main () {
 
 if (require.main === module) main()
 
-module.exports = { Agent, Brain, Perception, ChatManager, EventReactor, OllamaClient, loadConfig, deepMerge, parsePluginChat, loginFor, fallbackServer, serverMods, errText, DEFAULT_CONFIG }
+module.exports = { Agent, Brain, Perception, ChatManager, EventReactor, OllamaClient, loadConfig, deepMerge, parsePluginChat, loginFor, fallbackServer, serverMods, errText, stripThinking, DEFAULT_CONFIG }

@@ -18,7 +18,8 @@ const server = http.createServer((req, res) => {
     const delay = b.model === 'slow-big' ? 600 : 50
     setTimeout(() => {
       res.setHeader('Content-Type', 'application/json')
-      const content = JSON.stringify({ message: `from ${b.model}` })
+      let content = JSON.stringify({ message: `from ${b.model}` })
+      if (b.model === 'thinker') content = `We need to answer. Let me think about it {not json}...\n</think>\n\n${content}` // thinking-only models
       res.end(JSON.stringify(req.url.includes('/v1/') ? { choices: [{ message: { content } }], usage: { completion_tokens: 5 } } : { message: { content }, eval_count: 5 }))
     }, delay)
   })
@@ -70,6 +71,14 @@ server.listen(0, async () => {
   assert.equal((await mixed.chat([{ role: 'user', content: 'decide' }], { schema, priority: 2 })).message, 'from slow-big')
   assert.equal(seen.at(-1).url, '/api/chat') // decisions stay on Ollama
   assert.equal(seen.at(-1).auth, undefined) // and the hosted key isn't sent there
+  console.log('ok')
+
+  console.log('\n== a model that thinks anyway ==')
+  const warnings = []
+  const thinker = new OllamaClient(deepMerge(DEFAULT_CONFIG, { llm: { url: `${base}/api/chat`, model: 'thinker', think: false } }), { ...log, warn: (m) => warnings.push(m) })
+  assert.equal((await thinker.chat([{ role: 'user', content: 'hi' }], { schema, priority: 2 })).message, 'from thinker')
+  assert(warnings.some((w) => /keeps "thinking"/.test(w)))
+  console.log('reasoning stripped, answer parsed; warned:', warnings[0].slice(0, 70) + '...')
   console.log('ok')
 
   console.log('\nAll LLM checks passed')
