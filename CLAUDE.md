@@ -38,6 +38,10 @@ Everything learned while building this bot: what it is, how it's put together, w
   - The user has run the three `setx` Ollama settings by hand; Ollama still needs a restart for them to apply.
   - **Next for the user:** `git pull`, `npm run setup` (choose `qwen3:4b-instruct`; setup also applies the Ollama settings and tests the model), restart Ollama, check `ollama ps` shows 100% GPU, `npm run doctor` (let the timing step finish), then the local Paper test server (START-HERE.md step 4, `online-mode=false` on a fresh world), then `npm start`.
   - After that: the friend's server via FastLogin (SETUP.md 6D) or the Bedrock fallback.
+- **First real play session (26.1 Paper, qwen3:4b-instruct):**
+  - The bot spawned, planned goals and greeted, but every action had empty args (the Ollama key-sorting problem above, now fixed).
+  - It didn't answer the user, who didn't say its name: now it also answers when nobody else is online or the speaker is within 12 blocks.
+  - Each chat line arrived twice on 26.1: now deduped in `onMessage`.
 - **First real server contact:** the user's local Paper **26.1** test server accepted the offline login (version and auth fine), then kicked it with "You are not white-listed". Fix given: `whitelist add TheBestWanderer` in the server console (or `whitelist off`), then restart the bot, which stops retrying after a whitelist kick on purpose.
 - **Nothing has run against a real Minecraft server yet.** All live tests used flying-squid and the mock LLM. Expect the first real sessions to surface prompt and behaviour issues: read the user's logs and tune from them.
 - **When the user pastes output:** it uses their real name in paths. Never repeat it (see the naming rule at the top).
@@ -148,6 +152,7 @@ Reflexes (every physics tick, 20/s, no LLM): falls, lava, drowning, hits → tak
 **Ollama**
 - Hybrid Qwen3 models think out loud by default; send `think: false` (the client drops it if a model or Ollama version rejects it).
 - **Thinking-only versions** (plain `qwen3:4b` in Ollama is one) ignore `think: false` and end with a lone `</think>`. In that case `stripThinking()` cuts the reasoning before the JSON is parsed, the client warns once, the doctor flags it, and setup tests every model for it and offers the `-instruct` version.
+- **Ollama sorts schema keys alphabetically** (seen on the user's PC: output began `{"action":{"args":{},"name":...},"emotion"...`). With a schema the model wrote `args` before choosing `name`, so it was always `{}` and every action failed INVALID_ARGS, and it wrote the action before its `thought`. So **decisions use plain JSON mode** (`llm.decisionSchema: false`) with a filled-in example (`DECISION_EXAMPLE`) giving the order. The smaller schema calls (chat analysis, plan, fight check-in) still use schemas; their order matters less.
 - Structured outputs: pass a JSON schema as `format` (Ollama ≥ 0.5). The client falls back to `format: "json"` if rejected.
 - Decision prompts are ~3.4k tokens of fixed system text + 0.6–2.5k of state. `/api/chat` returns timing fields (the doctor uses them), and `/api/ps` gives `size_vram`.
 

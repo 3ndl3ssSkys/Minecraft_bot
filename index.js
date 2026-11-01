@@ -122,6 +122,10 @@ const DEFAULT_CONFIG = {
     // Shorter decision prompt (same rules and tools, tersely): ~1.4k instead of ~3.4k tokens. A small GPU reads
     // every token of it before each decision. 'auto' = on for local models of 8B or smaller.
     compactPrompt: 'auto',
+    // Enforce the decision JSON with a schema? Off: Ollama sorts schema keys alphabetically, which made the
+    // model write action.args before action.name (always {}) and the action before its thought. Plain JSON mode
+    // keeps the order from the prompt's example.
+    decisionSchema: false,
     temperature: 0.7,
     numCtx: 8192,
     keepAlive: '24h', // keep the model loaded: reloading it costs seconds
@@ -1221,6 +1225,18 @@ function mindBlock (agent) {
   return lines.join('\n')
 }
 
+/** A filled-in decision, so small models see the key order and that args are never empty. */
+const DECISION_EXAMPLE = JSON.stringify({
+  thought: 'No tools yet. There are oak logs 4 blocks away, so wood first.',
+  goal: 'make a wooden pickaxe',
+  subgoal: 'chop 4 oak logs',
+  goalStatus: 'working',
+  action: { name: 'mineBlock', args: { blockType: 'oak_log', count: 4 } },
+  taskUpdate: { status: 'none', note: '' },
+  emotion: 'focused',
+  emotionIntensity: 5
+})
+
 /** Use the short decision prompt? ('auto': for local models up to ~8B, which read prompts slowly.) */
 function usesCompactPrompt (config) {
   const v = config.llm.compactPrompt
@@ -1252,7 +1268,9 @@ ${mindBlock(agent)}
 ${toolDocs}
 
 ## Answer
-ONLY a JSON object: {"thought", "emotion" (${EMOTIONS.join('|')}), "emotionIntensity" 1-10, "goal", "subgoal", "goalStatus", "action": {"name", "args": {}}, "taskUpdate": {"status", "note"}}`
+ONLY a JSON object, keys in this order. Think first, then pick the action, then fill in ALL its arguments (from the list above):
+${DECISION_EXAMPLE}
+emotion is one of: ${EMOTIONS.join(', ')}.`
 }
 
 function buildDecisionPrompt (agent, toolDocs) {
@@ -1288,8 +1306,9 @@ ${mindBlock(agent)}
 ${toolDocs}
 
 ## Response format
-Reply with ONLY a JSON object, no other text:
-{"thought": "...", "emotion": "<one of: ${EMOTIONS.join(', ')}>", "emotionIntensity": 1-10, "goal": "current goal", "subgoal": "the step you're on", "goalStatus": "working|subgoal_done|goal_done|blocked|new_goal", "action": {"name": "<action name>", "args": { ... }}, "taskUpdate": {"status": "none|working|done|gave_up", "note": "..."}}`
+Reply with ONLY a JSON object, no other text, keys in this order (think first, then the action with ALL its arguments filled in), e.g.:
+${DECISION_EXAMPLE}
+emotion is one of: ${EMOTIONS.join(', ')}. goalStatus: working|subgoal_done|goal_done|blocked|new_goal. taskUpdate.status: none|working|done|gave_up.`
 }
 
 /** The real decision system prompt for a config, without a running bot (the doctor times it). */
@@ -1539,12 +1558,21 @@ class ChatResponder {
     const words = [bot.username, bot.username?.replace(/^[^A-Za-z0-9_]+/, ''), personality.name, ...(personality.nicknames || [])].filter(Boolean)
     if (words.some((w) => new RegExp(`(^|[^A-Za-z0-9_])${escapeRegex(w)}($|[^A-Za-z0-9_])`, 'i').test(message))) return true
     const last = memory.lastTalkedWith.get(username)
-    return Boolean(last && Date.now() - last < this.cfg.conversationWindowSec * 1000)
+    if (last && Date.now() - last < this.cfg.conversationWindowSec * 1000) return true
+    // Nobody else to talk to, or standing right next to us: it's for us.
+    const others = Object.keys(bot.players).filter((n) => n !== bot.username && n !== username)
+    if (!others.length) return true
+    const e = bot.players[username]?.entity
+    return Boolean(e && bot.entity && e.position.distanceTo(bot.entity.position) < 12)
   }
 
   onMessage (username, message, { whisper = false } = {}) {
     const { bot, memory, log, config } = this.agent
     if (!username || username === bot.username) return
+    // Newer servers can deliver the same line twice (chat event + system message): handle it once.
+    const key = `${username}|${message}`
+    if (this.lastLine?.key === key && Date.now() - this.lastLine.at < 2000) return
+    this.lastLine = { key, at: Date.now() }
     log.chat(`${whisper ? '(whisper) ' : ''}<${username}> ${message}`)
     if (this.cfg.ignore.map((i) => i.toLowerCase()).includes(username.toLowerCase())) return
     memory.addChat(username, message, { whisper })
@@ -2942,7 +2970,7 @@ ${said ? `${name} just said: ${said}
           `${nudges.join('\n')}\nChoose your next action.`
       }
     ]
-    const out = await agent.llm.chat(messages, { schema: decisionSchema(tools), priority: PRIORITY.decision, label: 'decision', temperature: config.mind.decisionTemperature ?? undefined })
+    const out = await agent.llm.chat(messages, { schema: config.llm.decisionSchema ? decisionSchema(tools) : undefined, priority: PRIORITY.decision, label: 'decision', temperature: config.mind.decisionTemperature ?? undefined })
 
     const decision = {
       source: 'llm',

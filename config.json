@@ -31,6 +31,8 @@
     "fastApiKey": "",
     "think": null,
     "maxTokens": 400,
+    "compactPrompt": "auto",
+    "decisionSchema": false,
     "temperature": 0.7,
     "numCtx": 8192,
     "keepAlive": "24h",

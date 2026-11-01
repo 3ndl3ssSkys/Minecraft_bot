@@ -215,6 +215,14 @@ The user also asked about a claim from Google that Qwen 1.7B gives sub-300 ms re
 4. **"Keep memories even if learning is off":** `intelligence.learn: false` should stop *skill growth only*. Memories, relationships and chat history are always kept, unless `memory.enabled: false`.
 5. Add tests and update CONFIGURING.md (a "Memory and bot saves" section), CLAUDE.md and this file.
 
+## 15. First real play session
+
+- **On the server:** the bot joined the user's Paper 26.1 test server (after the whitelist was sorted out: the offline UUID depends on the exact capitals in the name), planned goals and greeted.
+- **Every action failed:** Ollama sorts JSON-schema keys alphabetically, so the model filled `action.args` before choosing `action.name` (always `{}`). Fixed: decisions now use plain JSON mode with a filled-in example.
+- **It didn't reply to the user:** they didn't say its name. Now it also replies when nobody else is online, or when the speaker is close by.
+- **Duplicate chat lines:** each line arrived twice on 26.1; now deduped.
+- **Next:** the user runs it again (`git pull`, `npm start`) and pastes the log. Check that actions now have real arguments, then tune from what it does.
+
 ## Where it stands now
 
 **Next for the user:**
