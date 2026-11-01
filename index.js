@@ -38,6 +38,7 @@ const building = require('./building')
 const { Intelligence, LEVELS: IQ_LEVELS, LABELS: IQ_LABELS } = require('./intelligence')
 const { Senses } = require('./senses')
 const { ContainerIntel, signText } = require('./containers')
+const { Reflexes, avoidHazards } = require('./reflexes')
 
 // ===========================================================================
 // Logging
@@ -100,14 +101,29 @@ const DEFAULT_CONFIG = {
     maxReconnectDelayMs: 120000
   },
   llm: {
+    // 'ollama', or 'openai' for any OpenAI-compatible API: LM Studio, llama.cpp server, vLLM, or hosted ones
+    // (Groq, Cerebras, OpenRouter, OpenAI, Anthropic's compatibility endpoint...). Then url is the full
+    // .../v1/chat/completions address and apiKey (or env LLM_API_KEY) the key.
+    provider: 'ollama',
     url: 'http://localhost:11434/api/chat',
+    apiKey: '',
     model: 'qwen2.5:7b',
+    // Optional small model for chat replies, reactions and small talk. It gets its own lane, so a
+    // reply never waits behind a slow decision, and the big model's prompt cache stays warm.
+    fastModel: '',
+    // The fast lane can use another provider: e.g. decisions on your GPU, chat replies from a hosted API.
+    // Empty = same as above.
+    fastProvider: '',
+    fastUrl: '',
+    fastApiKey: '',
+    think: null, // thinking models (Qwen3 and the like): false = answer straight away (much faster); null = model default
+    maxTokens: 400, // cap on each answer (a decision is ~150 tokens); stops rambling from eating seconds
     temperature: 0.7,
     numCtx: 8192,
-    keepAlive: '15m',
+    keepAlive: '24h', // keep the model loaded: reloading it costs seconds
     timeoutMs: 90000,
     maxRetries: 2,
-    useJsonSchema: true // Ollama >= 0.5 structured outputs; false = plain JSON mode
+    useJsonSchema: true // structured outputs (Ollama >= 0.5 / json_schema); false = plain JSON mode
   },
   // Named server profiles: `node index.js --server friend1` merges servers.friend1 into "server".
   servers: {},
@@ -138,6 +154,16 @@ const DEFAULT_CONFIG = {
     particleRange: 10,
     suspicionThreshold: 1.0, // how much unexplained noise before it investigates
     investigate: true
+  },
+  // The fast layer (reflexes.js): runs every game tick, never waits for the LLM.
+  reflexes: {
+    enabled: true,
+    falls: true, // predict landings and clutch (water bucket, blocks, pearls, elytra, boats... by skill level)
+    hazards: true, // lava, fire, drowning, suffocation, lit TNT
+    hitReactions: true, // flinch and look toward a hit; weapon out when it's a real attack
+    reactionMs: null, // fixed reaction time; null = from skill (≈420 ms beginner → ≈70 ms impossible)
+    learnSaves: true, // figure out new saves from bad falls and from what players say
+    truce: true // a player can talk it out of a fight ("sorry", "stop", "truce"), depending on how it feels about them
   },
   chat: {
     mode: 'both', // 'silent' | 'respond' | 'unprompted' | 'both'
@@ -202,7 +228,9 @@ const DEFAULT_CONFIG = {
       taskDone: { enabled: true, chance: 1, cooldownSec: 0, style: 'llm', templates: ['there you go {player}', 'done!'] },
       taskPartial: { enabled: true, chance: 1, cooldownSec: 0, style: 'llm', templates: ["that's all i got time for {player}", 'got you some, not all of it'] },
       taskAbandoned: { enabled: true, chance: 0.8, cooldownSec: 0, style: 'llm', templates: ["sorry {player}, couldn't do it", 'gonna pass on that one after all'] },
-      buildDone: { enabled: true, chance: 1, cooldownSec: 0, style: 'llm', templates: ['finally finished my {name}', 'done building!'] }
+      buildDone: { enabled: true, chance: 1, cooldownSec: 0, style: 'llm', templates: ['finally finished my {name}', 'done building!'] },
+      clutch: { enabled: true, chance: 0.6, cooldownSec: 60, style: 'template', templates: ['that was close', 'clutch', 'phew', 'not today'] },
+      truce: { enabled: true, chance: 1, cooldownSec: 10, perTarget: true, style: 'llm', templates: ['fine. truce', 'ok ok, we good'] }
     }
   },
   behavior: {
@@ -485,6 +513,9 @@ function loadConfig (log) {
   if (env.BOT_INTELLIGENCE) config.intelligence.level = env.BOT_INTELLIGENCE
   if (env.OLLAMA_URL) config.llm.url = env.OLLAMA_URL
   if (env.OLLAMA_MODEL) config.llm.model = env.OLLAMA_MODEL
+  if (env.LLM_FAST_MODEL) config.llm.fastModel = env.LLM_FAST_MODEL
+  if (env.LLM_PROVIDER) config.llm.provider = env.LLM_PROVIDER
+  if (env.LLM_API_KEY) config.llm.apiKey = env.LLM_API_KEY
   if (env.BOT_PERSONALITY) config.personality = env.BOT_PERSONALITY
   if (env.BOT_CHAT_MODE) config.chat.mode = env.BOT_CHAT_MODE
 
@@ -809,80 +840,128 @@ function safe (fn) {
 
 const PRIORITY = { reply: 0, reaction: 1, decision: 2, smalltalk: 3, reflect: 4 }
 
+/**
+ * Talks to the language model: Ollama's /api/chat, or any OpenAI-compatible
+ * /v1/chat/completions. Two lanes, one request at a time each: "main" for
+ * decisions and reflection, "fast" for chat (only when llm.fastModel is set —
+ * otherwise everything shares one queue, highest priority first).
+ */
 class OllamaClient {
   constructor (config, log) {
     this.cfg = config.llm
     this.log = log
-    this.queue = []
-    this.busy = false
+    this.lanes = { main: { queue: [], busy: false }, fast: { queue: [], busy: false } }
     this.jsonSchemaSupported = this.cfg.useJsonSchema
+    this.thinkSupported = true
+  }
+
+  /** Where a lane's requests go: the fast lane can override provider, url and key. */
+  target (lane) {
+    const c = this.cfg
+    if (lane !== 'fast') return { provider: c.provider, url: c.url, apiKey: c.apiKey, model: c.model }
+    return { provider: c.fastProvider || c.provider, url: c.fastUrl || c.url, apiKey: c.fastApiKey || c.apiKey, model: c.fastModel }
+  }
+
+  laneFor (priority) {
+    const chatty = priority === PRIORITY.reply || priority === PRIORITY.reaction || priority === PRIORITY.smalltalk
+    return this.cfg.fastModel && chatty ? 'fast' : 'main'
   }
 
   /** Queue a chat request. Resolves to the parsed JSON object the model produced. */
   chat (messages, { schema, priority = PRIORITY.decision, temperature, label = 'llm' } = {}) {
     return new Promise((resolve, reject) => {
-      this.queue.push({ messages, schema, priority, temperature, label, resolve, reject, at: Date.now() })
-      this.queue.sort((a, b) => a.priority - b.priority || a.at - b.at)
-      this.pump()
+      const lane = this.laneFor(priority)
+      const q = this.lanes[lane].queue
+      q.push({ messages, schema, priority, temperature, label, lane, resolve, reject, at: Date.now() })
+      q.sort((a, b) => a.priority - b.priority || a.at - b.at)
+      this.pump(lane)
     })
   }
 
   /** Drop queued (not yet sent) requests, e.g. on disconnect. */
   clear (reason = 'cleared') {
-    for (const job of this.queue.splice(0)) job.reject(new Error(reason))
+    for (const lane of Object.values(this.lanes)) for (const job of lane.queue.splice(0)) job.reject(new Error(reason))
   }
 
-  async pump () {
-    if (this.busy) return
-    const job = this.queue.shift()
+  async pump (name) {
+    const lane = this.lanes[name]
+    if (lane.busy) return
+    const job = lane.queue.shift()
     if (!job) return
-    this.busy = true
+    lane.busy = true
     try {
       job.resolve(await this.request(job))
     } catch (err) {
       job.reject(err)
     } finally {
-      this.busy = false
-      setImmediate(() => this.pump())
+      lane.busy = false
+      setImmediate(() => this.pump(name))
     }
   }
 
-  async request ({ messages, schema, temperature, label }) {
+  body ({ messages, schema, temperature, lane }) {
+    const { provider, model } = this.target(lane)
+    const temp = temperature ?? this.cfg.temperature
+    if (provider === 'openai') {
+      const body = { model, messages, temperature: temp, stream: false }
+      if (this.cfg.maxTokens) body.max_tokens = this.cfg.maxTokens
+      body.response_format = schema && this.jsonSchemaSupported
+        ? { type: 'json_schema', json_schema: { name: 'answer', schema } }
+        : { type: 'json_object' }
+      return body
+    }
+    const body = {
+      model,
+      messages,
+      stream: false,
+      format: schema && this.jsonSchemaSupported ? schema : 'json',
+      keep_alive: this.cfg.keepAlive,
+      options: { temperature: temp, num_ctx: this.cfg.numCtx }
+    }
+    if (this.cfg.maxTokens) body.options.num_predict = this.cfg.maxTokens
+    if (typeof this.cfg.think === 'boolean' && this.thinkSupported) body.think = this.cfg.think
+    return body
+  }
+
+  async request (job) {
+    const { label } = job
+    const { provider, url, apiKey } = this.target(job.lane)
+    const openai = provider === 'openai'
+    const who = openai ? 'LLM API' : 'Ollama'
     let lastErr
     for (let attempt = 0; attempt <= this.cfg.maxRetries; attempt++) {
       const started = Date.now()
       try {
-        const body = {
-          model: this.cfg.model,
-          messages,
-          stream: false,
-          format: schema && this.jsonSchemaSupported ? schema : 'json',
-          keep_alive: this.cfg.keepAlive,
-          options: { temperature: temperature ?? this.cfg.temperature, num_ctx: this.cfg.numCtx }
-        }
-        const res = await fetch(this.cfg.url, {
+        const headers = { 'Content-Type': 'application/json' }
+        if (apiKey) headers.Authorization = `Bearer ${apiKey}`
+        const res = await fetch(url, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
+          headers,
+          body: JSON.stringify(this.body(job)),
           signal: AbortSignal.timeout(this.cfg.timeoutMs)
         })
         if (!res.ok) {
           const text = await res.text().catch(() => '')
-          // Old Ollama versions reject schema objects in `format`; fall back to JSON mode.
-          if (res.status === 400 && this.jsonSchemaSupported && /format/i.test(text)) {
-            this.log.warn('Ollama rejected the JSON schema; falling back to plain JSON mode (upgrade Ollama for structured outputs).')
+          // Older servers reject schema objects; fall back to plain JSON mode.
+          if (res.status === 400 && this.jsonSchemaSupported && /format|json_schema|response_format/i.test(text)) {
+            this.log.warn(`${who} rejected the JSON schema; falling back to plain JSON mode.`)
             this.jsonSchemaSupported = false
             continue
           }
-          const err = new Error(`Ollama HTTP ${res.status}: ${text.slice(0, 200)}`)
+          if (res.status === 400 && this.thinkSupported && /think/i.test(text)) {
+            this.log.warn('This model or Ollama version does not take the "think" switch; leaving it out.')
+            this.thinkSupported = false
+            continue
+          }
+          const err = new Error(`${who} HTTP ${res.status}: ${text.slice(0, 200)}`)
           err.retryable = res.status >= 500 || res.status === 429
           throw err
         }
         const data = await res.json()
-        const content = data?.message?.content
-        if (!content) throw Object.assign(new Error('Ollama returned an empty message.'), { retryable: true })
+        const content = openai ? data?.choices?.[0]?.message?.content : data?.message?.content
+        if (!content) throw Object.assign(new Error(`${who} returned an empty message.`), { retryable: true })
         const parsed = parseJsonLoose(content)
-        this.log.debug(`${label}: ${Date.now() - started}ms, ${data.eval_count ?? '?'} tokens`)
+        this.log.debug(`${label}: ${Date.now() - started}ms, ${data.eval_count ?? data.usage?.completion_tokens ?? '?'} tokens${job.lane === 'fast' ? ' (fast model)' : ''}`)
         return parsed
       } catch (err) {
         lastErr = err
@@ -894,22 +973,32 @@ class OllamaClient {
       }
     }
     if (lastErr?.cause?.code === 'ECONNREFUSED') {
-      throw new Error(`Cannot reach Ollama at ${this.cfg.url}. Is "ollama serve" running?`)
+      throw new Error(openai ? `Cannot reach the LLM API at ${url}.` : `Cannot reach Ollama at ${url}. Is "ollama serve" running?`)
     }
     throw lastErr
   }
 
   async healthCheck () {
-    const base = new URL(this.cfg.url).origin
+    for (const lane of this.cfg.fastModel ? ['main', 'fast'] : ['main']) await this.checkLane(lane)
+  }
+
+  async checkLane (lane) {
+    const { provider, url, model } = this.target(lane)
+    const what = lane === 'fast' ? 'chat model' : 'model'
+    if (provider === 'openai') {
+      this.log.info(`Using an OpenAI-compatible API at ${new URL(url).origin}, ${what} ${model}`)
+      return
+    }
+    const base = new URL(url).origin
     try {
       const res = await fetch(`${base}/api/tags`, { signal: AbortSignal.timeout(5000) })
       const data = await res.json()
       const models = (data.models || []).map((m) => m.name)
-      const wanted = this.cfg.model.includes(':') ? this.cfg.model : `${this.cfg.model}:latest`
-      if (!models.includes(wanted) && !models.includes(this.cfg.model)) {
-        this.log.warn(`Model "${this.cfg.model}" is not pulled in Ollama. Run: ollama pull ${this.cfg.model}  (available: ${models.join(', ') || 'none'})`)
+      const wanted = model.includes(':') ? model : `${model}:latest`
+      if (!models.includes(wanted) && !models.includes(model) && !/-cloud$|:cloud$/.test(model)) {
+        this.log.warn(`Model "${model}" is not pulled in Ollama. Run: ollama pull ${model}  (available: ${models.join(', ') || 'none'})`)
       } else {
-        this.log.info(`Ollama OK at ${base}, model ${this.cfg.model}`)
+        this.log.info(`Ollama OK at ${base}, ${what} ${model}`)
       }
     } catch (err) {
       this.log.warn(`Ollama health check failed (${err.message}). The bot will keep retrying.`)
@@ -1056,6 +1145,7 @@ function mindBlock (agent) {
   const intel = agent.intelligence
   const lines = [`## How you think\nSkill: ${intel.label}. ${intel.mindset()}`]
   if (intel.cfg.learn && intel.baseIndex < 7) lines.push('You get better with experience; "What you\'ve learned" is knowledge you picked up yourself.')
+  if (agent.reflexes && agent.config.reflexes.enabled) lines.push(agent.reflexes.summary())
   if (m.thinkLike) lines.push(`Think and play like ${m.thinkLike}.`)
   const styles = {
     survivalist: 'You focus on staying alive and self-sufficient: food, shelter, safety first.',
@@ -1122,6 +1212,10 @@ function briefStatus (state) {
     `Health ${s.health}/20, food ${s.food}/20. Holding ${state.equipment.hand || 'nothing'}. Doing: ${state.status.currentAction || 'nothing'}. ` +
     `Goal: ${state.status.goal || 'none'}.${state.status.task ? ` Doing for ${state.status.task.for}: ${state.status.task.what}${state.status.task.progress ? ` (${state.status.task.progress})` : ''}.` : ''} Inventory: ${inv}. Nearby: ${near}.`
 }
+
+/** "sorry", "stop", "truce", "i give up"... — someone asking to end a fight. */
+const TRUCE = /\b(sorry|sry|my bad|truce|peace|stop|i give up|i surrender|gg|chill|calm down|ok ok|didn'?t mean|mb|im done|i'?m done|enough)\b/i
+const clamp01 = (x) => Math.max(0, Math.min(1, x))
 
 // ===========================================================================
 // ChatManager — the single gate every outgoing message passes through
@@ -1358,6 +1452,9 @@ class ChatResponder {
         return
       }
     }
+
+    // Someone we're fighting asks to stop: decide right now, not after a slow LLM round trip.
+    this.agent.brain?.considerTruce(username, message)
 
     // Players can teach it things ("you need an iron pickaxe for diamonds").
     if (!this.agent.social.isHostile(username)) this.agent.learnFacts(message, username, 0.35)
@@ -1751,6 +1848,10 @@ const SETTABLE = {
   'chat.reactionsInRespondMode': BOOL,
   'chat.goalChangeInterrupts': BOOL,
   'reactions.enabled': BOOL,
+  'reflexes.enabled': BOOL,
+  'reflexes.falls': BOOL,
+  'reflexes.hitReactions': BOOL,
+  'reflexes.truce': BOOL,
   'reactions.gestures': BOOL,
   'obedience.levels.owner': num(0, 1),
   'obedience.levels.admin': num(0, 1),
@@ -2069,15 +2170,21 @@ class EventReactor {
     if (attacker) {
       agent.lastAttacker = { name: attacker.username, id: attacker.id, at: Date.now() }
       social.onHurtBy(attacker, { botHealthBefore: before })
+      // One punch is a flinch; a weapon, repeated hits or a known enemy is a real attack.
+      const serious = social.isHostile(attacker.username) || social.t(attacker.username).hits.length >= 2 || Boolean(attacker.heldItem && WEAPON.test(attacker.heldItem.name))
+      agent.reflexes?.onHurt({ attacker, serious })
     } else {
       const mob = source || Object.values(bot.entities)
         .filter((e) => e !== bot.entity && e.kind === 'Hostile mobs' && e.position.distanceTo(bot.entity.position) < 6)
         .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0]
       if (mob) {
         emotions.stimulate({ fear: 0.1, anger: 0.05 }, `a ${mob.name} is attacking you`)
+        agent.reflexes?.onHurt({ attacker: mob, serious: true })
       } else if (agent.recentFallSpeed < -0.6) {
         // Fell while moving: probably bad parkour. Enough of these and parkour gets switched off for a while.
         if (learning.movement.recordFall()) agent.memory.addEvent('learning', 'You keep hurting yourself jumping around, so you stop doing risky parkour jumps for a while.')
+      } else if (!combat.isOnFire(bot.entity) && !bot.entity.isInLava && bot.oxygenLevel > 0 && bot.food > 0) {
+        agent.reflexes?.onHurt({ attacker: null, serious: false }) // hit by something we can't see
       }
       this.trigger('hurt', { attacker: mob ? mob.name : 'something', health: Math.round(bot.health) })
     }
@@ -2140,6 +2247,8 @@ class EventReactor {
       case 'lostFight': return `You had to back off from a fight with ${d.label}.`
       case 'taskDone': return `You finished what ${d.player} asked: ${d.task}.`
       case 'buildDone': return `You finished building ${d.name}.`
+      case 'clutch': return `You fell ${d.height} blocks and ${d.what}.`
+      case 'truce': return `${d.player} asked you to stop fighting, and you agreed.`
       case 'taskPartial': return `You only partly did what ${d.player} asked (${d.task}): ${d.done} of ${d.count}${d.reason ? ` — ${d.reason}` : ''}.`
       case 'taskAbandoned': return `You gave up on what ${d.player} asked (${d.task})${d.reason ? ` — ${d.reason}` : ''}.`
       default: return `${type} happened.`
@@ -2274,6 +2383,8 @@ class Brain {
     this.backoff = agent.config.loop.errorBackoffMs
     this.reflexCooldowns = new Map()
     this.wakeFn = null
+    this.interruptFn = null // set while waiting on the LLM: a reflex can cut the wait short
+    this.truces = new Map() // player -> when we agreed to stop fighting
   }
 
   start () {
@@ -2322,6 +2433,43 @@ class Brain {
       // Only interrupt if a reflex would actually do something about it.
       if (this.reflex(true)) executor.abort('took damage')
     }
+    // Waiting on the LLM? Don't: act on instinct now and forget that decision.
+    if (this.interruptFn) {
+      const now = this.reflex()
+      if (now) this.interruptFn(now)
+    }
+  }
+
+  /**
+   * A player we're fighting (or who just hit us) asks to stop. Decided on the spot from how we
+   * feel about them; the reply comes from the normal chat flow, which sees the truce in memory.
+   */
+  considerTruce (name, text) {
+    const agent = this.agent
+    const { bot, executor, social, personality, config } = agent
+    if (!config.reflexes.truce || !TRUCE.test(text)) return false
+    const cur = executor.current
+    const fighting = cur?.name === 'attackTarget' && bot.entities[cur.args?.entityId]?.username === name
+    const hitUs = agent.lastAttacker?.name === name && Date.now() - agent.lastAttacker.at < 20000
+    if (!fighting && !hitUs) return false
+    const p = social.profile(name)
+    const t = social.t(name)
+    const brokeOne = this.truces.has(name) && t.hits.some((h) => h.at > this.truces.get(name))
+    let chance = 0.35 + (personality.forgiveness ?? 0.5) * 0.4 + (p.affinity - 50) / 100 + (p.trust - 50) / 200
+    chance -= Math.min(0.3, t.hits.length * 0.04) // a real beating is harder to let go
+    if (brokeOne) chance -= 0.5 // fool me once
+    if (social.isAttackingNow(name, 1500)) chance -= 0.3 // says sorry while still swinging
+    if (Math.random() > clamp01(chance)) {
+      agent.memory.addEvent('truce', `${name} asked you to stop fighting, but you don't believe them.`)
+      return false
+    }
+    this.truces.set(name, Date.now())
+    this.reflexCooldowns.set(`pvp:${name}`, Date.now() + 60000)
+    social.profile(name).hostileUntil = 0
+    if (fighting) executor.abort(`truce with ${name}`)
+    agent.reactor.trigger('truce', { player: name })
+    agent.log.info(`Truce with ${name}.`)
+    return true
   }
 
   async loop () {
@@ -2331,6 +2479,7 @@ class Brain {
       try {
         const agent = this.agent
         if (this.paused || !agent.bot?.entity || agent.dead || agent.bot.isSleeping) { await this.idle(1000); continue }
+        if (agent.reflexes?.busy) { await this.idle(100); continue } // the body is busy saving itself
 
         let decision = this.forced.shift() || this.reflex() || agent.tasks.nextForcedAction()
         if (!decision) {
@@ -2343,6 +2492,7 @@ class Brain {
           decision = await this.thinkWhileBusy()
         }
 
+        while (agent.reflexes?.busy && this.running) await this.idle(100) // a save in progress finishes first
         const { name, args } = decision.action
         log.info(`▶ ${name}(${JSON.stringify(args)})${decision.source !== 'llm' ? ` [${decision.source}]` : ''}`)
         const result = await agent.executor.execute(name, args)
@@ -2373,9 +2523,13 @@ class Brain {
     const agent = this.agent
     const busy = agent.config.busyWork.enabled ? this.pickBusyWork() : null
     const work = busy ? agent.executor.execute(busy.name, busy.args) : null
+    const deciding = this.decide()
+    deciding.catch(() => {}) // if a reflex wins the race, nobody waits for this any more
+    const interrupted = new Promise((resolve) => { this.interruptFn = resolve })
     try {
-      return await this.decide()
+      return await Promise.race([deciding, interrupted])
     } finally {
+      this.interruptFn = null
       if (work) {
         agent.executor.abort('done thinking', { quiet: true })
         const r = await work.catch(() => null)
@@ -2496,7 +2650,9 @@ class Brain {
     if (la && Date.now() - la.at < 4000) {
       const attacker = bot.entities[la.id]
       const serious = social.isHostile(la.name) || social.t(la.name).hits.length >= 2
-      if (attacker?.isValid && attacker.position.distanceTo(me) < 8 && serious && ready(`pvp:${la.name}`, 4000)) {
+      const truce = this.truces.get(la.name)
+      const peace = truce && !social.t(la.name).hits.some((h) => h.at > truce) // we made peace and they kept it
+      if (!peace && attacker?.isValid && attacker.position.distanceTo(me) < 8 && serious && ready(`pvp:${la.name}`, 4000)) {
         if (this.fightOrFlight(attacker) === 'fight') {
           return make(`pvp:${la.name}`, `${la.name} keeps attacking me — fighting back.`, 'angry', { name: 'attackTarget', args: { entityId: attacker.id, maxSeconds: 30 } })
         }
@@ -2627,6 +2783,7 @@ class Agent {
       : saved.chests
     this.containers = new ContainerIntel(this, legacy)
     this.knownFacts = new Set(saved.knownFacts || []) // facts above its level it has learned
+    this.reflexes = new Reflexes(this, saved.reflexes)
     this.learnedItems = new Set(saved.learnedItems || []) // recipes it worked out itself
     this.builder = { current: saved.building?.current || null, history: saved.building?.history || [], owner: config.server.username }
     if (saved.obeyPlayers) this.config.obedience.players = { ...saved.obeyPlayers, ...this.config.obedience.players }
@@ -2655,6 +2812,7 @@ class Agent {
    */
   learnFacts (text, from, chance = 0.4) {
     if (!this.config.intelligence.learn) return
+    this.reflexes?.learnFromText(text, from)
     for (const f of knowledge.learnFrom(text, this.knowledgeOpts(), chance)) {
       this.knownFacts.add(f.keys)
       this.intelligence.addXp('knowledge', 2)
@@ -2833,13 +2991,8 @@ class Agent {
     bot.on('physicsTick', () => {
       const vy = bot.entity?.velocity?.y ?? 0
       this.recentFallSpeed = Math.min(vy, this.recentFallSpeed * 0.9)
-      // Water-bucket clutch when falling hard toward the ground (a skill not everyone has).
-      if (vy < -0.75 && !this.clutching && this.intelligence.can('waterClutch', 'survival') && Date.now() - (this.lastClutchAt || 0) > 3000) {
-        this.clutching = true
-        combat.fallClutch(bot).then((did) => { if (did) { this.lastClutchAt = Date.now(); this.log.info('Water-bucket clutch!') } })
-          .catch(() => {}).finally(() => { this.clutching = false })
-      }
     })
+    this.reflexes.attach(bot) // falls, lava, drowning, flinching: every tick, no LLM
     bot.on('chat', (username, message) => this.responder.onMessage(username, message))
     bot.on('whisper', (username, message) => this.responder.onMessage(username, message, { whisper: true }))
     bot.on('kicked', (reason) => {
@@ -3002,6 +3155,7 @@ class Agent {
       const id = bot.registry.blocksByName[name]?.id
       if (id !== undefined) movements.blocksCantBreak.add(id)
     }
+    avoidHazards(movements, bot.registry) // tripwires, magma, berry bushes, powder snow, campfires...
     this.learning.movement.attach(movements) // steer around places where we died or got stuck
     bot.pathfinder.setMovements(movements)
     bot.pathfinder.thinkTimeout = pf.thinkTimeoutMs

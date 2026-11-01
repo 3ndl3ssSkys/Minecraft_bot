@@ -686,26 +686,6 @@ async function douse (bot, bucket) {
   }
 }
 
-/**
- * Water-bucket clutch: called from a physics tick monitor. When falling fast
- * toward the ground with a water bucket, place water just before impact.
- */
-async function fallClutch (bot) {
-  const v = bot.entity?.velocity?.y ?? 0
-  if (v > -0.75 || bot.entity.isInWater) return false
-  const bucket = bot.inventory.items().find((i) => i.name === 'water_bucket')
-  if (!bucket) return false
-  const pos = bot.entity.position
-  let ground = null
-  for (let dy = 1; dy <= 6; dy++) {
-    const b = bot.blockAt(pos.offset(0, -dy, 0))
-    if (b && b.boundingBox === 'block') { ground = dy; break }
-    if (b && /water|slime_block|hay_block|cobweb/.test(b.name)) return false // soft landing anyway
-  }
-  if (!ground || ground > 3) return false
-  return douse(bot, bucket)
-}
-
 /** Ender pearl away from a threat to a spot with solid ground. */
 async function pearlEscape (ctx, from) {
   const { bot } = ctx
@@ -765,5 +745,5 @@ function describeKit (bot) {
 
 module.exports = {
   fight, readKit, describeKit, availableStyles, attackCooldown, potionType, hasEffect, isBlocking, solveAim,
-  throwItem, consume, douse, fallClutch, pearlEscape, hold, PROJECTILES, UNDEAD, MOB_TACTICS, ActionError
+  throwItem, consume, douse, pearlEscape, hold, isOnFire, PROJECTILES, UNDEAD, MOB_TACTICS, ActionError
 }

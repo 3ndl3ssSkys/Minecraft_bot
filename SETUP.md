@@ -122,6 +122,15 @@ ollama -v
 ollama pull qwen2.5:7b
 ```
 
+That's the safe default. For **faster** decisions and chat, try a smaller main model plus a tiny chat model (README → "Which model, and making it fast"):
+```bash
+ollama pull qwen3:4b
+```
+```bash
+ollama pull qwen3:1.7b
+```
+and in `config.json`: `"llm": { "model": "qwen3:4b", "fastModel": "qwen3:1.7b", "think": false }`. `npm run doctor` (step 9) tells you which is quicker on your card.
+
 **Recommended for 6 GB cards:** these settings make the model's working memory smaller and keep it loaded.
 
 | Variable | Value | Why |
@@ -129,12 +138,13 @@ ollama pull qwen2.5:7b
 | `OLLAMA_FLASH_ATTENTION` | `1` | |
 | `OLLAMA_KV_CACHE_TYPE` | `q8_0` | about halves the memory the conversation context takes |
 | `OLLAMA_KEEP_ALIVE` | `24h` | no reload delay between calls |
+| `OLLAMA_MAX_LOADED_MODELS` | `2` | only needed with a `fastModel`: keeps both models loaded |
 
 - **Windows:** Start → "Edit environment variables for your account" → New, for each one. Then quit Ollama from the tray and start it again.
 - **Linux:** run `sudo systemctl edit ollama`, add the following, then `sudo systemctl restart ollama`:
   ```
   [Service]
-  Environment="OLLAMA_FLASH_ATTENTION=1" "OLLAMA_KV_CACHE_TYPE=q8_0" "OLLAMA_KEEP_ALIVE=24h"
+  Environment="OLLAMA_FLASH_ATTENTION=1" "OLLAMA_KV_CACHE_TYPE=q8_0" "OLLAMA_KEEP_ALIVE=24h" "OLLAMA_MAX_LOADED_MODELS=2"
   ```
 
 ---
@@ -266,9 +276,15 @@ Owners can use every `!command` and their requests get the owner obedience level
 ### The AI
 
 ```json
-"llm": { "model": "qwen2.5:7b", "numCtx": 8192 }
+"llm": { "model": "qwen2.5:7b", "numCtx": 8192, "fastModel": "", "think": null }
 ```
-Use `qwen2.5:3b` if it's slow. Lower `numCtx` to `6144` if the doctor says the model doesn't fit on the GPU.
+- **Too slow:** use `qwen2.5:3b`, or the two-model setup from step 4.
+- **Doesn't fit on the GPU** (the doctor says so): lower `numCtx` to `6144`.
+- **A hosted API** instead of Ollama, or just for chat: `provider`, `url` and `apiKey` (or `fastProvider`, `fastUrl` and `fastApiKey` for the chat lane only). See README → "Which model, and making it fast".
+
+### Reflexes
+
+Falls, lava, drowning and being hit are handled instantly in code, at the bot's skill level, so they need no setup. `"reflexes": { "enabled": false }` switches them off (also `falls`, `hazards`, `hitReactions` and `truce` one by one, or `!set reflexes.falls false` in game). Give the bot a water bucket, some blocks and a few pearls, and it will use them to save itself as well as its level allows.
 
 ### How good a player it is
 

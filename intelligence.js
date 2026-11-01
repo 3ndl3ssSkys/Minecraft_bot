@@ -19,7 +19,8 @@
  *
  * Skill is tracked per domain (combat, building, survival, knowledge,
  * senses). With learning on, experience raises a domain's effective level
- * along the same diminishing curve: a beginner can grow into a solid player,
+ * along the same diminishing curve: a beginner starts from nothing but keeps
+ * learning for a long time (with enough practice it can end up past a master),
  * a master barely improves, impossible can't.
  *
  * Abilities unlock at levels (a beginner doesn't know about w-tapping), and
@@ -80,13 +81,14 @@ class Intelligence {
   maxGain () {
     if (!this.cfg.learn) return 0
     if (Number.isFinite(this.cfg.maxLearnedLevels)) return this.cfg.maxLearnedLevels
-    // Beginners can learn a lot; masters barely improve; impossible is already at the top.
-    return [4, 3, 2.5, 2, 1.5, 1, 0.5, 0][this.baseIndex]
+    // Beginners can learn everything (slowly); masters barely improve; impossible is already at the top.
+    return [7, 3, 2.5, 2, 1.5, 1, 0.5, 0][this.baseIndex]
   }
 
   /** Effective (fractional) level for a domain, including what it has learned. */
   level (domain = 'combat') {
-    const gain = this.maxGain() * (1 - Math.exp(-(this.xp[domain] || 0) / 40))
+    const scale = this.baseIndex === 0 ? 120 : 40 // a beginner's long road: ~2 levels by 40 xp, past master by ~300
+    const gain = this.maxGain() * (1 - Math.exp(-(this.xp[domain] || 0) / scale))
     return Math.min(7, this.baseIndex + gain)
   }
 

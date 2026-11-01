@@ -15,7 +15,7 @@
 const fs = require('fs')
 const path = require('path')
 const mc = require('minecraft-protocol')
-const { loadConfig, loginFor, fallbackServer, serverMods } = require('./index.js')
+const { loadConfig, loginFor, fallbackServer, serverMods, OllamaClient } = require('./index.js')
 const knowledge = require('./knowledge')
 
 const ok = (m) => console.log(`  \x1b[32m✓\x1b[0m ${m}`)
@@ -55,24 +55,12 @@ async function main () {
     process.exit(1)
   }
 
-  // --- Ollama
+  // --- LLM
   console.log('\nOllama / LLM')
-  const base = new URL(config.llm.url).origin
-  let models = []
-  try {
-    const res = await fetch(`${base}/api/tags`, { signal: AbortSignal.timeout(5000) })
-    models = ((await res.json()).models || []).map((m) => m.name)
-    ok(`Ollama is running at ${base}`)
-  } catch {
-    bad(`Can't reach Ollama at ${base}. Install it from https://ollama.com and make sure it's running.`)
-  }
-  const wanted = config.llm.model.includes(':') ? config.llm.model : `${config.llm.model}:latest`
-  if (models.length && !models.includes(wanted) && !models.includes(config.llm.model)) {
-    bad(`Model "${config.llm.model}" isn't downloaded. Run: ollama pull ${config.llm.model}`)
-  } else if (models.length) {
-    ok(`model ${config.llm.model} is downloaded`)
-    await benchmark(config, base)
-  }
+  const fastOnOllama = (config.llm.fastProvider || config.llm.provider) !== 'openai' && !config.llm.fastUrl
+  if (config.llm.provider === 'openai') await timeRequest(config, 'decision-sized', 'main')
+  else await checkOllama(config, fastOnOllama)
+  if (config.llm.fastModel && !(config.llm.provider !== 'openai' && fastOnOllama)) await timeRequest(config, 'chat reply', 'fast')
 
   // --- Minecraft server
   console.log('\nMinecraft server')
@@ -112,6 +100,56 @@ async function main () {
   process.exit(0)
 }
 
+/** One real request through the bot's own client: how long a decision or a reply takes. */
+async function timeRequest (config, what, lane) {
+  const client = new OllamaClient(config, quiet)
+  const model = lane === 'fast' ? config.llm.fastModel : config.llm.model
+  const big = lane === 'main' ? knowledge.FACTS.map((f) => f[1]).join('\n').slice(0, 9000) : ''
+  const messages = [
+    { role: 'system', content: `You are a Minecraft player in game chat. ${big}\nReply with ONLY JSON: {"message": "..."}` },
+    { role: 'user', content: 'Steve: hey, got any spare iron?' }
+  ]
+  const priority = lane === 'fast' ? 0 : 2
+  try {
+    let t = Date.now()
+    await client.chat(messages, { schema: { type: 'object', properties: { message: { type: 'string' } }, required: ['message'] }, priority, label: 'doctor' })
+    const first = Date.now() - t
+    t = Date.now()
+    const out = await client.chat(messages, { schema: { type: 'object', properties: { message: { type: 'string' } }, required: ['message'] }, priority, label: 'doctor' })
+    const second = Date.now() - t
+    const msg = `${what} with ${model}: ${(second / 1000).toFixed(1)}s (first call ${(first / 1000).toFixed(1)}s) — "${String(out.message || '').slice(0, 50)}"`
+    if (second <= (lane === 'fast' ? 2500 : 8000)) ok(msg)
+    else warn(`${msg} — slow; a smaller model or llm.think: false helps`)
+  } catch (err) {
+    bad(`${what} with ${model} failed: ${err.message}`)
+  }
+}
+
+async function checkOllama (config, withFast) {
+  const base = new URL(config.llm.url).origin
+  let models = []
+  try {
+    const res = await fetch(`${base}/api/tags`, { signal: AbortSignal.timeout(5000) })
+    models = ((await res.json()).models || []).map((m) => m.name)
+    ok(`Ollama is running at ${base}`)
+  } catch {
+    bad(`Can't reach Ollama at ${base}. Install it from https://ollama.com and make sure it's running.`)
+  }
+  const wanted = config.llm.model.includes(':') ? config.llm.model : `${config.llm.model}:latest`
+  if (models.length && !models.includes(wanted) && !models.includes(config.llm.model) && !/cloud$/.test(config.llm.model)) {
+    bad(`Model "${config.llm.model}" isn't downloaded. Run: ollama pull ${config.llm.model}`)
+  } else if (models.length) {
+    ok(`model ${config.llm.model} is downloaded`)
+    await benchmark(config, base)
+  }
+  const fast = config.llm.fastModel
+  if (fast && withFast && models.length) {
+    const fastWanted = fast.includes(':') ? fast : `${fast}:latest`
+    if (!models.includes(fastWanted) && !models.includes(fast) && !/cloud$/.test(fast)) bad(`Fast model "${fast}" isn't downloaded. Run: ollama pull ${fast}`)
+    else await timeRequest(config, 'chat reply', 'fast')
+  }
+}
+
 /** One decision-sized request: how fast is it on this machine, and does it fit in VRAM? */
 async function benchmark (config, base) {
   // Roughly the size of a real decision prompt (~4-5k tokens).
@@ -123,7 +161,7 @@ async function benchmark (config, base) {
     const res = await fetch(config.llm.url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: config.llm.model, stream: false, format: 'json', keep_alive: config.llm.keepAlive, options: { num_ctx: config.llm.numCtx, num_predict: 120 }, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
+      body: JSON.stringify({ model: config.llm.model, stream: false, format: 'json', keep_alive: config.llm.keepAlive, ...(typeof config.llm.think === 'boolean' ? { think: config.llm.think } : {}), options: { num_ctx: config.llm.numCtx, num_predict: 120 }, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
       signal: AbortSignal.timeout(180000)
     })
     const d = await res.json()

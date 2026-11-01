@@ -3,7 +3,8 @@
  * Live scenario checks against a test server (drives the real Agent by hand).
  *
  *   node test/tools/harness.js <scenario> <config.json>
- *   scenarios: typing | sight | hearing | nametags
+ *   scenarios: typing | sight | hearing | nametags | fall | startle
+ *   (fall: LEVEL=mediocre|complicated|... picks the intelligence level)
  *
  * Setup: start test/tools/test-server.js, then this harness, then
  * test/tools/test-player.js a few seconds later (flying-squid only shows
@@ -116,6 +117,63 @@ const scenarios = {
     bot._client.emit('entity_metadata', { entityId: t.id, metadata: [{ key: 0, type: 0, value: 0x20 }] }) // vanilla "invisible" flag
     agent.senses.lastSeen.clear()
     showPlayers('invisible')
+  },
+
+  // Teleported 25 blocks up with slime blocks and cobblestone: does it see the fall coming and catch it?
+  async fall (bot) {
+    agent.config.intelligence.level = process.env.LEVEL || 'mediocre'
+    quiet.debug = (m) => { if (/^(fall|reflex)/.test(m)) console.log('  ', m) }
+    bot.chat(`/give ${bot.username} slime_block 4`)
+    bot.chat(`/give ${bot.username} cobblestone 16`)
+    await wait(2000)
+    const p = bot.entity.position.floored()
+    const ground = p.y - 1
+    const before = bot.health
+    bot.chat(`/tp ${bot.username} ${p.x + 0.5} ${p.y + 25} ${p.z + 0.5}`)
+    let top = 0
+    const t0 = Date.now()
+    while (Date.now() - t0 < 8000) {
+      await wait(50)
+      top = Math.max(top, bot.entity.position.y)
+      if (top > p.y + 20 && bot.entity.onGround && !agent.reflexes.busy) break
+    }
+    for (let still = 0; still < 20 && Date.now() - t0 < 15000;) { await wait(100); still = bot.entity.onGround && Math.abs(bot.entity.velocity.y) < 0.1 ? still + 1 : 0 } // slime bounces
+    const under = bot.blockAt(bot.entity.position.offset(0, -0.5, 0))
+    const placed = bot.blockAt(new Vec3(p.x, ground + 1, p.z))
+    console.log(`fell from y=${top.toFixed(1)}, settled at y=${bot.entity.position.y.toFixed(1)} on ${under?.name} (block at the landing spot: ${placed?.name}), health ${before} → ${bot.health}`)
+    console.log('practice:', JSON.stringify(agent.reflexes.practice))
+    console.log('memory:', agent.memory.events.slice(-2).map((e) => e.text).join(' | '))
+  },
+
+  // A punch from behind: does it flinch and turn toward the Tester? A real attack: weapon out?
+  async startle (bot) {
+    const t = await waitForTester(bot)
+    bot.chat(`/give ${bot.username} iron_sword 1`)
+    await wait(1500)
+    const angleToTester = () => {
+      const d = t.position.minus(bot.entity.position)
+      const want = Math.atan2(-d.x, -d.z)
+      let diff = Math.abs(((bot.entity.yaw - want) % (2 * Math.PI) + 3 * Math.PI) % (2 * Math.PI) - Math.PI)
+      return Math.round(diff * 180 / Math.PI)
+    }
+    for (const level of ['beginning', 'advanced', 'impossible']) {
+      agent.config.intelligence.level = level
+      const d = t.position.minus(bot.entity.position)
+      await bot.look(Math.atan2(d.x, d.z), 0, true) // facing away from the Tester
+      await wait(300)
+      // A vanilla hit: knockback away from the attacker, then the hurt event.
+      bot.entity.velocity = new Vec3(-d.x, 0, -d.z).normalize().scaled(0.4).offset(0, 0.36, 0)
+      const t0 = Date.now()
+      agent.reflexes.cooldowns.clear()
+      agent.reflexes.onHurt({ attacker: t, serious: false })
+      const samples = []
+      for (let i = 0; i < 8; i++) { await wait(200); samples.push(`${((Date.now() - t0) / 1000).toFixed(1)}s:${angleToTester()}°`) }
+      console.log(`${level.padEnd(10)} angle to the Tester after a punch:`, samples.join(' '))
+    }
+    agent.config.intelligence.level = 'advanced'
+    agent.reflexes.onHurt({ attacker: t, serious: true })
+    await wait(1500)
+    console.log('serious attack → holding', bot.heldItem?.name || 'nothing')
   }
 }
 
@@ -125,7 +183,7 @@ agent.connect().then(() => agent.bot.once('spawn', async () => {
   agent.brain.paused = true
   agent.executor.abort('harness')
   while (agent.executor.busy) await wait(100) // let the brain's last action wind down
-  if (!scenarios[which]) { console.log(`unknown scenario "${which}" (typing | sight | hearing | nametags)`); process.exit(1) }
+  if (!scenarios[which]) { console.log(`unknown scenario "${which}" (${Object.keys(scenarios).join(' | ')})`); process.exit(1) }
   console.log(`--- scenario: ${which}`)
   await scenarios[which](bot)
   process.exit(0)

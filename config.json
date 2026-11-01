@@ -21,11 +21,19 @@
     "maxReconnectDelayMs": 120000
   },
   "llm": {
+    "provider": "ollama",
     "url": "http://localhost:11434/api/chat",
+    "apiKey": "",
     "model": "qwen2.5:7b",
+    "fastModel": "",
+    "fastProvider": "",
+    "fastUrl": "",
+    "fastApiKey": "",
+    "think": null,
+    "maxTokens": 400,
     "temperature": 0.7,
     "numCtx": 8192,
-    "keepAlive": "15m",
+    "keepAlive": "24h",
     "timeoutMs": 90000,
     "maxRetries": 2,
     "useJsonSchema": true
@@ -55,6 +63,15 @@
     "particleRange": 10,
     "suspicionThreshold": 1,
     "investigate": true
+  },
+  "reflexes": {
+    "enabled": true,
+    "falls": true,
+    "hazards": true,
+    "hitReactions": true,
+    "reactionMs": null,
+    "learnSaves": true,
+    "truce": true
   },
   "chat": {
     "mode": "both",
@@ -118,7 +135,9 @@
       "taskDone": { "enabled": true, "chance": 1, "cooldownSec": 0, "style": "llm", "templates": ["there you go {player}", "done!"] },
       "taskPartial": { "enabled": true, "chance": 1, "cooldownSec": 0, "style": "llm", "templates": ["that's all i got time for {player}", "got you some, not all of it"] },
       "taskAbandoned": { "enabled": true, "chance": 0.8, "cooldownSec": 0, "style": "llm", "templates": ["sorry {player}, couldn't do it", "gonna pass on that one after all"] },
-      "buildDone": { "enabled": true, "chance": 1, "cooldownSec": 0, "style": "llm", "templates": ["finally finished my {name}", "done building!"] }
+      "buildDone": { "enabled": true, "chance": 1, "cooldownSec": 0, "style": "llm", "templates": ["finally finished my {name}", "done building!"] },
+      "clutch": { "enabled": true, "chance": 0.6, "cooldownSec": 60, "style": "template", "templates": ["that was close", "clutch", "phew", "not today"] },
+      "truce": { "enabled": true, "chance": 1, "cooldownSec": 10, "perTarget": true, "style": "llm", "templates": ["fine. truce", "ok ok, we good"] }
     }
   },
   "behavior": {

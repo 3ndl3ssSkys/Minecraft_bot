@@ -13,7 +13,7 @@ These tools are for **live** checks against a local test server.
 | `mock-ollama.js` | A stand-in for Ollama. It replays decisions from a JSON script, gives canned chat answers, returns realistic timing fields, and logs every prompt to `mock-ollama.log`. |
 | `test-server.js` | A throwaway local server (flying-squid): superflat world, everyone is op. |
 | `test-player.js` | A second player, "Tester", with modes `idle`, `sneak`, `dig` and `chat`. |
-| `harness.js` | Drives the real Agent through the scenarios `typing`, `sight`, `hearing` and `nametags`. |
+| `harness.js` | Drives the real Agent through the scenarios `typing`, `sight`, `hearing`, `nametags`, `fall` (`LEVEL=mediocre` etc.) and `startle`. |
 
 ## Running a scenario
 
@@ -60,6 +60,8 @@ Here `my-script.json` is a list of actions like `[{ "name": "mineBlock", "args":
 | sight | Seen in the open → "last seen" right after the wall goes up → not perceived after 20 s. |
 | hearing | After the Tester is forgotten, a chest opening behind the wall → suspicion "high" and an investigation at that spot. If the Tester was just seen going behind the wall, it stays low (known players damp suspicion). |
 | nametags | Identified in the open → "name tag through wall" while standing → "last seen" then gone when sneaking → not perceived when invisible. |
+| fall | Teleported 25 blocks up with slime blocks: Mediocre places a slime block on the landing spot and bounces (no damage); Beginner just falls. flying-squid deals no fall damage, so health always stays 20. |
+| startle | Punched from behind: Beginner turns roughly toward the Tester (~70° off) and looks around; Advanced and Impossible face the Tester within 0.2 s. A serious hit puts the sword in hand. |
 
 ## flying-squid quirks (what it can't test)
 

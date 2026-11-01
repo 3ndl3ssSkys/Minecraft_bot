@@ -28,15 +28,19 @@ Plain Node.js (CommonJS, Node ≥ 22), Mineflayer 4.39 + mineflayer-pathfinder 2
 
 ```
 Perception (2s tick) → state JSON + feelings + relationships + lessons + know-how
-   → Ollama /api/chat (JSON schema) → {thought, emotion, goal, action, taskUpdate}
+   → LLM (Ollama /api/chat or OpenAI-compatible, JSON schema) → {thought, emotion, goal, action, taskUpdate}
    → ActionExecutor runs ONE action (timeouts, AbortSignal, pause-for-typing)
    → result into Memory → next prompt
+
+Reflexes (every physics tick, 20/s, no LLM): falls, lava, drowning, hits → take the body
+   (abort the action, Brain waits on reflexes.busy) → memory event afterwards
 ```
 
 | File | Owns |
 | --- | --- |
-| `index.js` (~3000 lines) | `DEFAULT_CONFIG` (the source of truth for every option), `loadConfig` (+ `--server` profiles, env overrides, compatibility), `Memory`, `Perception`, `OllamaClient` (one request at a time, priority queue: reply 0, reaction 1, decision 2, smalltalk 3, reflect 4), prompt builders (`personaBlock`, `mindBlock`, `buildDecisionPrompt`, `HUMAN_VOICE`), schemas, `ChatManager` (rate limits, danger shortening, robot-speak guard, stop-to-type), `ChatResponder` (analysis → appraisal → phrasing; !commands; postponing in danger), `SETTABLE` + `parseSetting` (in-game settings), `SmallTalk`, `EventReactor` (all game events → memory, social, emotions, reactions), `Brain` (loop, reflexes, busy work while thinking, XP), `Agent` (wiring, connection, server helpers, kick handling, saving), `parsePluginChat`. |
+| `index.js` (~3000 lines) | `DEFAULT_CONFIG` (the source of truth for every option), `loadConfig` (+ `--server` profiles, env overrides, compatibility), `Memory`, `Perception`, `OllamaClient` (Ollama or OpenAI-compatible; two lanes when `llm.fastModel` is set — chat (reply 0, reaction 1, smalltalk 3) on the fast model, decisions 2 and reflect 4 on the main one; each lane one request at a time, priority-sorted; the fast lane can use another provider), prompt builders (`personaBlock`, `mindBlock`, `buildDecisionPrompt`, `HUMAN_VOICE`), schemas, `ChatManager` (rate limits, danger shortening, robot-speak guard, stop-to-type), `ChatResponder` (analysis → appraisal → phrasing; !commands; postponing in danger), `SETTABLE` + `parseSetting` (in-game settings), `SmallTalk`, `EventReactor` (all game events → memory, social, emotions, reactions), `Brain` (loop, decision-level reflexes like fight/flee, busy work while thinking — the LLM wait is raced against `interruptFn` so a hit acts at once, `considerTruce`, XP), `Agent` (wiring, connection, server helpers, kick handling, saving), `parsePluginChat`. |
 | `actions.js` | `ACTIONS` registry (30 tools: move, follow, explore, mine, place, chat, equip, attack, retreat, eat, collect, craft, give, sleep, smelt, store/take, activate, fish, useItem, knowledge, readSigns, inspectContainer, parkour, planBuilding/build/cancelBuilding, emote, wait), `gotoGoal` (our own pathfinder driver), `placeAt`, `ActionExecutor` (availability filters, hard timeout, `pauseFor`, ctx with social/learning/tasks/builder/intel/containers). |
+| `reflexes.js` | The fast layer: `predictLanding` (tick simulation), `fallDamage` (Feather Falling/Protection EPF), `TRICKS` (17 saves + hazard tricks with level and `need`), `fallOptions` → expected-damage choice, executors (placeBelow, edge clutch, boat, pearl, elytra, mace, mount, wall pearl), hazards (lava, fire, drowning, suffocation, TNT), `onHurt` (startle, weapon out, edge sneak), learning saves (`discover`, `learnFromText`), `avoidHazards` for the pathfinder. |
 | `combat.js` | The fight loop: kit reading, ballistics, mace + wind charge, bows/crossbows, axe vs shield, combos, potions (undead-aware), golden apples, totems, cobweb, pearl escape, water clutch, mob tactics. Gated by `ctx.intel.combatProfile()`. |
 | `intelligence.js` | 8 levels, the concave `skillAt` curve, `UNLOCKS`, `BASE_ONLY` (mace and seeing through walls depend on the configured level, not practice), per-domain XP learning, mindset texts. |
 | `senses.js` | Line-of-sight perception (+ 20 s memory), invisibility rules, name tags (vanilla rules + teams), hearing sounds and **world events**, particles and block cracks, suspicion and investigation. |
@@ -51,7 +55,7 @@ Perception (2s tick) → state JSON + feelings + relationships + lessons + know-
 | `test/` | `npm test` unit suites; `test/tools/` live tools (mock Ollama, flying-squid server, test player, scenario harness). |
 | `scripts/` | Start scripts (Windows/Linux), systemd unit, `regen-config.js`. |
 
-**What gets saved** (`data/brain.json`, every 30 s and on shutdown): `social` (players: trust, affinity, notes, promises, stats), `emotions`, `tasks` + history, `building` (current plan + history), `obeyPlayers`, `intelligence` (xp), `chests`, `knownFacts`, `learnedItems`, `combat`, `movement` (danger zones), `lessons`, `stats`, `admins`, `settings` (in-game overrides, which win over config.json until reset).
+**What gets saved** (`data/brain.json`, every 30 s and on shutdown): `social` (players: trust, affinity, notes, promises, stats), `emotions`, `tasks` + history, `building` (current plan + history), `obeyPlayers`, `intelligence` (xp), `reflexes` (learned saves + practice), `chests`, `knownFacts`, `learnedItems`, `combat`, `movement` (danger zones), `lessons`, `stats`, `admins`, `settings` (in-game overrides, which win over config.json until reset).
 
 **Adding things:**
 - **An option:** add it to `DEFAULT_CONFIG`, then run `node scripts/regen-config.js`. To make it settable in game, add it to `SETTABLE` (types number, boolean, enum, string).
@@ -67,7 +71,9 @@ Perception (2s tick) → state JSON + feelings + relationships + lessons + know-
   The user later asked to keep admin obedience controls but give **every role/player a level**, so it's a blend: `chance = own + (1 − own) × obedience` (`!obey`). Hard limits always hold, and conscience (friends, promises) holds unless `overrideConscience` is on and the level is ≥ 0.9.
 - **Trust ≠ liking:** trust is about safety and changes with actions; liking is chemistry (LLM `likeImpact`, time together, shared tasks). Gifts barely buy liking; constant requests annoy.
 - **Tasks:** they can be done partly ("got you 4, that's all I had time for"), forgotten (salience decay; recalled when the player brings them up), deferred, or bumped by the same asker.
-- **Intelligence:** the skill curve is concave — big early gains, small later ones (0.08 → 0.41 → … → 0.97 → 1.00). **Mace only for Hardcore+, good mace only for Master/Impossible**, by configured level. A Beginner learns up to about Advanced. X-ray is opt-in and Impossible-only (counts as cheating on most servers).
+- **Intelligence:** the skill curve is concave — big early gains, small later ones (0.08 → 0.41 → … → 0.97 → 1.00). **Mace PvP only for Hardcore+, good mace only for Master/Impossible**, by configured level. A Beginner learns slowly but without a cap (`maxGain` 7, xp scale 120: ~2 levels at 40 xp, past Master around 300) — the user wants a Beginner to be able to end up better than a Master. X-ray is opt-in and Impossible-only (counts as cheating on most servers).
+- **Speed: two layers.** The user said reactions can't wait 2–4 s. Anything time-critical (falls, lava, drowning, hits) is code in `reflexes.js` with a human reaction delay from skill (≈420 → 70 ms); the LLM only plans and talks. Fall saves by level as the user listed: Advanced knows the common saves (water, blocks, pearl, elytra) but executes imperfectly; Master knows boat, ladder/vine, mace-on-mob, mounting; Impossible crouch-clutches, wall-pearls and is frame-perfect. Success = `sigmoid(14 × (skill − need))`, × 0.65 under 1.2 ticks of window and × 0.3 under 0.8 (except Impossible). A fumble is decided up front and acted out (late click). Beginners discover saves from bad falls (trick level ≤ own level + 3) or from chat.
+- **Truce:** "sorry/stop/truce" from the opponent is judged instantly in `Brain.considerTruce` (affinity, trust, forgiveness, hits, still swinging, broken truce before).
 - **Senses:**
   - Realistic by default: entities only with line of sight; blocks only once seen.
   - Invisibility works, except through armor, swirls right in front, or touching.
@@ -96,6 +102,8 @@ Perception (2s tick) → state JSON + feelings + relationships + lessons + know-
 - Mineflayer **does not surface `world_event`** (block break 2001, splash potions, spawners, anvils, global wither/dragon/end portal events). Listen on `bot._client.on('world_event')`.
 - `bot.blockAt` needs a **Vec3** (it calls `.floored()`).
 - A failed Microsoft sign-in (prismarine-auth) emits `error` but **never `end`**: no connection was opened. `Agent.connect` ends it by hand, once.
+- `bot.activateBlock()` first does `await bot.lookAt(center, false)`, which waits a physics tick unless we're already looking there: call `bot.lookAt(..., true)` right before it. `bot.activateItem()` (buckets, boats, pearls) sends the current rotation in `use_item` on 1.21.
+- Water clutch timing: the landing block's top is in reach while the feet are ≤ ~2.8 above it; a 20-block fall moves 1.6 blocks/tick, so the window is ~1.7 ticks — fine for good players. Act a tick early (the click goes out with the next move).
 - `bot.setControlState(name, value)` **asserts a boolean**: `false || undefined` crashes it.
 - `bot.look(..., false)` resolves on physics ticks, and **physics stops on death** until the server sends a position. Race it with a timeout.
 
@@ -131,6 +139,9 @@ Perception (2s tick) → state JSON + feelings + relationships + lessons + know-
   - sight occlusion, hearing → suspicion → investigation, name tags through walls / sneaking / invisible;
   - the version fallback against a fake 26.3 server;
   - the backup route: a fake online-mode server refuses the offline bot → it switches to the backup profile and spawns;
+  - fall reflexes: teleported 25 up, Mediocre places a slime block on the landing spot (Beginner doesn't); startle looks (Beginner ~70° off, Advanced/Impossible on target in 0.2 s), weapon out on a serious hit;
+  - interrupting the LLM: with a 5 s decision pending, a hit starts the escape immediately and the late answer is dropped;
+  - the LLM lanes (unit test with a stub server): a reply returns in ~100 ms while a 600 ms decision runs; OpenAI-format requests; mixed providers;
   - the doctor.
 - **Not verified yet:**
   - real Qwen output (all runs used the mock);
@@ -139,6 +150,8 @@ Perception (2s tick) → state JSON + feelings + relationships + lessons + know-
   - Realms, login plugins and Microsoft sign-in (including `auto` dropping to offline after a failed sign-in);
   - FastLogin on a real server;
   - the ViaProxy + Geyser + Floodgate Bedrock route;
+  - fall saves on a real server (flying-squid has no fall damage and no buckets/boats/pearls): water bucket, boat, pearl, elytra, ladder, mace, mount, wall pearl, edge clutch; lava/drowning escapes;
+  - real speeds of qwen3:4b + qwen3:1.7b on the 1660 Super, and hosted APIs;
   - real performance on the 1660 Super (estimated 4–8 s per decision for 7B).
 
 ## Environment notes (for Claude cloud sessions)
@@ -150,6 +163,6 @@ Perception (2s tick) → state JSON + feelings + relationships + lessons + know-
 ## Ideas not done yet
 
 - A browser viewer of what the bot sees (prismarine-viewer; it would render on the viewer's device).
-- A compact prompt mode (shorter tool docs) for small GPUs.
+- A compact prompt mode (shorter tool docs) for small GPUs — smaller prompts are the biggest remaining speed-up on the 1660 Super.
 - Testing against a real Paper server with Geyser/Floodgate/ViaVersion and real Qwen, then tuning prompts from real transcripts.
 - Smarter building materials (crafting planks from logs on its own when a build runs short).

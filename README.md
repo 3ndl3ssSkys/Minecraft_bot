@@ -152,6 +152,55 @@ The bot runs alongside Ollama on any PC that can reach the Minecraft server; it 
 - closing other GPU programs;
 - the 3B model.
 
+### Which model, and making it fast
+
+**How the speed works:**
+- **Danger never waits for the model** (see [Reflexes](#reflexes-reflexes)).
+- **While it thinks, it keeps playing** (busy work).
+- **Chat gets its own lane** with `llm.fastModel`: a small model answers chat while the big one plans, so a reply never sits behind a 4-second decision. That also keeps the big model's prompt cache warm: Ollama reuses the unchanged start of the decision prompt instead of re-reading ~3,400 tokens every time.
+- **Settings:**
+  - `llm.maxTokens` caps rambling;
+  - `llm.keepAlive: "24h"` stops reloads;
+  - `llm.think: false` turns off the slow "thinking" step of models like Qwen3.
+
+**On a GTX 1660 Super (6 GB):**
+
+| Setup | VRAM | What to expect |
+| --- | --- | --- |
+| `qwen2.5:7b` alone (the default) | ≈ 5.5 GB | Good decisions, 4–8 s each; chat replies wait when a decision is running. |
+| **`qwen3:4b` + `fastModel: "qwen3:1.7b"`, `think: false`** (recommended to try) | ≈ 4.5 GB together | Both lanes on the GPU: roughly 2–4 s decisions and about a second for chat. |
+| `qwen2.5:3b` + `fastModel: "qwen2.5:1.5b"` | ≈ 3.5 GB | The fastest; a bit simpler in its choices. |
+
+These are estimates: `npm run doctor` measures both lanes on your card. Pull the models with `ollama pull`. For two models at once, set `OLLAMA_MAX_LOADED_MODELS=2` alongside the other Ollama variables in SETUP.md step 4.
+
+**Bigger cards:**
+
+| VRAM | Main model | Chat model |
+| --- | --- | --- |
+| 8 GB (RTX 3060 Ti, 4060, 3070) | `qwen3:8b` or `qwen2.5:7b` | `qwen3:1.7b` |
+| 12 GB (RTX 3060 12 GB, 4070) | `qwen3:14b` or `gemma3:12b` | `qwen3:4b` |
+| 16 GB (RTX 4060 Ti 16 GB, 4070 Ti Super, 4080, 5070 Ti) | `gpt-oss:20b` or `qwen3:14b` | `qwen3:4b` |
+| 24 GB+ (RTX 3090, 4090, 5090) | `qwen3:30b-a3b` (fast: only 3B active), `qwen3:32b`, `gemma3:27b` | `qwen3:4b` |
+
+New open models come out all the time, so check [ollama.com/library](https://ollama.com/library) for newer ones in these sizes. Compare them with the doctor (`OLLAMA_MODEL=<name> npm run doctor`). The model has to follow a JSON format and stay in character, and the Qwen and Gemma families are good at both.
+
+**Not on your PC:**
+- **Ollama cloud models** (tags ending in `-cloud`, after `ollama signin`) work with no other change.
+- **Any OpenAI-compatible API** works with `"provider": "openai"`, the full `.../v1/chat/completions` URL, and `apiKey` (or the `LLM_API_KEY` environment variable):
+  - fast open-model hosts: Groq, Cerebras;
+  - OpenRouter (almost any model);
+  - OpenAI's small models;
+  - Anthropic's Claude Haiku 5.5 (`claude-haiku-5-5`) through its OpenAI-compatible endpoint. Its JSON mode isn't enforced there, but the bot's prompts and parser cope.
+
+  Hosted models usually answer in well under a second.
+- **Watch the bill:** decisions send ~5,000 tokens every few seconds, which is millions of tokens per hour of play. The cheap split is **decisions on your GPU, chat on a hosted model**:
+  ```json
+  "llm": { "model": "qwen3:4b", "think": false,
+           "fastModel": "<hosted model>", "fastProvider": "openai",
+           "fastUrl": "https://api.groq.com/openai/v1/chat/completions", "fastApiKey": "..." }
+  ```
+  Chat is a few hundred tokens a message.
+
 ## Minecraft 26.3 and other newer versions
 
 Mineflayer currently supports Minecraft up to **26.1**. Neither the released packages nor PrismarineJS's development branch have 26.2 or 26.3 support yet. Mineflayer refuses to connect to anything newer. The bot handles this for you:
@@ -171,12 +220,13 @@ You can also pin a version with `"server": { "version": "26.1" }`. If you're kic
 
 | File | Purpose |
 | --- | --- |
-| `index.js` | Config, perception, the Ollama client, the decision loop, chat, reactions, commands, reconnects |
+| `index.js` | Config, perception, the LLM client (Ollama or OpenAI-compatible, with a fast chat lane), the decision loop, chat, reactions, commands, reconnects |
 | `actions.js` | The tool API the LLM can call (including the PvP combat engine), plus the `ActionExecutor` |
 | `emotions.js` | The emotion engine: six core feelings with decay, temperament and behaviour modifiers |
 | `social.js` | Per-player trust and liking, intent reading, promises, body language |
 | `tasks.js` | Judging requests by task type (plus obedience levels), and running them: progress, patience, partial hand-overs, forgetting |
 | `combat.js` | The fight engine: weapons, projectiles, potions and consumables, per-mob tactics |
+| `reflexes.js` | The fast layer (every tick, no LLM): fall prediction and clutches, lava/fire/drowning/TNT escapes, flinching and drawing a weapon when hit |
 | `knowledge.js` | Minecraft know-how: facts, item descriptions, "how do I get X" from recipes/loot data |
 | `building.js` | Building designer: terrain reading, site choice, pieces, unique designs, support-aware ordering |
 | `intelligence.js` | Skill levels, the skill curve, ability unlocks, learning |
@@ -427,6 +477,54 @@ At `0` it's purely its own call. At `1` it does whatever it physically can. Hard
 | `obedience.players` | `{}` | per-player levels, e.g. `{ "steve": 0.8 }` — set with `!obey Steve 0.8` |
 | `obedience.whoCanInstruct` | `everyone` | who may ask at all; others only get favours (lower chance, no obedience) |
 | `obedience.overrideConscience` | false | let very high obedience override loyalty and promises |
+
+## Reflexes (`reflexes`)
+
+The LLM is far too slow for danger: even a fast model takes most of a second, and on a 6 GB card a decision takes seconds. So falls, lava and getting hit never go through it. `reflexes.js` checks the body **20 times a second** and acts after a human reaction time (≈420 ms for a Beginner, ≈70 ms for Impossible). It stops the current action, and the LLM hears about it afterwards ("you fell 22 blocks and water-bucket clutched").
+
+**Falls.** Every tick it simulates the fall (gravity, drag, what's below). That gives where it will land, how many ticks it has, and the damage, counting Feather Falling, Protection, jump boost, slow falling, and soft landings like water, slime, hay, beds and powder snow. If the fall will hurt, it scores every save it knows and has the items for. The score is the chance of pulling it off × the damage it prevents, minus what it costs. Then it does the best one:
+
+| Save | Known from | Notes |
+| --- | --- | --- |
+| Steer onto water / slime / hay | Simple | air-strafes toward it; shallow water from very high up doesn't count |
+| Block against the edge it slipped off | Mediocre | lands one to three blocks down instead of at the bottom |
+| Slime block / cobweb / hay bale | Mediocre | placed on the landing spot (hay only takes 80% off) |
+| Water bucket | Complicated | not in the Nether; scoops the water back up |
+| Totem to the off-hand | Complicated | when the fall would kill and nothing else is sure |
+| Ender pearl at the ground | Advanced | costs the pearl's 5 damage |
+| Elytra | Advanced | opens it and glides, keeping the descent slow enough that the game resets the fall |
+| Powder snow bucket, slow falling | Advanced | |
+| Crouch at the edge against knockback | Hardcore | so a hit can't push it off a ledge |
+| Ladder / vine on a wall, scaffolding | Master | caught on the way down |
+| Boat clutch | Master | places a boat, gets in before landing, breaks it after |
+| Mace smash on a mob below | Master | a mace hit resets fall damage; never a player or someone's pet |
+| Jump onto a mount or a cart | Master | |
+| Crouch-clutch | Impossible | a block under its feet the instant it slips, with no reaction delay |
+| Wall / ledge pearl | Impossible | pearls into a wall or onto a ledge low down; works over lava or the void |
+| Frame-perfect timing | Impossible | no penalty for windows under a tick (falls from 50+ blocks) |
+
+**How well it does them** comes from survival skill and practice. A Complicated player water-clutches a 20-block fall ~90% of the time and an Advanced one ~97%. An Advanced player who has learned the boat clutch only lands it ~60% of the time, a Master ~87%. Very long falls leave less than a tick with the ground in reach, so they're hard for everyone except Impossible. A miss is acted out like a real fumble: the click comes a moment too late.
+
+**Learning saves.** A Beginner knows none of these. After a fall that hurts, it may realise what would have helped, if it was carrying the item and the trick isn't far beyond it. A player can also teach it in chat ("place a water bucket right before you land"). With enough practice a Beginner keeps growing past the Advanced level and can end up better than a Master, but it takes a long time. Learned saves and practice are saved in `data/brain.json`.
+
+**Other dangers:**
+- **Lava:** pours water if it can, then jumps and sprints to the nearest cool block; drinks fire resistance if it's stuck.
+- **Fire:** water bucket, or the nearest water.
+- **Drowning:** sharper players react to the air bar sooner. It swims straight up if there's air, otherwise to the nearest surface; it drinks water breathing, and Masters place a door for an air pocket.
+- **Suffocation:** digs out, or moves.
+- **Lit TNT:** runs.
+- The pathfinder avoids tripwires, magma, berry bushes, powder snow, campfires, cactus and wither roses.
+
+**Getting hit:**
+- **One punch:** it flinches, stops for a moment and turns toward the hit. Sharp players look straight at the attacker. A Beginner turns roughly the right way and then looks around ("where did that come from?").
+- **A real attack** (a weapon, repeated hits, or someone it already distrusts): weapon in hand and shield to the off-hand. The fight-or-flight decision follows at once, even if the LLM is in the middle of thinking (that answer is thrown away).
+- **Talking it down:** a player can talk it out of a fight ("ok ok sorry, truce"). It decides on the spot, from how much it likes and trusts them, its forgiveness, how hard they hit it, and whether they're still swinging. Someone who breaks a truce won't get another one easily.
+
+| Option | Default | |
+| --- | --- | --- |
+| `reflexes.enabled` / `falls` / `hazards` / `hitReactions` / `truce` | `true` | switch parts off (all settable in game with `!set`) |
+| `reflexes.reactionMs` | `null` | a fixed reaction time instead of the skill-based one |
+| `reflexes.learnSaves` | `true` | learn saves from experience and chat |
 
 ## Combat and learning (`pvp`, `learning`)
 
