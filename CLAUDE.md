@@ -38,6 +38,7 @@ Everything learned while building this bot: what it is, how it's put together, w
   - The user has run the three `setx` Ollama settings by hand; Ollama still needs a restart for them to apply.
   - **Next for the user:** `git pull`, `npm run setup` (choose `qwen3:4b-instruct`; setup also applies the Ollama settings and tests the model), restart Ollama, check `ollama ps` shows 100% GPU, `npm run doctor` (let the timing step finish), then the local Paper test server (START-HERE.md step 4, `online-mode=false` on a fresh world), then `npm start`.
   - After that: the friend's server via FastLogin (SETUP.md 6D) or the Bedrock fallback.
+- **First real server contact:** the user's local Paper **26.1** test server accepted the offline login (version and auth fine), then kicked it with "You are not white-listed". Fix given: `whitelist add TheBestWanderer` in the server console (or `whitelist off`), then restart the bot, which stops retrying after a whitelist kick on purpose.
 - **Nothing has run against a real Minecraft server yet.** All live tests used flying-squid and the mock LLM. Expect the first real sessions to surface prompt and behaviour issues: read the user's logs and tune from them.
 - **When the user pastes output:** it uses their real name in paths. Never repeat it (see the naming rule at the top).
 
