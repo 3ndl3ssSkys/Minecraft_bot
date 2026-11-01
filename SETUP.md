@@ -2,6 +2,8 @@
 
 This walks through everything, in order, from an empty PC to the bot playing on a server. For what each feature does, see [README.md](README.md).
 
+> **First time, on Windows?** Follow [START-HERE.md](START-HERE.md): one short path with exact commands and what you should see at each step. Come back here for friends' servers, Bedrock, faster models and running it 24/7.
+
 **Contents**
 1. [What you're setting up](#1-what-youre-setting-up)
 2. [Decide how the bot joins](#2-decide-how-the-bot-joins)
@@ -129,7 +131,7 @@ ollama pull qwen3:4b
 ```bash
 ollama pull qwen3:1.7b
 ```
-and in `config.json`: `"llm": { "model": "qwen3:4b", "fastModel": "qwen3:1.7b", "think": false }`. `npm run doctor` (step 9) tells you which is quicker on your card.
+and in `config.local.json`: `"llm": { "model": "qwen3:4b", "fastModel": "qwen3:1.7b", "think": false }`. `npm run doctor` (step 9) tells you which is quicker on your card.
 
 **Recommended for 6 GB cards:** these settings make the model's working memory smaller and keep it loaded.
 
@@ -140,7 +142,7 @@ and in `config.json`: `"llm": { "model": "qwen3:4b", "fastModel": "qwen3:1.7b", 
 | `OLLAMA_KEEP_ALIVE` | `24h` | no reload delay between calls |
 | `OLLAMA_MAX_LOADED_MODELS` | `2` | only needed with a `fastModel`: keeps both models loaded |
 
-- **Windows:** Start → "Edit environment variables for your account" → New, for each one. Then quit Ollama from the tray and start it again.
+- **Windows:** in a Command Prompt run `setx OLLAMA_FLASH_ATTENTION 1`, `setx OLLAMA_KV_CACHE_TYPE q8_0` and `setx OLLAMA_KEEP_ALIVE 24h` (and `setx OLLAMA_MAX_LOADED_MODELS 2` if you use a fast model). Then quit Ollama from the tray, start it again, and open a new Command Prompt. Check with `ollama ps` while a model runs: PROCESSOR should say **100% GPU**.
 - **Linux:** run `sudo systemctl edit ollama`, add the following, then `sudo systemctl restart ollama`:
   ```
   [Service]
@@ -172,7 +174,7 @@ npm test
 
 ## 6. Connect it to a server
 
-Everything goes in `config.json`. You can keep several servers as **profiles** and pick one when starting (`node index.js --server <name>`).
+Everything goes in `config.local.json` (your settings file — see step 7). You can keep several servers as **profiles** and pick one when starting (`node index.js --server <name>`).
 
 ### 6A. Java (offline account, Java account, or Realm)
 
@@ -264,7 +266,7 @@ This changes how the server checks logins, so it's the host's call. Option 2 doe
 
 ## 7. Configure the bot
 
-Open `config.json`. Every option has a sensible default, so you only need what you want to change. The important ones are below. **[CONFIGURING.md](CONFIGURING.md) explains everything else**: goals (overall → long-term → current → steps), feelings, writing your own personality, reactions, obedience, fighting and the in-game commands for all of them.
+Run `npm run setup` for the basics (your name, the server, the bot's name, personality, skill, model). It writes **`config.local.json`**, your own settings file, which git never touches, so `git pull` can't clash with it. Put any other setting there too, in the same shape as `config.json`. `config.json` holds the defaults; editing it works too, but your edits can clash with updates. The important settings are below. **[CONFIGURING.md](CONFIGURING.md) explains everything else**: goals (overall → long-term → current → steps), feelings, writing your own personality, reactions, obedience, fighting and the in-game commands for all of them.
 
 ### Who you are
 

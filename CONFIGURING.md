@@ -22,8 +22,9 @@ There are four places to set things. A later one overrides an earlier one:
 
 | Where | What it's for | How |
 | --- | --- | --- |
-| `config.json` | Everything, as the starting point | Edit, then restart the bot. You only need the keys you change; every other key has a default. |
-| `personalities/<name>.json` | Who it is: voice, likes, temperament | `"personality": "<name>"` in `config.json`, or `!persona <name>` in game. |
+| `config.json` | The defaults for everything | Leave it as it is: updates change this file. |
+| `config.local.json` | **Your** settings, in the same shape | Written by `npm run setup`; add anything else by hand, then restart the bot. Git never touches it. You only need the keys you change. |
+| `personalities/<name>.json` | Who it is: voice, likes, temperament | `"personality": "<name>"` in `config.local.json`, or `!persona <name>` in game. |
 | Environment variables | Quick overrides when starting it | `MC_HOST`, `MC_USERNAME`, `BOT_PERSONALITY`, `BOT_INTELLIGENCE`, `BOT_CHAT_MODE`, `OLLAMA_MODEL`, `LLM_FAST_MODEL`, `LLM_API_KEY`… |
 | In game, as an owner | Changing things while it plays | `!goal`, `!emotion`, `!mind`, `!iq`, `!set <key> <value>` … These are saved in `data/brain.json` and **win over `config.json`** until you `!set <key> reset` or `!settings reset`. |
 
@@ -33,7 +34,7 @@ There are four places to set things. A later one overrides an earlier one:
 - **The terminal** running the bot counts as an owner: type `!goals` there.
 - **Everyone else:** typing `!stop` is just chat to the bot.
 
-Every key in the snippets below goes inside `config.json`, e.g. `{ "goals": { ... }, "emotions": { ... } }`.
+Every snippet below goes inside `config.local.json`, e.g. `{ "goals": { ... }, "emotions": { ... } }` (create it with `npm run setup`). Restart the bot after editing it.
 
 ---
 
@@ -87,7 +88,7 @@ Goals you set are kept until they're done, or until you change them. It still ad
 | `goals.plan` | `true` | Step back now and then and revise the whole plan (an extra LLM call every few minutes). |
 | `goals.replanMinutes` | `10` | How often it reviews the plan anyway (`0` = only when a goal finishes or gets stuck). |
 
-Goals in `config.json` are applied when the bot starts, **if you changed them** since the last run. If you didn't, it carries on with the plan as it had evolved, which is saved in `data/brain.json`.
+Goals in your config are applied when the bot starts, **if you changed them** since the last run. If you didn't, it carries on with the plan as it had evolved, which is saved in `data/brain.json`.
 
 ### Goal commands (in game or in the terminal)
 
@@ -165,7 +166,7 @@ A personality is a JSON file in `personalities/`. The presets are `friendly`, `g
 
 1. Copy `personalities/friendly.json` to `personalities/mybot.json`.
 2. Edit it.
-3. Set `"personality": "mybot"` in `config.json`, or type `!persona mybot` in game.
+3. Set `"personality": "mybot"` in `config.local.json`, or type `!persona mybot` in game.
 
 You can also put the whole object inline: `"personality": { "name": "...", ... }`.
 

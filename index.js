@@ -50,7 +50,7 @@ const COLORS = { debug: '\x1b[90m', info: '\x1b[36m', warn: '\x1b[33m', error: '
 const RESET = '\x1b[0m'
 
 function createLogger (level = 'info') {
-  const threshold = LEVELS[process.env.BOT_DEBUG ? 'debug' : level] ?? LEVELS.info
+  const threshold = LEVELS[process.env.BOT_DEBUG || process.argv.includes('--debug') ? 'debug' : level] ?? LEVELS.info
   const write = (tag, color, msg) => {
     const ts = new Date().toISOString().slice(11, 19)
     const out = `${COLORS[color] || ''}[${ts}] ${tag.padEnd(5)}${RESET} ${msg}`
@@ -505,6 +505,12 @@ function loadConfig (log) {
     log.info(`Loaded config from ${file}`)
   } else {
     log.warn(`No config file at ${file}; using defaults.`)
+  }
+  // Your own settings (written by "npm run setup"; not in git, so updates never clash with them).
+  const local = path.join(path.dirname(file), 'config.local.json')
+  if (!cli.file && fs.existsSync(local)) {
+    user = deepMerge(user, readJson(local))
+    log.info(`Your settings: ${local}`)
   }
   const config = deepMerge(DEFAULT_CONFIG, user)
   // A named server profile overrides the default server settings.

@@ -27,7 +27,7 @@ Perception (every 2s) ──► state JSON + feelings + relationships + lessons 
         └──────────── result fed back into the next prompt ◄──── ActionExecutor (one action at a time)
 ```
 
-> **New here?** [SETUP.md](SETUP.md) walks through everything from an empty PC to a running bot. [CONFIGURING.md](CONFIGURING.md) shows how to set goals, feelings, personality, chat, reactions, fighting and reflexes. [CLAUDE.md](CLAUDE.md) holds the project's design notes and lessons learned.
+> **New here?** On Windows, start with [START-HERE.md](START-HERE.md) (exact commands, step by step). [SETUP.md](SETUP.md) covers everything else, from an empty PC to friends' servers. [CONFIGURING.md](CONFIGURING.md) shows how to set goals, feelings, personality, chat, reactions, fighting and reflexes. [CLAUDE.md](CLAUDE.md) holds the project's design notes and lessons learned.
 
 ## Quick start
 
@@ -488,7 +488,7 @@ It always knows what it's working toward, on four levels:
 - the **steps** for that ("craft a stone pickaxe → find a cave → mine cobblestone").
 
 **Where goals come from:**
-- **Set** in `config.json` or by an owner in chat (`!goal`). Set goals stay until they're done or an owner changes them.
+- **Set** in your config (`config.local.json`) or by an owner in chat (`!goal`). Set goals stay until they're done or an owner changes them.
 - **Made up by the bot** from its personality, ambitions and situation, if `goals.selfDirected` is on. It changes its own goals as it goes.
 
 **How it works toward them:**
