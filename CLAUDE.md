@@ -7,12 +7,16 @@ Everything learned while building this bot: what it is, how it's put together, w
 
 ## The user and what they want
 
-- Address the user as **EndlessSkys** (or Endless).
+- Address the user as **EndlessSkys** (or Endless). Never use their real first name, which shows up in their Windows paths (`C:\Users\<name>`): write "your user folder" or `%USERPROFILE%` instead.
 - **Goal:** a fully autonomous Minecraft Java bot that plays and talks **like a real person**, driven by a local LLM (Ollama + Qwen 2.5).
   - It refuses like a human, never like an assistant.
   - It has feelings, trust and liking, its own judgment, skill levels and realistic senses.
   - It's a good guest on friends' servers.
-- **Hardware:** a dedicated server PC with a **GTX 1660 Super (6 GB VRAM) and 32 GB RAM**. Nobody plays Minecraft on that PC, so the whole GPU goes to Ollama. The bot is headless and needs no GPU.
+- **Hardware:** a dedicated server PC with a **GTX 1660 Super (6 GB VRAM) and 32 GB RAM**, running **Windows** (Command Prompt), Node 26. Nobody plays Minecraft on that PC, so the whole GPU goes to Ollama. The bot is headless and needs no GPU.
+  - **Measured on it:**
+    - `qwen2.5:7b` does **not** fully fit: `ollama ps` showed 5.2–5.4 GB at `18–21%/79–82% CPU/GPU`, because Windows uses part of the VRAM for the screen.
+    - **`qwen3:4b` fits: 3.2 GB, 100% GPU.** That's the model to use there, with `llm.think: false` (setup adds it for Qwen3; otherwise Qwen3 writes long "Thinking..." text).
+    - It's not known yet whether the `setx` Ollama variables (flash attention, q8_0 KV) took effect.
 - **Accounts:** the user plays on their own Java account, so the bot can't use it at the same time.
   - **Java is the main route, and it must not require an account:** `server.auth: "auto"` (default) plays as an **offline account** unless `username` is a Microsoft email, and drops to offline if that sign-in fails. Java gives the bot every feature.
   - **Bedrock stays as a backup:** Geyser + Floodgate servers through ViaProxy with the user's Bedrock account (`server.platform: "bedrock"`), usually set as `server.fallback`.
@@ -21,6 +25,16 @@ Everything learned while building this bot: what it is, how it's put together, w
   Geyser **without** Floodgate (`auth-type: online`) needs a Java account. That's server authentication, and we do not try to bypass it.
 - **Friends' servers:** the bot should be able to join without the friends setting anything up for it.
 - **Working rules:** develop on branch `claude/confident-meitner-1ita5a`, commit with clear messages, and push. Don't open PRs unless asked.
+
+## Where things stand (update this as it changes)
+
+- **The user's setup:**
+  - Done so far: Ollama, Node and Git installed; the repo cloned to the user folder; `npm install`; `npm run setup`.
+  - `config.local.json`: owner `EndlessSkys`, bot name `TheBestWanderer`, level `complicated`, a custom friendly/cautious/PvE/explorer personality, server `localhost:25565`. The model should be switched to `qwen3:4b` by rerunning setup.
+  - **Next for the user:** `git pull`, `npm run setup` (choose `qwen3:4b`), `npm run doctor` (let the timing step finish), then the local Paper test server (START-HERE.md step 4, `online-mode=false` on a fresh world), then `npm start`.
+  - After that: the friend's server via FastLogin (SETUP.md 6D) or the Bedrock fallback.
+- **Nothing has run against a real Minecraft server yet.** All live tests used flying-squid and the mock LLM. Expect the first real sessions to surface prompt and behaviour issues: read the user's logs and tune from them.
+- **When the user pastes output:** it uses their real name in paths. Never repeat it (see the naming rule at the top).
 
 ## Architecture
 
@@ -111,6 +125,7 @@ Reflexes (every physics tick, 20/s, no LLM): falls, lava, drowning, hits → tak
 - A failed Microsoft sign-in (prismarine-auth) emits `error` but **never `end`**: no connection was opened. `Agent.connect` ends it by hand, once.
 - `bot.activateBlock()` first does `await bot.lookAt(center, false)`, which waits a physics tick unless we're already looking there: call `bot.lookAt(..., true)` right before it. `bot.activateItem()` (buckets, boats, pearls) sends the current rotation in `use_item` on 1.21.
 - Water clutch timing: the landing block's top is in reach while the feet are ≤ ~2.8 above it; a 20-block fall moves 1.6 blocks/tick, so the window is ~1.7 ticks — fine for good players. Act a tick early (the click goes out with the next move).
+- On **Node 26**, "nothing listening on localhost" (tried on IPv6 and IPv4) is an `AggregateError` with an **empty message**. Always log errors through `errText()` (index.js, exported for the doctor).
 - `bot.setControlState(name, value)` **asserts a boolean**: `false || undefined` crashes it.
 - `bot.look(..., false)` resolves on physics ticks, and **physics stops on death** until the server sends a position. Race it with a timeout.
 
@@ -125,6 +140,7 @@ Reflexes (every physics tick, 20/s, no LLM): falls, lava, drowning, hits → tak
 - `minecraft-data` lists 26.3 in its version list but has **no data** for it (dataPaths only to 26.1). Mineflayer refuses newer servers unless the version is pinned.
 
 **Ollama**
+- Qwen3 models think out loud by default; send `think: false` (the client drops it if a model or Ollama version rejects it). On the command line: `ollama run qwen3:4b --think=false`.
 - Structured outputs: pass a JSON schema as `format` (Ollama ≥ 0.5). The client falls back to `format: "json"` if rejected.
 - Decision prompts are ~3.4k tokens of fixed system text + 0.6–2.5k of state. `/api/chat` returns timing fields (the doctor uses them), and `/api/ps` gives `size_vram`.
 
@@ -163,13 +179,17 @@ Reflexes (every physics tick, 20/s, no LLM): falls, lava, drowning, hits → tak
   - real speeds of qwen3:4b + qwen3:1.7b on the 1660 Super, and hosted APIs;
   - the `respawn` action on a real server (lava/drop finding, /kill);
   - how well a real small model keeps to the goal tree (detours vs new_goal).
-  - real performance on the 1660 Super (estimated 4–8 s per decision for 7B).
+  - real decision times on the 1660 Super (qwen3:4b fits fully on the GPU; the doctor hasn't been run to completion there yet).
 
 ## Environment notes (for Claude cloud sessions)
 
 - **Downloads:** Mojang and Paper downloads are blocked; npm and raw.githubusercontent.com work (that's how ViaProxy/ViaBedrock docs were checked; api.github.com was 403).
 - **Test server:** install flying-squid outside the repo or with `npm install --no-save flying-squid@1.12.0`. Start test players **after** the bot.
 - **The user's machine is Windows** (Command Prompt). Give `cmd` commands; `npm` scripts must not use Unix-only syntax (e.g. `VAR=1 node …` — use a flag like `--debug` instead).
+- **Setup tooling for the user:**
+  - `npm run setup` strips `[brackets]`/quotes from answers, matches levels loosely, and turns a free-text personality into `{ base, setupDescription, traits, description, likes }` plus mind settings;
+  - the doctor warns that its timing step takes a while (the user once Ctrl+C'd it);
+  - the npm warnings (uuid deprecated, moderate vulnerabilities) are harmless — tell users not to run `npm audit fix --force`.
 - **Processes:** don't kill all `node` processes (the sandbox refuses it); run test processes under `timeout` instead.
 
 ## Ideas not done yet
