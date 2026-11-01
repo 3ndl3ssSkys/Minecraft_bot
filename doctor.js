@@ -15,7 +15,7 @@
 const fs = require('fs')
 const path = require('path')
 const mc = require('minecraft-protocol')
-const { loadConfig, loginFor, fallbackServer, serverMods, OllamaClient } = require('./index.js')
+const { loadConfig, loginFor, fallbackServer, serverMods, OllamaClient, errText } = require('./index.js')
 const knowledge = require('./knowledge')
 
 const ok = (m) => console.log(`  \x1b[32m✓\x1b[0m ${m}`)
@@ -79,7 +79,7 @@ async function main () {
         tip('Fabric/Paper servers with server-side mods or plugins are fine; Forge/NeoForge modpacks that need the mods on your side are not.')
       }
     } catch (err) {
-      bad(`${s.host}:${s.port} doesn't answer (${err.message}).`)
+      bad(`${s.host}:${s.port} doesn't answer (${errText(err)}).`)
       if (s.platform === 'bedrock') tip('Is ViaProxy started (default port 25568) and pointed at the Geyser port?')
       else tip('Check host/port, that the server is running, and firewalls.')
     }
@@ -92,7 +92,7 @@ async function main () {
       await mc.ping({ host: b.host, port: b.port, closeTimeout: 6000, noPongTimeout: 6000 })
       ok(`backup route "${backup.name}" (${b.platform}) answers at ${b.host}:${b.port}`)
     } catch (err) {
-      warn(`backup route "${backup.name}" doesn't answer at ${b.host}:${b.port} (${err.message}). That's fine unless the main route gets refused.`)
+      warn(`backup route "${backup.name}" doesn't answer at ${b.host}:${b.port} (${errText(err)}). That's fine unless the main route gets refused.`)
       if (b.platform === 'bedrock') tip('Start ViaProxy if you want the backup to be ready.')
     }
   }
@@ -121,7 +121,7 @@ async function timeRequest (config, what, lane) {
     if (second <= (lane === 'fast' ? 2500 : 8000)) ok(msg)
     else warn(`${msg} — slow; a smaller model or llm.think: false helps`)
   } catch (err) {
-    bad(`${what} with ${model} failed: ${err.message}`)
+    bad(`${what} with ${model} failed: ${errText(err)}`)
   }
 }
 
@@ -140,6 +140,7 @@ async function checkOllama (config, withFast) {
     bad(`Model "${config.llm.model}" isn't downloaded. Run: ollama pull ${config.llm.model}`)
   } else if (models.length) {
     ok(`model ${config.llm.model} is downloaded`)
+    tip('Timing the model with a decision-sized prompt — up to a minute or two, longer if part of it runs on the CPU. Please wait...')
     await benchmark(config, base)
   }
   const fast = config.llm.fastModel
@@ -175,7 +176,7 @@ async function benchmark (config, base) {
     if (perDecision <= 8) ok(msg)
     else warn(`${msg} — playable but slow. A smaller model (qwen2.5:3b) or a smaller llm.numCtx makes it snappier.`)
   } catch (err) {
-    bad(`benchmark failed: ${err.message}`)
+    bad(`benchmark failed: ${errText(err)}`)
     return
   }
   // How much of the model is on the GPU?
@@ -187,9 +188,10 @@ async function benchmark (config, base) {
       const pct = m.size ? Math.round((m.size_vram / m.size) * 100) : 0
       if (pct >= 99) ok(`fully on the GPU (${gb(m.size_vram)} GB VRAM used, with a ${config.llm.numCtx}-token context)`)
       else if (pct > 0) {
-        warn(`only ${pct}% on the GPU (${gb(m.size_vram)} of ${gb(m.size)} GB) — the rest runs on the CPU, which is much slower.`)
-        tip('Options: set OLLAMA_FLASH_ATTENTION=1 and OLLAMA_KV_CACHE_TYPE=q8_0 for Ollama, lower llm.numCtx to 6144,')
-        tip('close other GPU programs (a Minecraft client uses 1-2 GB VRAM), or use qwen2.5:3b.')
+        warn(`only ${pct}% on the GPU (${gb(m.size_vram)} of ${gb(m.size)} GB) — the rest runs on the CPU, which is several times slower.`)
+        tip('This model is a bit too big for this card (Windows also uses some of its memory for the screen).')
+        tip('Easiest fix: a smaller model that fits entirely —  ollama pull qwen3:4b  — then  npm run setup  and choose it.')
+        tip('Or: the Ollama settings in START-HERE.md step 1 (restart Ollama after setting them), and llm.numCtx 6144.')
       } else warn('running entirely on the CPU — check the GPU driver / that Ollama sees your GPU.')
     }
   } catch { /* older Ollama without /api/ps */ }
@@ -207,7 +209,7 @@ async function probe (s) {
     }))
     client.on('disconnect', (p) => finish(() => explainKick(JSON.stringify(p.reason))))
     client.on('kick_disconnect', (p) => finish(() => explainKick(JSON.stringify(p.reason))))
-    client.on('error', (err) => finish(() => explainKick(err.message)))
+    client.on('error', (err) => finish(() => explainKick(errText(err))))
     setTimeout(() => finish(() => warn('login probe timed out')), 15000)
   })
 }

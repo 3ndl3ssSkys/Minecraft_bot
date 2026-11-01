@@ -11,7 +11,7 @@ const fs = require('fs')
 const path = require('path')
 const readline = require('readline')
 const { DEFAULT_CONFIG } = require('./index.js')
-const { LEVELS } = require('./intelligence')
+const { LEVELS, LABELS } = require('./intelligence')
 
 const FILE = path.join(__dirname, 'config.local.json')
 
@@ -27,8 +27,9 @@ async function main () {
   const old = fs.existsSync(FILE) ? JSON.parse(fs.readFileSync(FILE, 'utf8')) : {}
   const ask = async (question, def) => {
     process.stdout.write(`${question}${def !== undefined && def !== '' ? ` [${def}]` : ''}: `)
-    const answer = (await next()).trim()
-    if (!process.stdin.isTTY) process.stdout.write(`${answer}\n`)
+    const raw = (await next()).trim()
+    if (!process.stdin.isTTY) process.stdout.write(`${raw}\n`)
+    const answer = raw.replace(/^[\s[("'`]+|[\s\])"'`]+$/g, '') // "[complicated]" → "complicated"
     return answer || (def ?? '')
   }
   console.log('\nMinecraft LLM bot setup — press Enter to keep the value in [brackets].\n')
@@ -46,11 +47,24 @@ async function main () {
   // Who it is.
   const presets = fs.readdirSync(path.join(__dirname, 'personalities')).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -5))
   console.log(`\nPersonalities: ${presets.join(', ')}`)
-  let personality = await ask('Personality', typeof old.personality === 'string' ? old.personality : 'friendly')
-  if (!presets.includes(personality)) { console.log(`  (no preset "${personality}", using friendly)`); personality = 'friendly' }
+  console.log('Pick one, or describe your own in a few words (e.g. "friendly, a bit cautious, loves exploring").')
+  const oldCustom = typeof old.personality === 'object' && old.personality
+  const answer = await ask('Personality', oldCustom ? oldCustom.setupDescription || 'custom' : (old.personality || 'friendly'))
+  let personality
+  let mind = {}
+  if (presets.includes(answer.toLowerCase())) {
+    personality = answer.toLowerCase()
+  } else if (oldCustom && answer === (oldCustom.setupDescription || 'custom')) {
+    personality = oldCustom
+  } else {
+    const base = presets.find((p) => answer.toLowerCase().includes(p)) || 'friendly'
+    ;({ personality, mind } = customPersonality(answer, base))
+    console.log(`  Made a custom personality from that, built on "${base}" (traits: ${personality.traits.join(', ')}).`)
+  }
   console.log(`\nSkill levels: ${LEVELS.join(', ')}`)
-  let level = await ask('How good a player', old.intelligence?.level || 'mediocre')
-  if (!LEVELS.includes(level)) { console.log(`  (unknown level, using mediocre)`); level = 'mediocre' }
+  const levelAnswer = (await ask('How good a player', old.intelligence?.level || 'mediocre')).toLowerCase()
+  let level = LEVELS.find((l) => l === levelAnswer) || LEVELS.find((l) => levelAnswer.startsWith(l.slice(0, 4)) || LABELS[l].toLowerCase() === levelAnswer)
+  if (!level) { console.log(`  (unknown level "${levelAnswer}", using mediocre)`); level = 'mediocre' }
 
   // Which model.
   const llm = { ...DEFAULT_CONFIG.llm, ...(old.llm || {}) }
@@ -64,7 +78,9 @@ async function main () {
   } else {
     console.log('\n(Ollama isn\'t answering — is it running? You can still finish; the bot will wait for it.)')
   }
-  const preferred = models.find((m) => m.startsWith(llm.model)) || models.find((m) => /qwen/.test(m)) || llm.model
+  // Prefer what was chosen before, then a model that fits a 6 GB card entirely, then any Qwen.
+  const preferred = (old.llm?.model && models.find((m) => m.startsWith(old.llm.model))) || models.find((m) => /^qwen3:4b/.test(m)) ||
+    models.find((m) => m.startsWith(llm.model)) || models.find((m) => /qwen/.test(m)) || llm.model
   const model = await ask('Model for decisions', preferred)
   const fastModel = await ask('Small model for chat replies (optional, Enter to skip)', old.llm?.fastModel || '')
 
@@ -73,6 +89,7 @@ async function main () {
     server: { ...(old.server || {}), host: host || 'localhost', port: Number(port) || 25565, username },
     personality,
     intelligence: { ...(old.intelligence || {}), level },
+    mind: { ...(old.mind || {}), ...mind },
     llm: { ...(old.llm || {}), model, fastModel, ...(/qwen3|deepseek-r1|think/.test(model + fastModel) ? { think: false } : {}) },
     behavior: { ...(old.behavior || {}), owners: owner ? [owner] : (old.behavior?.owners || []) }
   }
@@ -80,6 +97,35 @@ async function main () {
   rl.close()
   console.log(`\nSaved to ${FILE}`)
   console.log('Next: npm run doctor   (checks everything)   then   npm start   (starts the bot)\n')
+}
+
+/**
+ * "friendly, slightly cautious, fun PvE, enjoys exploring" → a personality built on a preset
+ * with those traits, plus a few matching mind settings.
+ */
+function customPersonality (text, base) {
+  const preset = JSON.parse(fs.readFileSync(path.join(__dirname, 'personalities', `${base}.json`), 'utf8'))
+  const words = text.split(/\s*[,;/]\s*|\s+and\s+/).map((w) => w.replace(/[-_]/g, ' ').trim()).filter((w) => w && w.toLowerCase() !== base)
+  const t = text.toLowerCase()
+  const mind = {}
+  if (/cautious|careful|safe|wary/.test(t)) mind.riskTolerance = /slight|bit|little|somewhat/.test(t) ? 0.4 : 0.25
+  if (/reckless|brave|daring|risk/.test(t)) mind.riskTolerance = 0.75
+  if (/curious|explor/.test(t)) mind.curiosity = 0.75
+  const style = [[/explor/, 'explorer'], [/build/, 'builder'], [/mine|mining/, 'miner'], [/pvp|fight/, 'fighter'], [/help/, 'helper'], [/trad/, 'trader'], [/surviv/, 'survivalist']].find(([re]) => re.test(t))
+  if (style) mind.playstyle = style[1]
+  const likes = []
+  if (/pve|mobs/.test(t)) likes.push('fighting mobs')
+  if (/explor/.test(t)) likes.push('exploring new places')
+  return {
+    personality: {
+      base,
+      setupDescription: text,
+      traits: [...new Set([...(preset.traits || []), ...words])].slice(0, 10),
+      description: `${preset.description} In a few words: ${text}.`,
+      likes: [...new Set([...(preset.likes || []), ...likes])]
+    },
+    mind
+  }
 }
 
 main().catch((err) => { console.error(err.message); process.exit(1) })

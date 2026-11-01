@@ -457,6 +457,19 @@ const DUPLICATE_LOGIN = /logged in from another location|another location|duplic
 const JAVA_SIGNIN_ERROR = /does the account own minecraft|failed to obtain profile|profile not found|xsts|xbox live|minecraft (java )?(profile|ownership)/i
 const MODDED_KICK = /mods? (rejected|mismatch|missing)|missing (required )?mods?|requires? (forge|neoforge|fabric|quilt)|\bfml\b|incompatible (mod|client)|channels? (mismatch|missing)|network version/i
 
+/**
+ * A readable error message. Node reports "nothing listening on localhost" (tried on
+ * IPv6 and IPv4) as an AggregateError with an empty message, so look inside it.
+ */
+function errText (err) {
+  if (!err) return 'unknown error'
+  const inner = Array.isArray(err.errors) && err.errors.length ? err.errors[err.errors.length - 1] : null
+  const code = err.code || inner?.code
+  const msg = err.message || inner?.message || ''
+  if (code && !msg.includes(code)) return msg ? `${msg} (${code})` : code
+  return msg || String(err)
+}
+
 function readJson (file) {
   try {
     return JSON.parse(fs.readFileSync(file, 'utf8'))
@@ -466,7 +479,8 @@ function readJson (file) {
 }
 
 function loadPersonality (spec, log) {
-  if (isPlainObject(spec)) return deepMerge(DEFAULT_PERSONALITY, spec)
+  // An inline personality can build on a preset: { "base": "friendly", "traits": [...], ... }
+  if (isPlainObject(spec)) return deepMerge(spec.base ? loadPersonality(spec.base, log) : DEFAULT_PERSONALITY, spec)
   const name = String(spec || 'friendly').replace(/[^\w-]/g, '')
   const file = path.join(__dirname, 'personalities', `${name}.json`)
   if (!fs.existsSync(file)) {
@@ -3165,8 +3179,12 @@ class Agent {
     let ended = false
     const end = (reason) => { if (!ended) { ended = true; this.onEnd(reason) } }
     bot.on('error', (err) => {
-      this.log.error(`Connection error: ${err.message}`)
-      if (login.auth === 'microsoft' && JAVA_SIGNIN_ERROR.test(err.message)) {
+      const text = errText(err)
+      this.log.error(`Connection error: ${text}`)
+      if (/ECONNREFUSED/.test(text) && this.reconnectAttempts % 5 === 0) {
+        this.log.warn(`Nothing is running at ${s.host}:${s.port}. Start the Minecraft server${s.platform === 'bedrock' ? ' / ViaProxy' : ''} first; the bot keeps retrying until it's up.`)
+      }
+      if (login.auth === 'microsoft' && JAVA_SIGNIN_ERROR.test(text)) {
         this.log.warn('The Java sign-in failed: that Microsoft account may not own Minecraft Java, or the sign-in expired (delete data/auth and sign in again).')
         if (s.auth !== 'microsoft') {
           // auth "auto": no usable Java account, so play as an offline account instead.
@@ -3335,7 +3353,7 @@ class Agent {
     this.reconnectAttempts++
     this.log.info(`Reconnecting in ${Math.round(delay / 1000)}s (attempt ${this.reconnectAttempts})...`)
     setTimeout(() => {
-      if (!this.shuttingDown) this.connect().catch((err) => this.log.error(`Reconnect failed: ${err.message}`))
+      if (!this.shuttingDown) this.connect().catch((err) => this.log.error(`Reconnect failed: ${errText(err)}`))
     }, delay)
   }
 
@@ -3401,4 +3419,4 @@ function main () {
 
 if (require.main === module) main()
 
-module.exports = { Agent, Brain, Perception, ChatManager, EventReactor, OllamaClient, loadConfig, deepMerge, parsePluginChat, loginFor, fallbackServer, serverMods, DEFAULT_CONFIG }
+module.exports = { Agent, Brain, Perception, ChatManager, EventReactor, OllamaClient, loadConfig, deepMerge, parsePluginChat, loginFor, fallbackServer, serverMods, errText, DEFAULT_CONFIG }

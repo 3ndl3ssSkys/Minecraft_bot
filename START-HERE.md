@@ -36,7 +36,18 @@ The first time takes 5–20 seconds while it loads, then it answers. Now run:
 ollama ps
 ```
 The `PROCESSOR` column should say **100% GPU**:
-- **It says CPU, or something like "40%/60% CPU/GPU":** the model isn't fully on the graphics card, and that's why answers are slow. Update the NVIDIA driver (nvidia.com or GeForce Experience), restart the PC, and check again.
+- **Something like `18%/82% CPU/GPU`:** the model is a little too big for a 6 GB card. Windows uses part of the card's memory for your screen, so `qwen2.5:7b` (5.2 GB) doesn't quite fit, and the part on the CPU makes every answer several times slower. Use a model that fits entirely:
+  ```bat
+  ollama pull qwen3:4b
+  ```
+  ```bat
+  ollama run qwen3:4b "say hi in five words"
+  ```
+  ```bat
+  ollama ps
+  ```
+  This one should say **100% GPU**. Choose `qwen3:4b` as the model in step 3 (setup turns its slow "thinking" mode off for you).
+- **Mostly or all CPU, even for qwen3:4b:** update the NVIDIA driver (nvidia.com or GeForce Experience), restart the PC, and check again.
 - **About the slow test earlier:** typing to the model with `ollama run` is only a test. You don't need to chat with it. The bot talks to Ollama by itself.
 
 ---
@@ -57,7 +68,9 @@ cd Minecraft_bot
 ```bat
 npm install
 ```
-That takes a minute and ends with something like `added 180 packages`.
+That takes a minute and ends with something like `added 92 packages`.
+- **Warnings** about `uuid` being deprecated or "moderate severity vulnerabilities" are normal: they come from the Minecraft libraries.
+- **Don't run `npm audit fix --force`.** It swaps in versions that break the bot.
 
 > **Every bot command runs inside this folder.** If you open a new Command Prompt later, first type `cd %USERPROFILE%\Minecraft_bot`.
 > The error `Could not read package.json` means you're not in that folder.
@@ -75,7 +88,9 @@ It asks:
 - **the server address**: use `localhost` for the test server in step 4;
 - **the bot's name**, e.g. `Wanderer`;
 - **its personality and skill level**;
-- **which model to use**: press Enter for `qwen2.5:7b`.
+- **which model to use**: `qwen3:4b` if step 1 showed the 7B model partly on the CPU, otherwise `qwen2.5:7b`.
+
+Type plain words, without the `[brackets]`. Press Enter alone to keep what's in brackets. For the personality you can pick a preset, or describe one ("friendly, a bit cautious, loves exploring"); it builds a custom personality from your words.
 
 Your answers go into `config.local.json` in the bot folder. Run `npm run setup` again any time to change them.
 
@@ -112,7 +127,9 @@ Back in the bot's Command Prompt (in the `Minecraft_bot` folder):
 ```bat
 npm run doctor
 ```
-You want green ✓ marks for Node, the config, Ollama, the model, and the server ("localhost:25565 answers"). It also measures how fast the model is on your card, e.g. `≈ 5.0s per decision`, and whether it fits in VRAM.
+You want green ✓ marks for Node, the config, Ollama, the model, and the server ("localhost:25565 answers"). It also times the model on your card, e.g. `≈ 5.0s per decision`, and checks it fits in VRAM.
+
+**The timing step can take a minute or two, so let it finish.** Pressing Ctrl+C stops it, and Command Prompt then asks `Terminate batch job (Y/N)?` (that's normal; answer Y).
 
 **Anything with a red ✗ comes with a hint.** The common ones:
 
@@ -164,6 +181,7 @@ MIND [curious 5/10] Nobody's around. I'll punch a tree to get started.
 
 | Problem | Fix |
 | --- | --- |
+| `Connection error: connect ECONNREFUSED` and "Nothing is running at localhost:25565" | The Minecraft server isn't running (yet). Start it (step 4); the bot keeps retrying and joins once it's up. |
 | `Could not read package.json` | You're not in the bot folder: `cd %USERPROFILE%\Minecraft_bot` |
 | `'git' / 'node' / 'ollama' is not recognized` | Close the Command Prompt and open a new one (installers only take effect in new windows). |
 | Answers are very slow | `ollama ps` while the bot runs: it must say 100% GPU (step 1). |
