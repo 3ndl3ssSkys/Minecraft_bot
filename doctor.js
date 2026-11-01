@@ -15,7 +15,7 @@
 const fs = require('fs')
 const path = require('path')
 const mc = require('minecraft-protocol')
-const { loadConfig, loginFor, fallbackServer, serverMods, OllamaClient, errText } = require('./index.js')
+const { loadConfig, loginFor, fallbackServer, serverMods, OllamaClient, errText, sampleDecisionPrompt, usesCompactPrompt } = require('./index.js')
 const knowledge = require('./knowledge')
 
 const ok = (m) => console.log(`  \x1b[32m✓\x1b[0m ${m}`)
@@ -140,7 +140,7 @@ async function checkOllama (config, withFast) {
     bad(`Model "${config.llm.model}" isn't downloaded. Run: ollama pull ${config.llm.model}`)
   } else if (models.length) {
     ok(`model ${config.llm.model} is downloaded`)
-    tip('Timing the model with a decision-sized prompt — up to a minute or two, longer if part of it runs on the CPU. Please wait...')
+    tip('Timing four requests with the bot\'s real decision prompt — up to a minute or two, longer if part of it runs on the CPU. Please wait...')
     await benchmark(config, base)
   }
   const fast = config.llm.fastModel
@@ -151,34 +151,73 @@ async function checkOllama (config, withFast) {
   }
 }
 
-/** One decision-sized request: how fast is it on this machine, and does it fit in VRAM? */
+/** A game state about the size of a real one (varied, so each decision reads it fresh). */
+function sampleState (n) {
+  return JSON.stringify({
+    self: { health: 18 + (n % 3), food: 15, position: { x: 102 + n, y: 64, z: -37 }, dimension: 'overworld', xp: 3 },
+    world: { phase: n % 2 ? 'day' : 'evening', raining: false, biome: 'forest' },
+    inventory: { items: { oak_log: 6 + n, oak_planks: 12, stick: 4, stone_pickaxe: 1, cobblestone: 23, bread: 3 }, freeSlots: 28 },
+    equipment: { hand: 'stone_pickaxe', armor: ['leather_chestplate'] },
+    nearbyEntities: [
+      { id: 41, name: 'Steve', kind: 'player', distance: 7 + n, perceived: 'seen', trust: 'friendly', seems: 'happy' },
+      { id: 57, name: 'zombie', kind: 'hostile', distance: 18, perceived: 'heard' },
+      { id: 60, name: 'cow', kind: 'passive', distance: 9 }
+    ],
+    nearbyBlocks: { oak_log: { count: 14, distance: 4, visible: true }, iron_ore: { count: 2, distance: 11, visible: false }, crafting_table: { count: 1, distance: 3 } },
+    status: {
+      currentAction: null, goal: 'gather 20 oak logs', feelings: 'calm (4/10)', danger: 'none',
+      goals: { overarching: 'have a cozy base and good gear (your own idea)', workingToward: ['build a cozy base (your own idea)'], current: 'gather 20 oak logs (your own idea)', steps: ['[x] find trees', '[>] chop 20 oak logs'] }
+    },
+    recentEvents: ['30s ago: Steve came close to you.', '12s ago: You finished a step: find trees.'],
+    recentActions: [{ action: 'mineBlock', ok: true, message: `Mined ${n + 2} oak_log.` }],
+    recentChat: [{ from: 'Steve', text: 'nice trees here' }]
+  })
+}
+
+/**
+ * Time real decisions with the bot's own prompt: a cold one, the next one (Ollama reuses the
+ * unchanged start of the prompt), and one right after a chat reply (which may push that out).
+ */
 async function benchmark (config, base) {
-  // Roughly the size of a real decision prompt (~4-5k tokens).
-  const filler = knowledge.FACTS.map((f) => f[1]).join('\n')
-  const system = `You are a Minecraft player. Reference:\n${filler}\n${filler}`.slice(0, 13000)
-  const user = `${JSON.stringify({ self: { health: 20, food: 18, position: { x: 10, y: 64, z: -3 } }, nearbyBlocks: { oak_log: { count: 12, distance: 5 } }, inventory: { items: { dirt: 12 } } })}\nChoose your next action as JSON: {"thought": "...", "action": "..."}`
-  const started = Date.now()
-  try {
+  const system = sampleDecisionPrompt(config)
+  const chatSystem = `You are ${config.server.username || 'Wanderer'}, a Minecraft player reading chat. ${knowledge.FACTS.slice(0, 12).map((f) => f[1]).join(' ')}\nReply with ONLY JSON: {"reply": "..."}`
+  const call = async (sys, user, predict = 150) => {
+    const t = Date.now()
     const res = await fetch(config.llm.url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: config.llm.model, stream: false, format: 'json', keep_alive: config.llm.keepAlive, ...(typeof config.llm.think === 'boolean' ? { think: config.llm.think } : {}), options: { num_ctx: config.llm.numCtx, num_predict: 120 }, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
-      signal: AbortSignal.timeout(180000)
+      body: JSON.stringify({ model: config.llm.model, stream: false, format: 'json', keep_alive: config.llm.keepAlive, ...(typeof config.llm.think === 'boolean' ? { think: config.llm.think } : {}), options: { num_ctx: config.llm.numCtx, num_predict: predict }, messages: [{ role: 'system', content: sys }, { role: 'user', content: user }] }),
+      signal: AbortSignal.timeout(240000)
     })
     const d = await res.json()
-    if (d.message?.thinking || /<\/think>/.test(d.message?.content || '')) {
+    if (d.error) throw new Error(d.error)
+    return { ...d, wall: (Date.now() - t) / 1000 }
+  }
+  try {
+    const first = await call(system, sampleState(1))
+    if (first.message?.thinking || /<\/think>/.test(first.message?.content || '')) {
       bad(`${config.llm.model} "thinks" out loud before answering${config.llm.think === false ? ', even with thinking switched off' : ''} — that makes every decision slow.`)
       tip(config.llm.think === false ? 'It\'s a thinking-only version. Use a normal one: ollama pull qwen3:4b-instruct (or qwen2.5:3b), then npm run setup.' : 'Set "think": false under "llm" in config.local.json (npm run setup does this for Qwen3).')
     }
-    if (!d.prompt_eval_count || !d.eval_duration) { warn('the model answered, but Ollama returned no timing info (very old Ollama?)'); return }
-    const s = (ns) => ns / 1e9
-    const promptTps = d.prompt_eval_count / Math.max(0.001, s(d.prompt_eval_duration || 1))
-    const genTps = d.eval_count / Math.max(0.001, s(d.eval_duration || 1))
-    ok(`benchmark: ${d.prompt_eval_count} prompt tokens at ${promptTps.toFixed(0)} tok/s, ${d.eval_count} reply tokens at ${genTps.toFixed(1)} tok/s (${((Date.now() - started) / 1000).toFixed(1)}s total, model load ${s(d.load_duration || 0).toFixed(1)}s)`)
-    const perDecision = 2500 / promptTps + 150 / genTps // after the first call, the fixed part of the prompt is usually cached
-    const msg = `≈ ${perDecision.toFixed(1)}s per decision once warmed up`
-    if (perDecision <= 8) ok(msg)
-    else warn(`${msg} — playable but slow. A smaller model (qwen2.5:3b) or a smaller llm.numCtx makes it snappier.`)
+    if (!first.prompt_eval_count || !first.eval_duration) { warn('the model answered, but Ollama returned no timing info (very old Ollama?)'); return }
+    const sec = (ns) => ns / 1e9
+    const readTps = first.prompt_eval_count / Math.max(0.001, sec(first.prompt_eval_duration || 1))
+    const writeTps = first.eval_count / Math.max(0.001, sec(first.eval_duration || 1))
+    ok(`reads ${readTps.toFixed(0)} tokens/s, writes ${writeTps.toFixed(1)} tokens/s (model load ${sec(first.load_duration || 0).toFixed(1)}s)`)
+    tip(`decision prompt: ~${first.prompt_eval_count} tokens${usesCompactPrompt(config) ? ' (compact)' : ' (full — llm.compactPrompt: true makes it ~60% shorter)'}`)
+    const next = await call(system, sampleState(2))
+    const cached = next.prompt_eval_count < first.prompt_eval_count * 0.8
+    const msg = `a decision takes ≈ ${next.wall.toFixed(1)}s once warmed up (read ${next.prompt_eval_count} new tokens${cached ? '; the rest was reused' : ''}, wrote ${next.eval_count})`
+    if (next.wall <= 8) ok(msg)
+    else warn(`${msg} — playable but slow; see README "Which model, and making it fast".`)
+    await call(chatSystem, 'Steve: hey, got any spare iron?', 40)
+    const after = await call(system, sampleState(3))
+    if (after.wall > next.wall * 1.5 && after.wall - next.wall > 2) {
+      warn(`right after a chat reply a decision takes ≈ ${after.wall.toFixed(1)}s: the chat pushed the decision prompt out of Ollama's memory, so it was read again.`)
+      tip(config.llm.fastModel ? 'Your fastModel should prevent this; check it is downloaded.' : 'Fix: a small separate chat model keeps its own memory — npm run setup → "Small model for chat replies": qwen3:1.7b.')
+    } else {
+      ok(`a chat reply in between doesn't slow the next decision (≈ ${after.wall.toFixed(1)}s)`)
+    }
   } catch (err) {
     bad(`benchmark failed: ${errText(err)}`)
     return
@@ -195,7 +234,7 @@ async function benchmark (config, base) {
         warn(`only ${pct}% on the GPU (${gb(m.size_vram)} of ${gb(m.size)} GB) — the rest runs on the CPU, which is several times slower.`)
         tip('This model is a bit too big for this card (Windows also uses some of its memory for the screen).')
         tip('Easiest fix: a smaller model that fits entirely —  npm run setup  and choose qwen3:4b-instruct (it downloads and tests it).')
-        tip('Or: the Ollama settings in START-HERE.md step 1 (restart Ollama after setting them), and llm.numCtx 6144.')
+        tip('Or: the Ollama settings from npm run setup (restart Ollama after setting them), and llm.numCtx 6144.')
       } else warn('running entirely on the CPU — check the GPU driver / that Ollama sees your GPU.')
     }
   } catch { /* older Ollama without /api/ps */ }

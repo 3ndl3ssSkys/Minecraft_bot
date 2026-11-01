@@ -27,7 +27,7 @@ const mineflayer = require('mineflayer')
 const mc = require('minecraft-protocol')
 const minecraftData = require('minecraft-data')
 const { pathfinder, Movements } = require('mineflayer-pathfinder')
-const { ActionExecutor, performGesture, inventorySummary, durabilityLeft } = require('./actions')
+const { ActionExecutor, ACTIONS, describeToolList, performGesture, inventorySummary, durabilityLeft } = require('./actions')
 const { EmotionEngine, LABEL_TO_CORE } = require('./emotions')
 const { SocialModel, WEAPON, PROMISE_KINDS } = require('./social')
 const { Learning, COMBAT_STYLES } = require('./learning')
@@ -119,6 +119,9 @@ const DEFAULT_CONFIG = {
     fastApiKey: '',
     think: null, // thinking models (Qwen3 and the like): false = answer straight away (much faster); null = model default
     maxTokens: 400, // cap on each answer (a decision is ~150 tokens); stops rambling from eating seconds
+    // Shorter decision prompt (same rules and tools, tersely): ~1.4k instead of ~3.4k tokens. A small GPU reads
+    // every token of it before each decision. 'auto' = on for local models of 8B or smaller.
+    compactPrompt: 'auto',
     temperature: 0.7,
     numCtx: 8192,
     keepAlive: '24h', // keep the model loaded: reloading it costs seconds
@@ -1218,8 +1221,43 @@ function mindBlock (agent) {
   return lines.join('\n')
 }
 
+/** Use the short decision prompt? ('auto': for local models up to ~8B, which read prompts slowly.) */
+function usesCompactPrompt (config) {
+  const v = config.llm.compactPrompt
+  if (typeof v === 'boolean') return v
+  const size = String(config.llm.model).match(/(\d+(?:\.\d+)?)b\b/i)
+  return config.llm.provider !== 'openai' && Boolean(size) && Number(size[1]) <= 8
+}
+
+/** The same rules as the full prompt, said in a third of the words. */
+function buildCompactDecisionPrompt (agent, toolDocs) {
+  const { personality, config } = agent
+  return `${personaBlock(personality, agent.bot.username)}
+
+${mindBlock(agent)}
+
+## How you play
+- Each turn: you get the state JSON and choose ONE action; its result comes next turn. Use exact coordinates, names and entity ids from the state, never invented ones. If an action failed, read the error and try something different.
+- Play like a real survival player: wood → tools → stone → ores, food, armor, shelter. Eat when hungry, avoid lava, deep falls and status.dangerZonesNearby, be careful at night, sleep in beds. Your body handles falls, lava and sudden hits by itself.
+- status.task is something you agreed to do for a player: work on it (items are handed over automatically once you have enough). taskUpdate.status: working, done (non-item tasks), gave_up (with a note) or none.
+- Goals (status.goals): overall → long-term → current goal → steps. Aim each action at the current step. Report goal, subgoal (the step you're on) and goalStatus: working, subgoal_done, goal_done, blocked or new_goal (you changed your mind; not for goals set for you). Urgent things are detours: name them as the goal with "working".
+- Your senses are realistic: you only know what's in nearbyEntities and status.senses. Odd sounds with nobody around → be careful and check it out.
+- Be a good guest: don't break other players' builds, never take from someone's private chest (inspectContainer tells you whose it is), follow rules on signs and in chat.
+- People: nearbyEntities shows your trust in each player and how they seem. Generous with friends, guarded with strangers, keep away from people who hurt you. Fight players only if they attack you or ask for a duel (sparring: true).
+- Your feelings (status.feelings) colour how you play. Building: planBuilding with your own idea, then build. Unsure how something works: knowledge.
+- ${chatPolicy(config.chat.mode)}${config.server.platform === 'bedrock' ? "\n- You're on a Bedrock bridge: no breaking blocks, chests or crafting." : ''}
+- "thought": one short sentence.
+
+## Actions
+${toolDocs}
+
+## Answer
+ONLY a JSON object: {"thought", "emotion" (${EMOTIONS.join('|')}), "emotionIntensity" 1-10, "goal", "subgoal", "goalStatus", "action": {"name", "args": {}}, "taskUpdate": {"status", "note"}}`
+}
+
 function buildDecisionPrompt (agent, toolDocs) {
   const { personality, config } = agent
+  if (usesCompactPrompt(config)) return buildCompactDecisionPrompt(agent, toolDocs)
   return `${personaBlock(personality, agent.bot.username)}
 
 ${mindBlock(agent)}
@@ -1252,6 +1290,17 @@ ${toolDocs}
 ## Response format
 Reply with ONLY a JSON object, no other text:
 {"thought": "...", "emotion": "<one of: ${EMOTIONS.join(', ')}>", "emotionIntensity": 1-10, "goal": "current goal", "subgoal": "the step you're on", "goalStatus": "working|subgoal_done|goal_done|blocked|new_goal", "action": {"name": "<action name>", "args": { ... }}, "taskUpdate": {"status": "none|working|done|gave_up", "note": "..."}}`
+}
+
+/** The real decision system prompt for a config, without a running bot (the doctor times it). */
+function sampleDecisionPrompt (config) {
+  const agent = {
+    config,
+    personality: loadPersonality(config.personality),
+    bot: { username: config.server.username || 'Wanderer' },
+    intelligence: new Intelligence(() => config.intelligence, {})
+  }
+  return buildDecisionPrompt(agent, describeToolList(Object.keys(ACTIONS), usesCompactPrompt(config)))
 }
 
 /** Compact one-line status used by the chat-oriented prompts. */
@@ -2883,7 +2932,7 @@ ${said ? `${name} just said: ${said}
     if (!memory.goal) nudges.push('You have no current goal: pick a sensible one based on your ambitions and situation.')
 
     const messages = [
-      { role: 'system', content: buildDecisionPrompt(agent, executor.describeTools()) },
+      { role: 'system', content: buildDecisionPrompt(agent, executor.describeTools(usesCompactPrompt(config))) },
       {
         role: 'user',
         content: `Current state:\n${JSON.stringify(state)}\n\n` +
@@ -3438,4 +3487,4 @@ function main () {
 
 if (require.main === module) main()
 
-module.exports = { Agent, Brain, Perception, ChatManager, EventReactor, OllamaClient, loadConfig, deepMerge, parsePluginChat, loginFor, fallbackServer, serverMods, errText, stripThinking, DEFAULT_CONFIG }
+module.exports = { Agent, Brain, Perception, ChatManager, EventReactor, OllamaClient, loadConfig, deepMerge, parsePluginChat, loginFor, fallbackServer, serverMods, errText, stripThinking, sampleDecisionPrompt, usesCompactPrompt, DEFAULT_CONFIG }

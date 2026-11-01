@@ -1541,6 +1541,59 @@ async function performGesture (bot, gesture, signal) {
   }
 }
 
+/** One-line hints for the compact prompt (small GPUs read every token of the prompt, every decision). */
+const SHORT = {
+  moveToBlock: 'walk/climb/swim to a coordinate from the state',
+  moveToPlayer: 'walk to a player',
+  followPlayer: 'follow a player for a while',
+  explore: 'wander to find new terrain and resources',
+  mineBlock: 'find, walk to and mine blocks (best tool, picks up drops)',
+  placeBlock: 'place a block from your inventory (needs a solid neighbour)',
+  chatMessage: 'say something in public chat',
+  equipItem: 'hold or wear an item',
+  attackTarget: 'fight an entity with your whole kit and real tactics',
+  retreat: 'run away from an entity',
+  eatFood: 'eat (best food if none given)',
+  collectDrops: 'pick up items on the ground',
+  craftItem: 'craft (uses a nearby crafting table)',
+  giveItem: 'walk over and toss a player items',
+  sleepInBed: 'sleep in a nearby bed (night only)',
+  smeltItem: 'smelt or cook in a nearby furnace',
+  storeItems: 'put items in a nearby chest ("all" keeps tools, armor, some food)',
+  takeItems: 'take items from a nearby chest you may use',
+  activateBlock: 'use a door, gate, lever, button...',
+  fish: 'fish for a while',
+  useItem: 'drink/eat, throw (potion, pearl), buckets, bone meal, flint and steel...; target: "self", "feet", an entity id or "x,y,z"',
+  knowledge: 'look up an item, recipe or how-to (what a player of your skill knows)',
+  readSigns: 'read nearby signs',
+  inspectContainer: "open a chest: whose it is and what's inside",
+  parkour: 'hop around nearby blocks',
+  planBuilding: 'design your own building fitted to the terrain',
+  build: 'continue building the plan',
+  cancelBuilding: 'drop the building plan',
+  emote: 'body language',
+  wait: 'idle and look around',
+  respawn: 'die on purpose to respawn (only when hopelessly stuck or lost)'
+}
+
+/** "x: number, range: number, optional (default 1)" → "x, range?" (enums kept: they matter). */
+function shortParams (params) {
+  return Object.entries(params).map(([k, v]) => {
+    const enumMatch = String(v).match(/(?:^|optional: )([a-z_]+(?:\|[a-z_A-Z-]+)+)/)
+    const optional = /optional/.test(v)
+    return `${k}${optional ? '?' : ''}${enumMatch ? `: ${enumMatch[1]}` : ''}`
+  }).join(', ')
+}
+
+function describeToolList (names, compact = false) {
+  return names.map((name) => {
+    const a = ACTIONS[name]
+    if (compact) return `- ${name}(${shortParams(a.params)}) — ${SHORT[name] || a.description.split(/[.(]/)[0]}`
+    const params = Object.entries(a.params).map(([k, v]) => `${k}: ${v}`).join(', ')
+    return `- ${name}(${params}) — ${a.description}`
+  }).join('\n')
+}
+
 // ---------------------------------------------------------------------------
 // ActionExecutor — runs exactly one action at a time, safely.
 // ---------------------------------------------------------------------------
@@ -1598,12 +1651,9 @@ class ActionExecutor {
   }
 
   /** Tool documentation for the system prompt. */
-  describeTools () {
-    return this.availableTools().map((name) => {
-      const a = ACTIONS[name]
-      const params = Object.entries(a.params).map(([k, v]) => `${k}: ${v}`).join(', ')
-      return `- ${name}(${params}) — ${a.description}`
-    }).join('\n')
+  /** Tool documentation for the system prompt (compact: one short line each). */
+  describeTools (compact = false) {
+    return describeToolList(this.availableTools(), compact)
   }
 
   /**
@@ -1688,6 +1738,7 @@ module.exports = {
   ACTIONS,
   ActionExecutor,
   ActionError,
+  describeToolList,
   performGesture,
   normalizeName,
   inventorySummary,

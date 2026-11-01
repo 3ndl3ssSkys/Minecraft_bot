@@ -159,6 +159,7 @@ The bot runs alongside Ollama on any PC that can reach the Minecraft server; it 
 - **Danger never waits for the model** (see [Reflexes](#reflexes-reflexes)).
 - **While it thinks, it keeps playing** (busy work).
 - **Chat gets its own lane** with `llm.fastModel`: a small model answers chat while the big one plans, so a reply never sits behind a 4-second decision. That also keeps the big model's prompt cache warm: Ollama reuses the unchanged start of the decision prompt instead of re-reading ~3,400 tokens every time.
+- **A compact decision prompt** (`llm.compactPrompt`, on automatically for models up to 8B): the same rules and tools in ~1,500 tokens instead of ~3,300. A GTX 1660 Super reads only ~200 tokens/s, so this alone saves ~9 s whenever the prompt isn't cached.
 - **Settings:**
   - `llm.maxTokens` caps rambling;
   - `llm.keepAlive: "24h"` stops reloads;

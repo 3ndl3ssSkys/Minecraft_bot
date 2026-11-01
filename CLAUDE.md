@@ -4,6 +4,7 @@ Everything learned while building this bot: what it is, how it's put together, w
 
 - **Setup for users:** [START-HERE.md](START-HERE.md) (Windows, one path, exact commands — the user found SETUP.md too much to start with), then [SETUP.md](SETUP.md). **Configuring** (goals, feelings, personality, chat, reactions, fighting): [CONFIGURING.md](CONFIGURING.md).
 - **Feature reference:** [README.md](README.md).
+- **The whole conversation, request by request, and the next task:** [HISTORY.md](HISTORY.md). Read it when picking the project up. Section 14 is the next thing to build: long-term memory and separate bot saves.
 
 ## The user and what they want
 
@@ -184,7 +185,7 @@ Reflexes (every physics tick, 20/s, no LLM): falls, lava, drowning, hits → tak
   - real speeds of qwen3:4b-instruct + qwen3:1.7b on the 1660 Super, and hosted APIs;
   - the `respawn` action on a real server (lava/drop finding, /kill);
   - how well a real small model keeps to the goal tree (detours vs new_goal).
-  - real decision times on the 1660 Super (qwen3:4b-sized models fit fully on the GPU; the doctor hasn't been run to completion there yet).
+  - real decision times with the compact prompt. Measured with the old ~3.4k-token prompt: reads 209 tokens/s, writes 53 tokens/s, 100% GPU, ≈14.8 s estimated per decision. The compact prompt (`llm.compactPrompt`, ~1.5k tokens) and the doctor's real cold/warm/after-chat timings were built for this; the user hasn't run them yet.
 
 ## Environment notes (for Claude cloud sessions)
 
@@ -200,6 +201,6 @@ Reflexes (every physics tick, 20/s, no LLM): falls, lava, drowning, hits → tak
 ## Ideas not done yet
 
 - A browser viewer of what the bot sees (prismarine-viewer; it would render on the viewer's device).
-- A compact prompt mode (shorter tool docs) for small GPUs — smaller prompts are the biggest remaining speed-up on the 1660 Super.
+- **Next to build:** long-term memories, saved chat history and per-bot profiles (spec in HISTORY.md §14).
 - Testing against a real Paper server with Geyser/Floodgate/ViaVersion and real Qwen, then tuning prompts from real transcripts.
 - Smarter building materials (crafting planks from logs on its own when a build runs short).

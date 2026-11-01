@@ -8,7 +8,7 @@ This walks through everything, in order, from an empty PC to the bot playing on 
 1. [What you're setting up](#1-what-youre-setting-up)
 2. [Decide how the bot joins](#2-decide-how-the-bot-joins)
 3. [Install the software](#3-install-the-software)
-4. [Download the AI model](#4-download-the-ai-model)
+4. [Download the AI model and set up Ollama](#4-download-the-ai-model-and-set-up-ollama)
 5. [Get the bot](#5-get-the-bot)
 6. [Connect it to a server](#6-connect-it-to-a-server)
 7. [Configure the bot](#7-configure-the-bot)
@@ -118,36 +118,68 @@ ollama -v
 
 ---
 
-## 4. Download the AI model
+## 4. Download the AI model and set up Ollama
 
-```bash
-ollama pull qwen2.5:7b
-```
-
-That's the safe default. For **faster** decisions and chat, try a smaller main model plus a tiny chat model (README → "Which model, and making it fast"):
+**Which model.** On a 6 GB card such as the GTX 1660 Super, use **`qwen3:4b-instruct`**:
 ```bash
 ollama pull qwen3:4b-instruct
 ```
-```bash
-ollama pull qwen3:1.7b
-```
-and in `config.local.json`: `"llm": { "model": "qwen3:4b-instruct", "fastModel": "qwen3:1.7b", "think": false }`. (Not plain `qwen3:4b`: that one always thinks out loud first, which is slow.) `npm run setup` sets all of this, plus the Ollama variables below, for you. `npm run doctor` (step 9) tells you which is quicker on your card.
+- It fits entirely on the card (3.2 GB, measured "100% GPU") and answers directly.
+- Not plain `qwen3:4b`: that one is a "thinking" version that reasons out loud for a long time before every answer, even when told not to.
+- `qwen2.5:7b` is a bit smarter but usually doesn't quite fit on 6 GB once Windows has taken its share; it ran ~20% on the CPU there, which is several times slower.
+- On bigger cards, see README → "Which model, and making it fast".
 
-**Recommended for 6 GB cards:** these settings make the model's working memory smaller and keep it loaded.
+`npm run setup` (step 7) can download the model for you and tests that it answers straight away.
 
-| Variable | Value | Why |
+### Ollama settings (recommended for 6 GB cards)
+
+**The easy way:** `npm run setup` shows these settings, explains each one, and sets them when you press Enter. You still have to restart Ollama afterwards (see below).
+
+**By hand:**
+
+| Setting | Value | What it does |
 | --- | --- | --- |
-| `OLLAMA_FLASH_ATTENTION` | `1` | |
-| `OLLAMA_KV_CACHE_TYPE` | `q8_0` | about halves the memory the conversation context takes |
-| `OLLAMA_KEEP_ALIVE` | `24h` | no reload delay between calls |
-| `OLLAMA_MAX_LOADED_MODELS` | `2` | only needed with a `fastModel`: keeps both models loaded |
+| `OLLAMA_FLASH_ATTENTION` | `1` | A faster way to run the model that also uses less memory. |
+| `OLLAMA_KV_CACHE_TYPE` | `q8_0` | Stores the model's working memory (the prompt it's reading) in half the space, so more fits on the card. Needs flash attention. |
+| `OLLAMA_KEEP_ALIVE` | `24h` | Keeps the model loaded between requests, so the bot never waits for it to load again. |
+| `OLLAMA_MAX_LOADED_MODELS` | `2` | Only if you also use a small chat model (`fastModel`): keeps both loaded at once. |
 
-- **Windows:** in a Command Prompt run `setx OLLAMA_FLASH_ATTENTION 1`, `setx OLLAMA_KV_CACHE_TYPE q8_0` and `setx OLLAMA_KEEP_ALIVE 24h` (and `setx OLLAMA_MAX_LOADED_MODELS 2` if you use a fast model). Then quit Ollama from the tray, start it again, and open a new Command Prompt. Check with `ollama ps` while a model runs: PROCESSOR should say **100% GPU**.
-- **Linux:** run `sudo systemctl edit ollama`, add the following, then `sudo systemctl restart ollama`:
-  ```
-  [Service]
-  Environment="OLLAMA_FLASH_ATTENTION=1" "OLLAMA_KV_CACHE_TYPE=q8_0" "OLLAMA_KEEP_ALIVE=24h" "OLLAMA_MAX_LOADED_MODELS=2"
-  ```
+**Windows:** open a Command Prompt and run these, one at a time. Each should answer `SUCCESS: Specified value was saved.`:
+```bat
+setx OLLAMA_FLASH_ATTENTION 1
+```
+```bat
+setx OLLAMA_KV_CACHE_TYPE q8_0
+```
+```bat
+setx OLLAMA_KEEP_ALIVE 24h
+```
+Only if you use a chat model as well:
+```bat
+setx OLLAMA_MAX_LOADED_MODELS 2
+```
+
+**Then restart Ollama,** because it only reads these when it starts:
+1. Right-click the llama icon by the clock → **Quit Ollama**.
+2. Start → **Ollama**.
+3. Open a **new** Command Prompt (old windows don't see the new settings).
+
+**Check they took effect:**
+```bat
+ollama run qwen3:4b-instruct "say hi"
+```
+```bat
+ollama ps
+```
+- **PROCESSOR** should say **100% GPU**.
+- **UNTIL** should say about **24 hours from now**. If it still says "4 minutes from now", Ollama didn't pick up the settings: quit it again (check Task Manager for a leftover `ollama.exe`), or sign out of Windows and back in.
+- In a new Command Prompt, `echo %OLLAMA_KV_CACHE_TYPE%` should print `q8_0`.
+
+**Linux:** run `sudo systemctl edit ollama`, add the following, then `sudo systemctl restart ollama`:
+```
+[Service]
+Environment="OLLAMA_FLASH_ATTENTION=1" "OLLAMA_KV_CACHE_TYPE=q8_0" "OLLAMA_KEEP_ALIVE=24h" "OLLAMA_MAX_LOADED_MODELS=2"
+```
 
 ---
 

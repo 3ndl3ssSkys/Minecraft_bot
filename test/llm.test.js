@@ -90,6 +90,21 @@ server.listen(0, async () => {
   console.log('"Hello! Nice to meet you! 😊" →', JSON.stringify(chat.sanitize('Hello! Nice to meet you! 😊')))
   console.log('ok')
 
+  console.log('\n== compact decision prompt ==')
+  const { sampleDecisionPrompt, usesCompactPrompt } = require(R + 'index.js')
+  const { ACTIONS } = require(R + 'actions.js')
+  const small = deepMerge(DEFAULT_CONFIG, { llm: { model: 'qwen3:4b-instruct' } })
+  const big = deepMerge(DEFAULT_CONFIG, { llm: { model: 'gpt-oss:20b' } })
+  assert(usesCompactPrompt(small) && !usesCompactPrompt(big))
+  assert(usesCompactPrompt(deepMerge(big, { llm: { compactPrompt: true } })) && !usesCompactPrompt(deepMerge(small, { llm: { compactPrompt: false } })))
+  const compactText = sampleDecisionPrompt(small)
+  const fullText = sampleDecisionPrompt(big)
+  for (const name of Object.keys(ACTIONS)) assert(compactText.includes(`- ${name}(`), name) // every tool is still there
+  for (const key of ['goalStatus', 'subgoal', 'taskUpdate', 'sparring', 'private chest']) assert(compactText.includes(key), key)
+  console.log(`compact ${compactText.length} chars vs full ${fullText.length} (${Math.round(100 * compactText.length / fullText.length)}%)`)
+  assert(compactText.length < fullText.length * 0.55)
+  console.log('ok')
+
   console.log('\nAll LLM checks passed')
   server.close()
 })

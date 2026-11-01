@@ -53,7 +53,7 @@ It asks a few questions. Type plain words, without the `[brackets]`; press Enter
 | Small model for chat | Press Enter to skip for now. |
 
 **Then it does the fiddly parts for you:**
-- **Ollama settings for a 6 GB card:** it lists three, says what each one does, and asks `Set them now? [Y]`. Press Enter.
+- **Ollama settings for a 6 GB card:** it lists three, says what each one does, and asks `Set them now? [Y]`. Press Enter. (To type them yourself instead, the `setx` commands are in [SETUP.md step 4](SETUP.md#4-download-the-ai-model-and-set-up-ollama).)
   - `OLLAMA_FLASH_ATTENTION=1`: a faster way to run the model that also uses less memory.
   - `OLLAMA_KV_CACHE_TYPE=q8_0`: the model's working memory takes half the space, so more of the model fits on the card.
   - `OLLAMA_KEEP_ALIVE=24h`: the model stays loaded, so the bot never waits for it to load again.
@@ -79,7 +79,11 @@ ollama run qwen3:4b-instruct "say hi in five words"
 ```bat
 ollama ps
 ```
-The `PROCESSOR` column should say **100% GPU**:
+Check two columns:
+
+**`UNTIL` should say about 24 hours from now.** If it says "4 minutes", Ollama didn't pick up the settings: quit it again (check Task Manager for a leftover `ollama.exe`), or sign out of Windows and back in.
+
+**`PROCESSOR` should say 100% GPU:**
 - **Something like `18%/82% CPU/GPU`:** the model is a little too big for the card. Windows uses part of the card's memory for your screen, and the part on the CPU makes every answer several times slower. Run `npm run setup` again and pick a smaller model (`qwen3:4b-instruct`, or `qwen2.5:3b`).
 - **Mostly or all CPU, even for a small model:** update the NVIDIA driver (nvidia.com or GeForce Experience), restart the PC, and check again.
 
