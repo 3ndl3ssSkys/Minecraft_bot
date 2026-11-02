@@ -15,7 +15,7 @@
 const FACTS = [
   // Progression & tools
   ['progress start wood tools early', 'Early game: punch logs → planks (1 log = 4) → sticks → crafting table → wooden pickaxe → mine stone → stone tools → furnace (8 cobblestone).', 0],
-  ['tools tier pickaxe harvest', 'Tool tiers: wood < stone < iron < diamond < netherite. Iron ore needs a stone pickaxe; diamond, gold, redstone and emerald ore need iron; obsidian and ancient debris need diamond.', 1],
+  ['tools tier pickaxe harvest', 'Tool tiers: wood < stone < iron < diamond < netherite. Stone needs a wooden pickaxe; Iron ore needs a stone pickaxe; diamond, gold, redstone and emerald ore need iron; obsidian and ancient debris need diamond.', 1],
   ['netherite upgrade smithing', 'Netherite: 4 ancient debris → smelt to netherite scrap; 4 scrap + 4 gold ingots = 1 netherite ingot. Upgrade diamond gear at a smithing table with a netherite upgrade template (found in bastions).', 5],
   ['durability repair mending anvil', 'Repair tools by combining two of the same in a crafting grid, or with an anvil and materials. Mending (librarian villager trade or fishing/loot) repairs with XP.', 3],
   // Ores (1.18+)
