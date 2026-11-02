@@ -27,6 +27,7 @@
  * to do.
  */
 
+const ALIGN_STOP = new Set(['get', 'got', 'the', 'and', 'for', 'some', 'any', 'with', 'please', 'make', 'find', 'mine', 'gather', 'collect', 'grab', 'bring', 'give', 'need', 'want', 'can', 'you', 'me', 'more', 'few', 'lot', 'lots', 'of', 'build', 'craft', 'go', 'to', 'out', 'new', 'one', 'two', 'your', 'our'])
 const KINDS = ['gather', 'craft', 'give_item', 'come', 'follow', 'attack', 'protect', 'build', 'explore', 'other']
 const EFFORTS = ['trivial', 'small', 'medium', 'large', 'huge']
 const RISKS = ['none', 'low', 'medium', 'high']
@@ -141,6 +142,39 @@ class TaskManager {
     if (['gather', 'craft', 'give_item', 'come', 'follow'].includes(kind)) req.effort = effortBucket(minutes)
     if (kind === 'attack' && DANGEROUS_MOBS.has(normItem(req.target))) req.risk = 'high'
     return req
+  }
+
+  /**
+   * Does this request just describe what we're already doing, or something our
+   * own current goal already covers? Then there's nothing to decide: say so,
+   * make no second task. Hostile players and fights are never "aligned".
+   * @returns {{ what: string, via: 'task'|'goal', req: object }|null}
+   */
+  alignment (from, rawReq) {
+    const req = this.normalize(from, rawReq)
+    if (this.agent.social.isHostile(from) || ['attack', 'protect', 'give_item', 'come', 'follow'].includes(req.kind)) return null
+    const SYN = { wood: 'log', logs: 'log', planks: 'plank', stone: 'cobblestone', cobble: 'cobblestone' }
+    const words = (str) => String(str || '').toLowerCase().split(/[^a-z0-9]+/)
+      .map((w) => SYN[w] || w.replace(/s$/, '')).filter((w) => w.length > 2 && !ALIGN_STOP.has(w))
+    const itemW = words(req.item)
+    const descW = [...new Set([...words(req.description), ...itemW])]
+    if (!descW.length) return null
+    // Everything that identifies the request has to show up in the text (items), or at least two content words (free text).
+    const covers = (text) => {
+      const t = new Set(words(text))
+      if (itemW.length) return itemW.every((w) => t.has(w))
+      return descW.length >= 2 ? descW.filter((w) => t.has(w)).length >= Math.min(2, descW.length) : t.has(descW[0])
+    }
+    const t = this.active()
+    if (t && t.kind === req.kind && t.from.toLowerCase() === from.toLowerCase() && (covers(`${t.item} ${t.description}`) || (!req.item && !t.item && covers(t.description)))) {
+      return { via: 'task', what: t.description, req }
+    }
+    const g = this.agent.goals?.current
+    if (g && ['gather', 'craft', 'build', 'explore', 'other'].includes(req.kind)) {
+      const text = `${g.text} ${g.steps?.[g.now ?? 0]?.text || ''}`
+      if (covers(text)) return { via: 'goal', what: g.text, req }
+    }
+    return null
   }
 
   isPlayerName (name) {

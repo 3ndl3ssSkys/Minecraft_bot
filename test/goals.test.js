@@ -64,7 +64,10 @@ g.onDecision({ goal: 'drink some milk', subgoal: '', goalStatus: 'working' })
 assert.equal(g.current.text, 'explore the forest') // under way: a quick detour doesn't wipe the plan
 assert.equal(g.currentText(), 'drink some milk')
 g.onDecision({ goal: 'build a little hut', subgoal: 'get logs', goalStatus: 'new_goal' })
-assert.equal(g.current.text, 'build a little hut') // changed its mind: replaced
+assert.equal(g.current.text, 'explore the forest') // a fresh goal is kept for a couple of minutes: no flip-flopping
+g.current.at -= 3 * 60000
+g.onDecision({ goal: 'build a little hut', subgoal: 'get logs', goalStatus: 'new_goal' })
+assert.equal(g.current.text, 'build a little hut') // changed its mind after a while: replaced
 assert(g.history.some((h) => h.status === 'changed' && h.text === 'explore the forest'))
 console.log('ok')
 

@@ -21,6 +21,7 @@ const { Vec3 } = require('vec3')
 
 const { ActionError, sleep, abortError, throwIfAborted, abortableSleep, normalizeName, fmtPos } = require('./util')
 const combat = require('./combat')
+const { COMBAT_STYLES } = require('./learning')
 const knowledge = require('./knowledge')
 const building = require('./building')
 const { signText } = require('./containers')
@@ -436,27 +437,37 @@ function describeContainer (info) {
   return ` It looks like ${info.label}${info.reasons.length ? ` (${info.reasons.join('; ')})` : ''}.${info.changes ? ` ${info.changes[0].toUpperCase()}${info.changes.slice(1)}.` : ''}`
 }
 
-/** Ground-level spot within a few blocks, a bit higher or lower than us, for parkour hops. */
-function hopTargets (bot, radius = 5) {
-  const me = bot.entity.position.floored()
-  const out = []
-  for (let dx = -radius; dx <= radius; dx++) {
-    for (let dz = -radius; dz <= radius; dz++) {
-      const dist = Math.hypot(dx, dz)
-      if (dist < 2 || dist > radius) continue
-      for (let dy = 2; dy >= -2; dy--) {
-        const feet = me.offset(dx, dy, dz)
-        const below = bot.blockAt(feet.offset(0, -1, 0))
-        const at = bot.blockAt(feet)
-        const head = bot.blockAt(feet.offset(0, 1, 0))
-        if (below?.boundingBox === 'block' && !/lava|magma|cactus|campfire/.test(below.name) && at?.boundingBox === 'empty' && head?.boundingBox === 'empty' && !/lava|water/.test(at.name)) {
-          out.push({ pos: feet, interest: Math.abs(dy) + (dist >= 3 ? 1 : 0) })
-          break
-        }
-      }
-    }
+// Where each bot has already explored, so "explore" keeps heading somewhere new instead of random-walking in circles.
+const exploreMemory = new WeakMap()
+
+/** A heading that keeps its general direction but avoids ground already covered. */
+function pickExploreAngle (bot, distance) {
+  const mem = exploreMemory.get(bot) || { heading: Math.random() * Math.PI * 2, trail: [] }
+  exploreMemory.set(bot, mem)
+  const p = bot.entity.position
+  let best = null
+  for (let i = 0; i < 14; i++) {
+    const a = i === 0 ? mem.heading : mem.heading + (Math.random() - 0.5) * Math.PI * (i < 8 ? 0.7 : 2)
+    const tx = p.x + Math.cos(a) * distance
+    const tz = p.z + Math.sin(a) * distance
+    const nearest = mem.trail.length ? Math.min(...mem.trail.map((t) => Math.hypot(t.x - tx, t.z - tz))) : distance * 2
+    const turn = Math.abs(Math.atan2(Math.sin(a - mem.heading), Math.cos(a - mem.heading)))
+    const score = Math.min(nearest, distance * 2) - turn * distance * 0.25
+    if (!best || score > best.score) best = { a, score }
   }
-  return out.sort((a, b) => b.interest - a.interest)
+  return best.a
+}
+
+/** Remember the leg just walked; if we barely moved (blocked), turn well away from that heading. */
+function noteExplored (bot, from, intended) {
+  const mem = exploreMemory.get(bot) || { heading: intended, trail: [] }
+  exploreMemory.set(bot, mem)
+  const p = bot.entity.position
+  mem.trail.push({ x: from.x, z: from.z })
+  mem.trail.push({ x: p.x, z: p.z })
+  if (mem.trail.length > 24) mem.trail.splice(0, mem.trail.length - 24)
+  const moved = Math.hypot(p.x - from.x, p.z - from.z)
+  mem.heading = moved > 4 ? Math.atan2(p.z - from.z, p.x - from.x) : intended + Math.PI / 2 + Math.random() * Math.PI / 2
 }
 
 // ---------------------------------------------------------------------------
@@ -536,8 +547,9 @@ const ACTIONS = {
       const distance = argNumber(args, 'distance', { min: 8, max: 64, def: 24 })
       const dirs = { north: -Math.PI / 2, south: Math.PI / 2, east: 0, west: Math.PI }
       const dirName = args?.direction ? normalizeName(args.direction) : null
-      const angle = dirs[dirName] ?? Math.random() * Math.PI * 2
       const p = bot.entity.position
+      const angle = dirs[dirName] ?? pickExploreAngle(bot, distance)
+      const from = p.clone()
       const tx = Math.floor(p.x + Math.cos(angle) * distance)
       const tz = Math.floor(p.z + Math.sin(angle) * distance)
       try {
@@ -545,10 +557,12 @@ const ACTIONS = {
       } catch (err) {
         // Partial progress still counts as exploring.
         if (err.code === 'PATH_TIMEOUT' || err.code === 'STUCK') {
+          noteExplored(bot, from, angle)
           return `Explored part of the way (${err.code}). Now at ${fmtPos(bot.entity.position)}.`
         }
         throw err
       }
+      noteExplored(bot, from, angle)
       return `Explored to ${fmtPos(bot.entity.position)}.`
     }
   },
@@ -708,6 +722,19 @@ const ACTIONS = {
       const style = ctx.learning
         ? ctx.learning.combat.chooseStyle(key, { forced: args?.style, available })
         : { name: 'balanced', crit: true, wtap: true, strafe: true, shield: true, retreatHealth: 7 }
+      // Skilled fighters with better gear (or just better) press harder: fight on at lower health, favour aggressive styles.
+      if (ctx.intel && !args?.style) {
+        const prof = ctx.intel.combatProfile()
+        const bold = combat.boldness({ own: combat.ownPower(bot), opp: combat.opponentPower(entity), skill: prof.skill, level: prof.level, health: bot.health })
+        if (bold > 0.1) {
+          style.retreatHealth = Math.max(2, style.retreatHealth - Math.round(bold * 3))
+          if (['balanced', 'cautious', 'hitAndRun'].includes(style.name) && Math.random() < bold * 0.8) {
+            const pick = available.includes('comboAxe') && bold > 0.4 ? 'comboAxe' : 'aggressive'
+            if (available.includes(pick)) { const base = COMBAT_STYLES[pick]; Object.assign(style, { name: pick, ...base, retreatHealth: Math.max(2, base.retreatHealth - Math.round(bold * 3)) }) }
+          }
+          ctx.log.info(`Feeling confident against ${label} (boldness ${bold.toFixed(2)}).`)
+        }
+      }
       ctx.log.info(`Fighting ${label} with style "${style.name}" (retreat at ${style.retreatHealth} hp) — kit: ${combat.describeKit(bot)}`)
 
       let result
@@ -1202,30 +1229,16 @@ const ACTIONS = {
   },
 
   parkour: {
-    description: 'Hop and sprint-jump around nearby blocks for a bit, like a player fidgeting while thinking.',
-    params: { seconds: 'number, optional (default 8)' },
+    description: 'Practice real parkour: find a gap nearby and jump across it (run-up, timed sprint jumps). Does nothing if there is no gap. Practice raises your parkour skill.',
+    params: { seconds: 'number, optional (default 20)', jumps: 'number, optional (default 3)' },
     async run (ctx, args) {
-      const { bot, signal } = ctx
-      const end = Date.now() + argNumber(args, 'seconds', { min: 2, max: 30, def: 8 }) * 1000
-      const home = bot.entity.position.clone() // fidget around here, don't wander off
-      let hops = 0
-      while (Date.now() < end) {
-        throwIfAborted(signal)
-        const options = hopTargets(bot).filter((o) => o.pos.distanceTo(home) <= 4.5).slice(0, 8)
-        if (!options.length) break
-        const t = options[Math.floor(Math.random() * options.length)].pos
-        bot.setControlState('sprint', true)
-        try {
-          await gotoGoal(ctx, new goals.GoalBlock(t.x, t.y, t.z), { timeoutMs: 4000, stuckMs: 2500, label: 'hop' })
-          hops++
-        } catch (err) {
-          if (err.code === 'ABORTED') throw err
-        } finally {
-          bot.setControlState('sprint', false)
-        }
-        if (Math.random() < 0.3) await performGesture(bot, Math.random() < 0.5 ? 'jump' : 'look_around', signal).catch(() => {})
-      }
-      return `Hopped around (${hops} jumps).`
+      if (!ctx.parkour) throw new ActionError('UNSUPPORTED', 'Parkour is not available.')
+      const goto = (pos) => gotoGoal(ctx, new goals.GoalNear(pos.x, pos.y, pos.z, 0.7), { timeoutMs: 8000, stuckMs: 3000, label: 'the run-up' })
+      return ctx.parkour.practice(ctx, {
+        goto,
+        seconds: argNumber(args, 'seconds', { min: 5, max: 60, def: 20 }),
+        maxJumps: argNumber(args, 'jumps', { min: 1, max: 8, def: 3 })
+      })
     }
   },
 
@@ -1567,7 +1580,7 @@ const SHORT = {
   knowledge: 'look up an item, recipe or how-to (what a player of your skill knows)',
   readSigns: 'read nearby signs',
   inspectContainer: "open a chest: whose it is and what's inside",
-  parkour: 'hop around nearby blocks',
+  parkour: 'practice real gap jumps nearby (raises parkour skill)',
   planBuilding: 'design your own building fitted to the terrain',
   build: 'continue building the plan',
   cancelBuilding: 'drop the building plan',
@@ -1611,8 +1624,8 @@ class ActionExecutor {
    * @param {object} [deps.memory]   Memory (recent chat, e.g. duel invitations)
    * @param {object} [deps.tasks]    TaskManager (fights the bot agreed to)
    */
-  constructor ({ bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes }) {
-    Object.assign(this, { bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes })
+  constructor ({ bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes, parkour }) {
+    Object.assign(this, { bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes, parkour })
     this.current = null // { name, args, startedAt, controller }
     this.pauseUntil = 0
     this.pauseListeners = new Set()
@@ -1690,6 +1703,7 @@ class ActionExecutor {
       containers: this.containers,
       knowledgeOpts: this.knowledgeOpts,
       reflexes: this.reflexes,
+      parkour: this.parkour,
       isPaused: () => this.paused,
       onPause: (fn) => { this.pauseListeners.add(fn); return () => this.pauseListeners.delete(fn) },
       signal: controller.signal
@@ -1740,6 +1754,8 @@ module.exports = {
   ActionError,
   describeToolList,
   performGesture,
+  pickExploreAngle,
+  noteExplored,
   normalizeName,
   inventorySummary,
   durabilityLeft

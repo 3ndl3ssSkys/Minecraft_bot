@@ -1,0 +1,20 @@
+'use strict'
+const assert = require('assert')
+const { boldness, gearPower, opponentPower } = require('../combat')
+const { Intelligence } = require('../intelligence')
+const prof = (level) => new Intelligence(() => ({ level, learn: false })).combatProfile()
+const bold = (level, own, opp, health = 20) => { const p = prof(level); return boldness({ own, opp, skill: p.skill, level: p.level, health }) }
+
+const iron = gearPower('iron_sword', ['iron_helmet', 'iron_chestplate', 'iron_leggings', 'iron_boots'])
+const wood = gearPower('wooden_sword', [])
+const dia = gearPower('diamond_sword', ['diamond_helmet', 'diamond_chestplate', 'diamond_leggings', 'diamond_boots'])
+console.log('gear power: wood', wood.toFixed(1), 'iron', iron.toFixed(1), 'diamond', dia.toFixed(1), '| zombie', opponentPower({ type: 'hostile', name: 'zombie' }))
+assert.ok(wood < iron && iron < dia)
+assert.equal(bold('beginning', dia, wood), 0, 'beginners are never bold')
+assert.equal(bold('simple', dia, wood), 0, 'neither are simple players')
+assert.ok(bold('complicated', iron, 2) > 0.3, 'a decent player in iron is bold against a zombie')
+assert.ok(bold('hardcore', iron, 2) > bold('complicated', iron, 2), 'higher skill is bolder')
+assert.ok(bold('hardcore', dia, iron) > bold('hardcore', iron, iron), 'better gear than the opponent makes it bolder')
+assert.ok(bold('hardcore', wood, dia) < 0.1, 'it does not charge a much better-geared opponent')
+assert.ok(bold('master', iron, iron, 6) < bold('master', iron, iron, 20), 'low health cools it down')
+console.log('ALL AGGRESSION CHECKS PASSED')

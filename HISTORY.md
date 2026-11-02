@@ -223,6 +223,34 @@ The user also asked about a claim from Google that Qwen 1.7B gives sub-300 ms re
 - **Duplicate chat lines:** each line arrived twice on 26.1; now deduped.
 - **Next:** the user runs it again (`git pull`, `npm start`) and pastes the log. Check that actions now have real arguments, then tune from what it does.
 
+## 16. Review pass: log bias, circling, suggestions, chat, real parkour, speed, memory (done; needs live testing)
+
+**Asked for (by the user):** the bot only mined logs, ran in circles ("parkour" was hopping in circles, not real gap jumps), turned suggestions into tasks/agree/reject at random, chatted badly ("gg"). Then: real parkour with a skill ladder per intelligence level (learning by repetition and by failing harder jumps), faster and smarter qwen3:4b (chat and decisions fighting over one model, changing its mind, poor retention), more aggression at higher skill with better gear, and finish section 14 (long-term memory, bot saves).
+
+**Done (first patch, already delivered to the user, tests pass):**
+- `index.js` DECISION_EXAMPLES (4 neutral examples, chosen by bot name) replace the single "oak_log" example; `Perception.hints` says when it has enough logs and what comes next; busy-work parkour rare and never twice in a row.
+- `actions.js` explore keeps a heading and avoids its own trail (`pickExploreAngle`, `noteExplored`); old random hop action replaced by a short straight line (superseded below).
+- `tasks.js` `alignment()` + `ChatResponder.answerAligned`: a request that matches the active task or current goal gets "already on it", no new task, no dice roll. Analysis prompt: suggestions are not requests.
+- Chat: "gg" removed from friendly preset and wonFight templates, reaction/small-talk prompts see recent chat, stock phrases discouraged.
+
+**Plan for this pass (tick when done):**
+1. [x] `parkour.js`: tier table per level (beginning: basic 1-gap walk jumps; simple: better + a 2-block jump onto a block one higher; mediocre: 2-3 block jumps, sprint jumps (~90%), 2 (sometimes 3) onto a higher block; complicated: 4 block, up to 3 onto a higher block, ceiling ("head-hitter") hopping learned by spamming, timed sprint jumps; advanced: sometimes 5 block, odd-height blocks; hardcore: reliable, diagonals; master: every standard jump; impossible: angle-perfect boosts, speed potions). New intelligence domain `parkour`. Pathfinder `getMoveParkourForward` wrapped to filter by skill and add risk cost. Real jump executor (run-up, edge-timed jump, air steering) used by the `parkour` action and by busy work only when a real gap exists. Jump outcomes give XP (more for failing at harder jumps).
+2. [x] Physics test: run the executor on prismarine-physics with a synthetic world (no server needed).
+3. [x] Aggression: confidence from gear + skill vs opponent in `fightOrFlight` and in `attackTarget` (lower retreat health, switch to aggressive/comboAxe).
+4. [x] Goal stickiness (`goals.onDecision`: no change of mind within ~2 min unless blocked), plan queue (`next` actions), lean decision output (no emotion/taskUpdate tokens in compact mode), preempt a decision for urgent chat when there is no fastModel, previous-thought line.
+5. [x] Section 14: `memory.js` long-term memories, profiles (`--profile`, `data/profiles/<n>/brain.json`), persistent chat history, `intelligence.learn:false` stops only skill growth.
+6. [x] Docs: CONFIGURING.md (fastModel, Ollama env), CLAUDE.md, this file; tests; cumulative patch `minecraft_bot_improvements.patch`.
+
+**Built so far (this pass):** `parkour.js` (tiers, `findJumps`, `runJump`, `ParkourSkill`: pathfinder wrapper, jump learning, ceiling hopping, `practice`), `test/tools/simbot.js` (fake bot on the real prismarine-physics engine, no server), `test/parkour.test.js`, `test/aggression.test.js`, `test/plan.test.js`. Real-physics findings that shaped the tier table: flat sprint jump max is a 4-block jump, 5 needs a 1-block drop, a walking jump reaches 3, 4-block+1-up works with a full run-up, sprint-jumping a 1-gap hop up a block fails (walk it). `combat.js` got `gearPower/ownPower/opponentPower/boldness`; `fightOrFlight` and `attackTarget` use them (skilled + better gear = lower retreat health, aggressive/comboAxe styles). `goals.js` keeps a fresh goal for 2 min (`COMMIT_MS`). Brain has a follow-up plan (`next` field, `trackPlan/nextPlanned`), compact prompt has lean output (no emotion/taskUpdate), previous thought is fed back, `OllamaClient` cancels a running decision for an urgent chat reply when there is no fast model (`llm.preemptForChat`).
+
+**Section 14 done:** `memory.js` (`LongTermMemory`: `remember` merges near-duplicates, `recall` by keyword/importance/recency, `noteChat/earlierWith`, `consolidate` = a low-priority LLM pass every 8 min), saved in brain.json under `memories`; `Memory.addEvent/addChat` feed it; recalled memories and earlier chats appear in the decision and chat prompts. Profiles: `node index.js --profile alex`, `BOT_PROFILE`, or `profile` in config → `data/profiles/<name>/brain.json`. `memory.enabled:false` keeps nothing; `intelligence.learn:false` only stops skill growth. Test: `test/memory.test.js`.
+
+**Vertical jumps (clarified by the user):** standing on a block and jumping forward to a block ONE higher; the tier field `upD` is the longest such forward jump (simple 2, mediocre 2 (sometimes 3), complicated 3, advanced sometimes 4, hardcore 4). Not pillar/tower climbing; the pathfinder's tower setting is left as the config says.
+
+**Ideas left:** deterministic block on mining more logs when hints say enough; more parkour moves (neo, wall jumps), hosted chat model for real-world knowledge.
+
+**How to continue:** `git diff` shows everything uncommitted; `npm run check && npm test` must pass; smoke scripts used so far were throwaway (in /tmp), real tests belong in `test/`.
+
 ## Where it stands now
 
 **Next for the user:**

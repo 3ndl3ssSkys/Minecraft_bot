@@ -31,6 +31,8 @@ const { ActionExecutor, ACTIONS, describeToolList, performGesture, inventorySumm
 const { EmotionEngine, LABEL_TO_CORE } = require('./emotions')
 const { SocialModel, WEAPON, PROMISE_KINDS } = require('./social')
 const { Learning, COMBAT_STYLES } = require('./learning')
+const { ParkourSkill } = require('./parkour')
+const { LongTermMemory } = require('./memory')
 const { TaskManager, KINDS: TASK_KINDS, EFFORTS, RISKS } = require('./tasks')
 const combat = require('./combat')
 const knowledge = require('./knowledge')
@@ -131,6 +133,7 @@ const DEFAULT_CONFIG = {
     keepAlive: '24h', // keep the model loaded: reloading it costs seconds
     timeoutMs: 90000,
     maxRetries: 2,
+    preemptForChat: true, // single model only: a chat reply cancels a running decision (it restarts after the reply)
     useJsonSchema: true // structured outputs (Ollama >= 0.5 / json_schema); false = plain JSON mode
   },
   // Named server profiles: `node index.js --server friend1` merges servers.friend1 into "server".
@@ -242,7 +245,7 @@ const DEFAULT_CONFIG = {
       promiseBroken: { enabled: true, chance: 0.7, cooldownSec: 120, style: 'llm', templates: ['guess {player} forgot...', "{player} you said you'd {promise}"] },
       harmNearby: { enabled: true, chance: 0.6, cooldownSec: 30, perTarget: true, style: 'llm', templates: ['{player} leave the {victim} alone', 'hey, stop that'] },
       crouchGreeting: { enabled: true, chance: 0.9, cooldownSec: 60, perTarget: true, style: 'gesture', gesture: 'crouch', templates: ['o/ {player}'] },
-      wonFight: { enabled: true, chance: 0.5, cooldownSec: 60, style: 'llm', templates: ['gg', 'ez'] },
+      wonFight: { enabled: true, chance: 0.35, cooldownSec: 90, style: 'llm', templates: ['phew, that was close', 'ok that went better than expected'] },
       lostFight: { enabled: true, chance: 0.5, cooldownSec: 60, style: 'template', templates: ['nope, not today', 'gotta heal'] },
       taskDone: { enabled: true, chance: 1, cooldownSec: 0, style: 'llm', templates: ['there you go {player}', 'done!'] },
       taskPartial: { enabled: true, chance: 1, cooldownSec: 0, style: 'llm', templates: ["that's all i got time for {player}", 'got you some, not all of it'] },
@@ -336,6 +339,16 @@ const DEFAULT_CONFIG = {
     allowSparring: true, // accept friendly duels when a player asks ("1v1 me")
     neverAttackOwners: true
   },
+  // Long-term memory: what it keeps across sessions (in its save file). Independent of intelligence.learn,
+  // which only stops skill growth.
+  memory: {
+    enabled: true,
+    max: 120, // memories kept (the most important and recent survive)
+    chatPerPlayer: 40, // lines of chat history saved per player
+    consolidate: true // now and then ask the model what from recent events is worth remembering
+  },
+  // Which bot save to use: data/profiles/<profile>/brain.json. Empty = data/brain.json. Or: node index.js --profile alex
+  profile: '',
   learning: {
     enabled: true,
     file: 'data/brain.json', // relationships, combat stats, lessons, danger zones, in-game settings
@@ -506,12 +519,13 @@ function listPersonalities () {
 }
 
 /** Load config: defaults ← config file ← environment variables. */
-/** CLI: node index.js [config.json] [--server <profile>] */
+/** CLI: node index.js [config.json] [--server <profile>] [--profile <bot save>] */
 function parseArgs () {
   const args = process.argv.slice(2)
-  const out = { file: null, server: process.env.BOT_SERVER || null }
+  const out = { file: null, server: process.env.BOT_SERVER || null, profile: process.env.BOT_PROFILE || null }
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--server') out.server = args[++i]
+    else if (args[i] === '--profile') out.profile = args[++i]
     else if (!args[i].startsWith('--') && !out.file) out.file = args[i]
   }
   return out
@@ -543,6 +557,14 @@ function loadConfig (log) {
   }
   if (config.server.fallback && !config.servers?.[config.server.fallback]) {
     log.warn(`server.fallback is "${config.server.fallback}", but there is no such profile in config.servers; the backup route is off.`)
+  }
+
+  // Separate AI players: each profile has its own save (memories, relationships, skills, goals).
+  const botProfile = String(cli.profile || config.profile || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40)
+  if (botProfile) {
+    config.profile = botProfile
+    config.learning.file = `data/profiles/${botProfile}/brain.json`
+    log.info(`Bot save: profile "${botProfile}" (${config.learning.file})`)
   }
 
   const env = process.env
@@ -600,10 +622,11 @@ class Memory {
     if (list.length > max) list.splice(0, list.length - max)
   }
 
-  addEvent (type, text) { this.push(this.events, { type, text }, 20) }
+  addEvent (type, text) { this.push(this.events, { type, text }, 20); this.long?.fromEvent(type, text) }
 
   addChat (from, text, { self = false, whisper = false } = {}) {
     this.push(this.chat, { from, text, self, whisper }, 30)
+    if (!self) this.long?.noteChat(from, text, false)
     if (self) this.lastSelfChatAt = Date.now()
   }
 
@@ -798,6 +821,12 @@ class Perception {
     const hasAny = (re) => Object.keys(inv).some((n) => re.test(n))
     if (state.world.phase === 'night' || state.world.phase === 'dusk') h.push('It is dark: hostile mobs spawn. Consider shelter, torches or staying near light.')
     if (!hasAny(/_pickaxe$/)) h.push('You have no pickaxe.')
+    const count = (re) => Object.entries(inv).filter(([n]) => re.test(n)).reduce((a, [, c]) => a + (Number(c) || 0), 0)
+    const logsN = count(/_log$/)
+    const planksN = count(/_planks$/)
+    if (logsN + planksN / 4 >= 8) h.push(`You already carry ${logsN} logs and ${planksN} planks, which is plenty. Do NOT chop more trees: craft what you need, or go for stone, ores, food or exploring.`)
+    if (hasAny(/^wooden_pickaxe$/) && !hasAny(/^(stone|iron|diamond|netherite)_pickaxe$/)) h.push('You have a wooden pickaxe: mine cobblestone and make stone tools next.')
+    if (hasAny(/^stone_pickaxe$/) && !hasAny(/^(iron|diamond|netherite)_pickaxe$/)) h.push('You have a stone pickaxe: look for coal and iron ore (caves, hillsides, below y=60) and smelt it.')
     if (state.self.food <= 6) h.push('You are hungry; eat or find food soon.')
     if (state.self.health <= 8) h.push('Your health is low; avoid fights and eat to regenerate.')
     if (state.inventory.freeSlots <= 2) h.push('Your inventory is almost full.')
@@ -892,7 +921,7 @@ class OllamaClient {
   constructor (config, log) {
     this.cfg = config.llm
     this.log = log
-    this.lanes = { main: { queue: [], busy: false }, fast: { queue: [], busy: false } }
+    this.lanes = { main: { queue: [], busy: false, current: null }, fast: { queue: [], busy: false, current: null } }
     this.jsonSchemaSupported = this.cfg.useJsonSchema
     this.thinkSupported = true
   }
@@ -916,6 +945,13 @@ class OllamaClient {
       const q = this.lanes[lane].queue
       q.push({ messages, schema, priority, temperature, label, lane, resolve, reject, at: Date.now() })
       q.sort((a, b) => a.priority - b.priority || a.at - b.at)
+      // One model for everything: a player's message shouldn't wait out a slow decision. Cancel the decision
+      // (it restarts right after the reply); with a separate fast model this never happens.
+      const cur = this.lanes[lane].current
+      if (lane === 'main' && priority === PRIORITY.reply && this.cfg.preemptForChat !== false && cur && cur.job.priority >= PRIORITY.decision && !cur.job.preempted) {
+        cur.job.preempted = true
+        cur.ctrl.abort()
+      }
       this.pump(lane)
     })
   }
@@ -931,11 +967,18 @@ class OllamaClient {
     const job = lane.queue.shift()
     if (!job) return
     lane.busy = true
+    job.ctrl = new AbortController()
+    lane.current = { job, ctrl: job.ctrl }
     try {
       job.resolve(await this.request(job))
     } catch (err) {
-      job.reject(err)
+      if (err.preempted) {
+        job.ctrl = null
+        lane.queue.push(job) // run again after the chat reply, with its original place in line
+        lane.queue.sort((a, b) => a.priority - b.priority || a.at - b.at)
+      } else job.reject(err)
     } finally {
+      lane.current = null
       lane.busy = false
       setImmediate(() => this.pump(name))
     }
@@ -980,7 +1023,7 @@ class OllamaClient {
           method: 'POST',
           headers,
           body: JSON.stringify(this.body(job)),
-          signal: AbortSignal.timeout(this.cfg.timeoutMs)
+          signal: job.ctrl ? AbortSignal.any([AbortSignal.timeout(this.cfg.timeoutMs), job.ctrl.signal]) : AbortSignal.timeout(this.cfg.timeoutMs)
         })
         if (!res.ok) {
           const text = await res.text().catch(() => '')
@@ -1013,6 +1056,7 @@ class OllamaClient {
         this.log.debug(`${label}: ${Date.now() - started}ms, ${data.eval_count ?? data.usage?.completion_tokens ?? '?'} tokens${job.lane === 'fast' ? ' (fast model)' : ''}`)
         return parsed
       } catch (err) {
+        if (job.preempted && job.ctrl?.signal.aborted) { job.preempted = false; throw Object.assign(new Error('preempted'), { preempted: true }) }
         lastErr = err
         const retryable = err.retryable !== false || err.name === 'TimeoutError' || err.cause?.code === 'ECONNREFUSED'
         if (!retryable || attempt === this.cfg.maxRetries) break
@@ -1175,7 +1219,7 @@ function personaBlock (p, botName) {
     `Likes: ${list(p.likes)}. Dislikes: ${list(p.dislikes)}.`
   ]
   if (p.quirks?.length) lines.push(`Quirks: ${list(p.quirks)}.`)
-  if (p.catchphrases?.length) lines.push(`Catchphrases you sometimes use (sparingly): ${p.catchphrases.map((c) => `"${c}"`).join(', ')}.`)
+  if (p.catchphrases?.length) lines.push(`Catchphrases (rarely, only when they truly fit; most messages should use none): ${p.catchphrases.map((c) => `"${c}"`).join(', ')}.`)
   if (p.ambitions?.length) lines.push(`Long-term ambitions: ${list(p.ambitions)}.`)
   lines.push(p.admitsBeingBot
     ? 'Stay in character as a player. If someone sincerely asks whether you are a bot or an AI, be honest about it (casually, in character).'
@@ -1225,17 +1269,23 @@ function mindBlock (agent) {
   return lines.join('\n')
 }
 
-/** A filled-in decision, so small models see the key order and that args are never empty. */
-const DECISION_EXAMPLE = JSON.stringify({
-  thought: 'No tools yet. There are oak logs 4 blocks away, so wood first.',
-  goal: 'make a wooden pickaxe',
-  subgoal: 'chop 4 oak logs',
-  goalStatus: 'working',
-  action: { name: 'mineBlock', args: { blockType: 'oak_log', count: 4 } },
-  taskUpdate: { status: 'none', note: '' },
-  emotion: 'focused',
-  emotionIntensity: 5
-})
+/** Filled-in decisions, so small models see the key order and that args are never empty. Several different ones (picked per bot name, so the prompt stays cacheable): a single "chop oak logs" example made small models copy it forever. */
+const DECISION_EXAMPLES = [
+  { thought: 'I have a wooden pickaxe and stone is right here, so I stock up on cobblestone.', goal: 'get stone tools', subgoal: 'mine 8 cobblestone', goalStatus: 'working', action: { name: 'mineBlock', args: { blockType: 'cobblestone', count: 8 } }, next: [{ name: 'craftItem', args: { itemName: 'stone_pickaxe', count: 1 } }], taskUpdate: { status: 'none', note: '' }, emotion: 'focused', emotionIntensity: 5 },
+  { thought: 'Plenty of planks already, so I make a crafting table before anything else.', goal: 'set up a workbench', subgoal: 'craft a crafting table', goalStatus: 'working', action: { name: 'craftItem', args: { itemName: 'crafting_table', count: 1 } }, next: [{ name: 'craftItem', args: { itemName: 'wooden_pickaxe', count: 1 } }], taskUpdate: { status: 'none', note: '' }, emotion: 'calm', emotionIntensity: 4 },
+  { thought: 'Nothing useful around here, so I head somewhere new to find ore.', goal: 'find iron', subgoal: 'explore east', goalStatus: 'working', action: { name: 'explore', args: { direction: 'east', distance: 32 } }, next: [], taskUpdate: { status: 'none', note: '' }, emotion: 'curious', emotionIntensity: 5 },
+  { thought: 'Iron ore is visible a few blocks away and I have a stone pickaxe.', goal: 'get iron tools', subgoal: 'mine iron ore', goalStatus: 'working', action: { name: 'mineBlock', args: { blockType: 'iron_ore', count: 3 } }, next: [], taskUpdate: { status: 'none', note: '' }, emotion: 'excited', emotionIntensity: 6 }
+]
+const EXAMPLE_NOTE = 'That is only a format example. Choose your action from your own state, inventory and goals, never from the example.'
+
+function decisionExample (agent, lean = false) {
+  const name = String(agent?.bot?.username || '')
+  let h = 0
+  for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0
+  const ex = { ...DECISION_EXAMPLES[h % DECISION_EXAMPLES.length] }
+  if (lean) { delete ex.emotion; delete ex.emotionIntensity; delete ex.taskUpdate } // ~35 fewer tokens to generate every turn
+  return JSON.stringify(ex)
+}
 
 /** Use the short decision prompt? ('auto': for local models up to ~8B, which read prompts slowly.) */
 function usesCompactPrompt (config) {
@@ -1254,7 +1304,7 @@ ${mindBlock(agent)}
 
 ## How you play
 - Each turn: you get the state JSON and choose ONE action; its result comes next turn. Use exact coordinates, names and entity ids from the state, never invented ones. If an action failed, read the error and try something different.
-- Play like a real survival player: wood → tools → stone → ores, food, armor, shelter. Eat when hungry, avoid lava, deep falls and status.dangerZonesNearby, be careful at night, sleep in beds. Your body handles falls, lava and sudden hits by itself.
+- Play like a real survival player: wood → tools → stone → ores, food, armor, shelter. Once you have enough of something (status.hints says when), move on to the next step; never keep collecting what you already have plenty of. Eat when hungry, avoid lava, deep falls and status.dangerZonesNearby, be careful at night, sleep in beds. Your body handles falls, lava and sudden hits by itself.
 - status.task is something you agreed to do for a player: work on it (items are handed over automatically once you have enough). taskUpdate.status: working, done (non-item tasks), gave_up (with a note) or none.
 - Goals (status.goals): overall → long-term → current goal → steps. Aim each action at the current step. Report goal, subgoal (the step you're on) and goalStatus: working, subgoal_done, goal_done, blocked or new_goal (you changed your mind; not for goals set for you). Urgent things are detours: name them as the goal with "working".
 - Your senses are realistic: you only know what's in nearbyEntities and status.senses. Odd sounds with nobody around → be careful and check it out.
@@ -1269,8 +1319,9 @@ ${toolDocs}
 
 ## Answer
 ONLY a JSON object, keys in this order. Think first, then pick the action, then fill in ALL its arguments (from the list above):
-${DECISION_EXAMPLE}
-emotion is one of: ${EMOTIONS.join(', ')}.`
+${decisionExample(agent, true)}
+${EXAMPLE_NOTE}
+"next": up to 2 follow-up actions you are SURE you will do right after this one (they run without asking you again); [] when unsure. Optional extras, only when they change: "emotion" (one of ${EMOTIONS.join(', ')}) with "emotionIntensity" 1-10, and "taskUpdate" (only if status.task exists).`
 }
 
 function buildDecisionPrompt (agent, toolDocs) {
@@ -1282,7 +1333,7 @@ ${mindBlock(agent)}
 
 ## How you play
 - Each turn you get your current state as JSON and choose exactly ONE action. You'll see its result next turn.
-- Play like a thoughtful human survival player: punch trees → craft planks, sticks, a crafting table and tools → mine stone and ores → get food, armor and shelter. Pursue your goal and ambitions, but stay flexible.
+- Play like a thoughtful human survival player: punch trees → craft planks, sticks, a crafting table and tools → mine stone and ores → get food, armor and shelter. Move on to the next step as soon as you have enough of something (status.hints tells you); don't keep gathering what you already have plenty of. Pursue your goal and ambitions, but stay flexible.
 - Use exact coordinates, block names and entity ids from the state. Never invent ids or coordinates you have not seen.
 - Read recentActions: if an action failed, understand the error code and try something different instead of repeating it.
 - If a player asked you for something and you agreed (see status.task / recentChat), prioritise it.
@@ -1307,7 +1358,9 @@ ${toolDocs}
 
 ## Response format
 Reply with ONLY a JSON object, no other text, keys in this order (think first, then the action with ALL its arguments filled in), e.g.:
-${DECISION_EXAMPLE}
+${decisionExample(agent)}
+${EXAMPLE_NOTE}
+"next": up to 2 follow-up actions you are SURE you will do right after this one (they run without asking you again); [] when unsure.
 emotion is one of: ${EMOTIONS.join(', ')}. goalStatus: working|subgoal_done|goal_done|blocked|new_goal. taskUpdate.status: none|working|done|gave_up.`
 }
 
@@ -1654,6 +1707,8 @@ ${dangerNote ? `${dangerNote}\n` : ''}${mods.talkativeness < 0.6 ? "You're not i
 First: are they asking you to DO something in the game (gather or craft something, give them items, come, follow, fight or kill someone/something, protect someone, build, explore...)?
 - If yes: isRequest=true and fill "request" (kind; description in a few words; item as an exact Minecraft id like oak_log or iron_ingot; count; target = the player or mob name if any; effort = how much work it honestly is; risk = how dangerous). Leave reply "" — you'll answer once you've thought about whether you want to.
 - If not: isRequest=false, request kind "other" with empty strings and 0, and write your reply (or "" if it doesn't need one).
+- Advice, suggestions and comments are NOT requests ("you should get iron", "maybe mine at night", "nice base"): isRequest=false, and reply to what they actually said. If it fits what you're already doing (see Goal/Doing in your status), agree and say so; if it doesn't, say what you'd rather do first. Never answer a suggestion like a new job.
+- Reply to what was actually said, in context of the recent chat. Don't use stock phrases (gg, lol, ez) unless they truly fit.
 remindsOfTask: true if they're asking about or reminding you of something they asked before.
 
 Then read the other player:
@@ -1665,10 +1720,13 @@ Respond with ONLY the JSON object.`
 
     // What just happened (fights, saves, truces, goals...), so what it says matches what it did.
     const lately = memory.events.filter((e) => Date.now() - e.at < 90000).slice(-5).map((e) => `${ago(e.at)}: ${e.text}`)
+    const earlier = agent.longMemory?.earlierWith(speaker, 4, agent.sessionStart) || []
+    const recalledLong = agent.longMemory?.forPrompt(`${speaker} ${said.join(' ')} ${memory.goal}`, 3) || []
+    const remembered = `${earlier.length ? `Earlier chats with ${speaker} (previous sessions):\n${earlier.map((l) => `${l.self ? '(you) ' : ''}${l.text}`).join('\n')}\n` : ''}${recalledLong.length ? `Things you remember:\n${recalledLong.map((r) => `- ${r}`).join('\n')}\n` : ''}`
     const user = `Your status: ${briefStatus(agent.perception?.latest)}
 How you feel: ${emotions.describe()}
 ${lately.length ? `What just happened:\n${lately.join('\n')}\n` : ''}How you feel about ${speaker}: ${social.relationshipLine(speaker)}
-${about ? `Things between you and ${speaker}:\n${about}\n` : ''}${others.length ? `Others online:\n${social.peopleSummary(others)}\n` : ''}Recent chat:
+${about ? `Things between you and ${speaker}:\n${about}\n` : ''}${remembered}${others.length ? `Others online:\n${social.peopleSummary(others)}\n` : ''}Recent chat:
 ${history}
 
 ${speaker}'s latest message${said.length > 1 ? 's' : ''}: ${said.map((m) => `"${m}"`).join(' ')}`
@@ -1685,7 +1743,10 @@ ${speaker}'s latest message${said.length > 1 ? 's' : ''}: ${said.map((m) => `"${
     if (recalled && !out.reply) {
       return this.sayNaturally(speaker, `${speaker} reminded you about "${recalled.description}" — you had completely forgotten. You'll get on it.`, whisper)
     }
-    if (out.reply) await agent.chat.send(out.reply, 'reply', { whisperTo: whisper && this.cfg.whisperReplies ? speaker : undefined })
+    if (out.reply) {
+      await agent.chat.send(out.reply, 'reply', { whisperTo: whisper && this.cfg.whisperReplies ? speaker : undefined })
+      agent.longMemory?.noteChat(speaker, out.reply, true, speaker)
+    }
   }
 
   /**
@@ -1695,6 +1756,9 @@ ${speaker}'s latest message${said.length > 1 ? 's' : ''}: ${said.map((m) => `"${
   async handleRequest (speaker, rawReq, { whisper = false, message = '', dangerNote = '' } = {}) {
     const agent = this.agent
     const { tasks, personality, bot, emotions, social, log } = agent
+    // Asked for something it's already doing (or that is its own plan anyway)? Just say so: no new task, no dice roll.
+    const fit = tasks.alignment(speaker, rawReq)
+    if (fit) return this.answerAligned(speaker, fit, { whisper, message, dangerNote })
     const decision = tasks.appraise(speaker, rawReq)
     const req = decision.req
     log.info(`Request from ${speaker}: ${req.kind} "${req.description}" (effort ${req.effort}, risk ${req.risk}) → ${decision.outcome} (chance ${decision.chance}${decision.reason ? `, ${decision.reason}` : ''})`)
@@ -1725,6 +1789,22 @@ ${speaker}'s latest message${said.length > 1 ? 's' : ''}: ${said.map((m) => `"${
     emotions.fromLabel(out.emotion, out.emotionIntensity)
     if (out.message) await agent.chat.send(out.message, 'reply', { whisperTo: whisper && this.cfg.whisperReplies ? speaker : undefined, fallback })
     return decision
+  }
+
+  /** The request matches the current task or goal: agree in character, without making a second task. */
+  async answerAligned (speaker, fit, { whisper = false, message = '', dangerNote = '' } = {}) {
+    const agent = this.agent
+    const { personality, bot, emotions, social, memory, log } = agent
+    log.info(`Request from ${speaker} matches what it's already doing (${fit.what}); no new task.`)
+    social.adjustAffinity(speaker, 0.5, 'suggested what you were already doing')
+    memory.addEvent('fit', `${speaker} suggested "${fit.req.description}", which is what you're already doing (${fit.what}).`)
+    const out = await agent.llm.chat([
+      { role: 'system', content: `${personaBlock(personality, bot.username)}\n\nReply in Minecraft chat: ONE short message (under 15 words), in character. No emojis, no quotes.${dangerNote ? `\n${dangerNote}` : ''}\nRespond with ONLY JSON: {"message": "...", "emotion": "<${EMOTIONS.join('|')}>", "emotionIntensity": 1-10}` },
+      { role: 'user', content: `${speaker} said: "${message || fit.req.description}"\nThat is already part of what you're doing: ${fit.what}.\nHow you feel: ${emotions.describe()}\nHow you feel about ${speaker}: ${social.relationshipLine(speaker, { notes: 3 })}\nYour status: ${briefStatus(agent.perception?.latest)}\n\nAgree naturally and say you're already on it (or already planned it). Don't promise anything new.` }
+    ], { schema: MESSAGE_SCHEMA, priority: PRIORITY.reply, label: 'aligned-reply' }).catch(() => ({ message: pick(['already on it', 'yeah thats what im doing', 'was just about to']) }))
+    emotions.fromLabel(out.emotion, out.emotionIntensity)
+    if (out.message) await agent.chat.send(out.message, 'reply', { whisperTo: whisper && this.cfg.whisperReplies ? speaker : undefined, fallback: ['already on it', 'yeah thats what im doing'] })
+    return { outcome: 'comply', aligned: true, req: fit.req }
   }
 
   /** Say something about a situation in character (used for refused commands, etc.). */
@@ -2170,11 +2250,13 @@ class SmallTalk {
 
 You feel like saying something in Minecraft chat on your own, unprompted — like a real player would while playing.
 Good topics: ${(personality.chatTopics || []).join('; ')}. Keep it to one short, natural message (under 15 words). No emojis, no quotes.
-Do not repeat or paraphrase what you said recently. If nothing natural comes to mind, return "".
+Say something about what is actually going on right now (your status, the recent chat or events), not filler. Do not repeat or paraphrase what you said recently, and skip stock phrases like gg. If nothing natural comes to mind, return "".
 Respond with ONLY JSON: {"message": "...", "emotion": "<${EMOTIONS.join('|')}>", "emotionIntensity": 1-10}`
     const user = `Your status: ${briefStatus(agent.perception?.latest)}
 How you feel: ${agent.emotions.describe()}
 Recent events: ${memory.events.slice(-5).map((e) => e.text).join('; ') || 'none'}
+Recent chat:
+${memory.chat.slice(-6).map((c) => `${c.self ? '(you) ' : ''}${c.from}: ${c.text}`).join('\n') || '(none)'}
 People online:
 ${agent.social.peopleSummary(others.slice(0, 5)) || 'none'}
 Things you said recently:
@@ -2511,12 +2593,12 @@ class EventReactor {
       try {
         const system = `${personaBlock(personality, bot.username)}
 
-Something just happened in the game. React the way your character genuinely would, with ONE very short chat message (under 12 words) — or "" if you'd honestly just stay quiet. No emojis, no quotes.
+Something just happened in the game. React to THIS event specifically, the way your character genuinely would, with ONE very short chat message (under 12 words). Staying quiet ("") is fine and often best. No stock phrases like gg, ez or lol unless they truly fit what happened. No emojis, no quotes.
 Respond with ONLY JSON: {"message": "...", "emotion": "<${EMOTIONS.join('|')}>", "emotionIntensity": 1-10}`
         const about = data.player ? `\nHow you feel about ${data.player}: ${social.relationshipLine(data.player, { notes: 3 })}` : ''
         const out = await agent.llm.chat([
           { role: 'system', content: system },
-          { role: 'user', content: `Event: ${text}\nHow you feel: ${emotions.describe()}${about}\nYour status: ${briefStatus(agent.perception?.latest)}` }
+          { role: 'user', content: `Event: ${text}\nHow you feel: ${emotions.describe()}${about}\nYour status: ${briefStatus(agent.perception?.latest)}\nRecent chat:\n${agent.memory.chat.slice(-5).map((c) => `${c.self ? '(you) ' : ''}${c.from}: ${c.text}`).join('\n') || '(none)'}` }
         ], { schema: MESSAGE_SCHEMA, priority: PRIORITY.reaction, label: `reaction:${type}`, temperature: 0.9 })
         emotions.fromLabel(out.emotion, out.emotionIntensity)
         message = out.message
@@ -2540,7 +2622,7 @@ const REMEMBERED_BY_SOCIAL = new Set(['attackedByPlayer', 'gift', 'promiseKept',
 /** Which skill domain each action trains. */
 const ACTION_DOMAINS = {
   attackTarget: 'combat', retreat: 'combat', mineBlock: 'survival', craftItem: 'survival', smeltItem: 'survival', eatFood: 'survival',
-  fish: 'survival', sleepInBed: 'survival', parkour: 'survival', explore: 'survival', moveToBlock: 'survival', planBuilding: 'building',
+  fish: 'survival', sleepInBed: 'survival', parkour: 'parkour', explore: 'survival', moveToBlock: 'survival', planBuilding: 'building',
   build: 'building', placeBlock: 'building', knowledge: 'knowledge', readSigns: 'senses', inspectContainer: 'senses', useItem: 'survival'
 }
 
@@ -2726,7 +2808,7 @@ ${said ? `${name} just said: ${said}
         if (this.paused || !agent.bot?.entity || agent.dead || agent.bot.isSleeping) { await this.idle(1000); continue }
         if (agent.reflexes?.busy) { await this.idle(100); continue } // the body is busy saving itself
 
-        let decision = this.forced.shift() || this.reflex() || agent.tasks.nextForcedAction()
+        let decision = this.forced.shift() || this.reflex() || agent.tasks.nextForcedAction() || this.nextPlanned()
         if (!decision) {
           // Throttle: never ask the LLM more often than minLlmIntervalMs.
           const wait = this.lastLlmAt + config.loop.minLlmIntervalMs - Date.now()
@@ -2749,6 +2831,7 @@ ${said ? `${name} just said: ${said}
         if (!result.ok && decision.source === 'reflex') this.reflexCooldowns.set(decision.reflexKey, Date.now())
         this.learnFrom(name, result)
         agent.tasks.onActionResult(name, args, result)
+        this.trackPlan(decision, result)
 
         this.backoff = config.loop.errorBackoffMs
         await this.idle(config.loop.postActionDelayMs)
@@ -2766,10 +2849,33 @@ ${said ? `${name} just said: ${said}
    * who keeps playing while deciding what to do next. The busy work is
    * interrupted the moment the decision arrives.
    */
+  /** The follow-up actions the model promised ("next"): run them without asking again, while nothing has changed. */
+  trackPlan (decision, result) {
+    const { memory, bot } = this.agent
+    if (decision.source === 'llm' && result.ok && decision.next?.length) {
+      this.plan = { steps: [...decision.next], chat: memory.chat.length, goal: memory.goal, hp: bot.health, at: Date.now() }
+    } else if (decision.source === 'plan' && result.ok && this.plan) {
+      this.plan.hp = bot.health
+    } else if (!result.ok || decision.source !== 'plan') {
+      this.plan = null
+    }
+  }
+
+  nextPlanned () {
+    const p = this.plan
+    if (!p || !p.steps.length) { this.plan = null; return null }
+    const { memory, bot, executor } = this.agent
+    const calm = this.agent.dangerLevel() === 'none' && bot.health >= p.hp - 1 && memory.chat.length === p.chat && memory.goal === p.goal && Date.now() - p.at < 90000
+    const step = p.steps.shift()
+    if (!calm || !step || !executor.availableTools().includes(step.name)) { this.plan = null; return null }
+    return { source: 'plan', thought: 'Carrying on with my plan.', emotion: 'calm', emotionIntensity: 4, action: step }
+  }
+
   async thinkWhileBusy () {
     const agent = this.agent
     const busy = agent.config.busyWork.enabled ? this.pickBusyWork() : null
     const work = busy ? agent.executor.execute(busy.name, busy.args) : null
+    this.lastBusyName = busy ? busy.name : null
     const deciding = this.decide()
     deciding.catch(() => {}) // if a reflex wins the race, nobody waits for this any more
     const interrupted = new Promise((resolve) => { this.interruptFn = resolve })
@@ -2808,13 +2914,19 @@ ${said ? `${name} just said: ${said}
       const near = Object.entries(state.nearbyBlocks).find(([n, b]) => (n === t.item || n.includes(t.item)) && b.distance <= 8)
       if (near) add(4, 'mineBlock', { blockType: near[0], count: 2, maxDistance: 8 }, `grabbed some ${near[0]} for ${t.from}`)
     }
-    if (agent.config.server.platform === 'bedrock') return options.filter((o) => o.name === 'collectDrops')[0] || { w: 1, name: 'parkour', args: { seconds: 6 }, label: 'hopped around' }
+    if (agent.config.server.platform === 'bedrock') return options.filter((o) => o.name === 'collectDrops')[0] || { w: 1, name: 'wait', args: { seconds: 6 }, label: 'looked around' }
     if (state?.nearbyBlocks) {
       const ore = Object.entries(state.nearbyBlocks).find(([n, b]) => /_ore$/.test(n) && b.distance <= 6 && b.visible)
       if (ore) add(2, 'mineBlock', { blockType: ore[0], count: 1, maxDistance: 6 }, `mined a bit of ${ore[0]}`)
     }
-    add(0.6 + (personality.restlessness ?? 0.5) * 2, 'parkour', { seconds: 8 }, 'hopped around')
-    add(1, 'wait', { seconds: 6 }, 'looked around')
+    // Hopping looked silly when it happened on every decision, so it's rare and never twice in a row.
+    if (this.lastBusyName !== 'parkour' && bot.entity.onGround) {
+      try {
+        const gaps = agent.parkour.jumpsHere(bot, 6).filter((j) => j.chance >= 0.2)
+        if (gaps.length) add(0.2 + (personality.restlessness ?? 0.5) * 1.2, 'parkour', { seconds: 15, jumps: 2 }, 'practiced a jump') // only real gaps: no more hopping in circles
+      } catch { /* world not loaded yet */ }
+    }
+    add(1.5, 'wait', { seconds: 6 }, 'looked around')
 
     let r = Math.random() * options.reduce((a, o) => a + o.w, 0)
     for (const o of options) { r -= o.w; if (r <= 0) return o }
@@ -2853,6 +2965,9 @@ ${said ? `${name} just said: ${said}
       ((myWeapon + myArmor / 2) - (theirWeapon + theirArmor / 2)) / 12
     const record = learning.combat.recordFor(`player:${name}`)
     if (record && record.losses > record.wins) score -= 0.15
+    // Skilled players with better gear (or plain better) stand and fight more readily.
+    const prof = this.agent.intelligence.combatProfile()
+    score += 0.35 * combat.boldness({ own: combat.ownPower(bot), opp: combat.opponentPower(attacker), skill: prof.skill, level: prof.level, health: bot.health })
     return score >= 0.5 ? 'fight' : 'flee'
   }
 
@@ -2954,10 +3069,13 @@ ${said ? `${name} just said: ${said}
       state.senses.heard.join(' ')
     ].filter(Boolean).join(' '), 4, agent.knowledgeOpts())
 
+    const remembered = agent.longMemory?.forPrompt([memory.goal, state.status.task?.what, state.nearbyEntities.map((e) => e.name).join(' '), Object.keys(state.nearbyBlocks).join(' ')].filter(Boolean).join(' '), 3) || []
     const nudges = []
     const streak = memory.failureStreak()
     if (streak >= 2) nudges.push(`Your last ${streak} actions failed. Change your approach (different action, target or location).`)
     if (!memory.goal) nudges.push('You have no current goal: pick a sensible one based on your ambitions and situation.')
+    const lastThought = memory.actions.at(-1)?.thought
+    if (lastThought) nudges.push(`Your previous thought: "${lastThought}" Stay on your plan and keep your goal text the same unless something changed.`)
 
     const messages = [
       { role: 'system', content: buildDecisionPrompt(agent, executor.describeTools(usesCompactPrompt(config))) },
@@ -2966,6 +3084,7 @@ ${said ? `${name} just said: ${said}
         content: `Current state:\n${JSON.stringify(state)}\n\n` +
           `People you know (online):\n${social.peopleSummary(state.onlinePlayers.slice(0, 6)) || '- nobody else is online'}\n\n` +
           `What you've learned from experience:\n${learned.map((l) => `- ${l}`).join('\n') || '- nothing yet'}\n\n` +
+          `${remembered.length ? `Things you remember (from earlier):\n${remembered.map((l) => `- ${l}`).join('\n')}\n\n` : ''}` +
           `Minecraft know-how that might matter now:\n${knowhow.map((l) => `- ${l}`).join('\n') || '- (nothing in particular)'}\n\n` +
           `${nudges.join('\n')}\nChoose your next action.`
       }
@@ -2979,6 +3098,9 @@ ${said ? `${name} just said: ${said}
       emotionIntensity: clampInt(out.emotionIntensity, 1, 10, 5),
       action: { name: String(out.action?.name || ''), args: isPlainObject(out.action?.args) ? out.action.args : {} }
     }
+    decision.next = (Array.isArray(out.next) ? out.next : []).slice(0, 2)
+      .map((n) => ({ name: String(n?.name || ''), args: isPlainObject(n?.args) ? n.args : {} }))
+      .filter((n) => tools.includes(n.name) && n.name !== decision.action.name && !['attackTarget', 'chatMessage'].includes(n.name) && Object.keys(n.args).length > 0)
     if (!tools.includes(decision.action.name)) {
       log.warn(`LLM chose invalid action "${decision.action.name}"; waiting instead.`)
       memory.addEvent('error', `You tried to use "${decision.action.name}", which is not an available action.`)
@@ -3019,6 +3141,10 @@ class Agent {
     this.social = new SocialModel(this, saved.social)
     this.tasks = new TaskManager(this, saved.tasks)
     this.intelligence = new Intelligence(() => this.config.intelligence, saved.intelligence)
+    this.parkour = new ParkourSkill(this, saved.parkour)
+    this.longMemory = new LongTermMemory(this, saved.memories)
+    this.sessionStart = Date.now()
+    this.memory.long = this.longMemory
     this.senses = new Senses(this)
     // Chests remembered by older versions carry over.
     const legacy = !saved.chests && Array.isArray(saved.containers)
@@ -3212,6 +3338,7 @@ class Agent {
       tasks: this.tasks,
       builder: this.builder,
       intel: this.intelligence,
+      parkour: this.parkour,
       containers: this.containers,
       knowledgeOpts: () => this.knowledgeOpts(),
       reflexes: this.reflexes,
@@ -3350,8 +3477,9 @@ class Agent {
     const m = this.bot?.pathfinder?.movements
     if (!m) return
     const pf = this.config.behavior.pathfinding
-    m.allowParkour = pf.allowParkour && this.intelligence.can('parkour', 'survival')
+    m.allowParkour = pf.allowParkour // which jumps it may use is decided by parkour.js from its skill
     m.allowSprinting = pf.allowSprinting && this.intelligence.can('sprint', 'survival')
+    this.parkour.refresh(m)
   }
 
   /** Things that make joining other people's servers just work. */
@@ -3391,7 +3519,7 @@ class Agent {
     const movements = new Movements(bot)
     movements.canDig = pf.canDig && config.server.platform !== 'bedrock' // no block breaking through ViaBedrock
     // Parkour and sprinting are skills too.
-    movements.allowParkour = pf.allowParkour && this.intelligence.can('parkour', 'survival')
+    movements.allowParkour = pf.allowParkour
     movements.allowSprinting = pf.allowSprinting && this.intelligence.can('sprint', 'survival')
     // Good guest: don't dig through other players' builds while pathfinding.
     if (config.behavior.noGrief) {
@@ -3407,6 +3535,7 @@ class Agent {
     }
     avoidHazards(movements, bot.registry) // tripwires, magma, berry bushes, powder snow, campfires...
     this.learning.movement.attach(movements) // steer around places where we died or got stuck
+    this.parkour.attach(movements, bot) // skill-limited jumps, learns from every jump
     bot.pathfinder.setMovements(movements)
     bot.pathfinder.thinkTimeout = pf.thinkTimeoutMs
 
@@ -3423,6 +3552,7 @@ class Agent {
         this.emotions.tick()
         this.tasks.tick()
         this.learning.movement.tick(pf.allowParkour)
+        this.longMemory?.consolidate(this.llm, PRIORITY.reflect).catch(() => {})
       } catch (err) {
         log.debug(`perception tick failed: ${err.message}`)
       }
@@ -3515,4 +3645,4 @@ function main () {
 
 if (require.main === module) main()
 
-module.exports = { Agent, Brain, Perception, ChatManager, EventReactor, OllamaClient, loadConfig, deepMerge, parsePluginChat, loginFor, fallbackServer, serverMods, errText, stripThinking, sampleDecisionPrompt, usesCompactPrompt, DEFAULT_CONFIG }
+module.exports = { Agent, Brain, ChatResponder, Perception, ChatManager, EventReactor, OllamaClient, loadConfig, deepMerge, parsePluginChat, loginFor, fallbackServer, serverMods, errText, stripThinking, sampleDecisionPrompt, usesCompactPrompt, DEFAULT_CONFIG }

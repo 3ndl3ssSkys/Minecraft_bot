@@ -714,6 +714,40 @@ async function pearlEscape (ctx, from) {
   return false
 }
 
+const ARMOR_VALUE = { leather: 0.5, golden: 0.8, chainmail: 1, iron: 1.5, diamond: 2.2, turtle: 0.9, netherite: 2.6 }
+const MOB_THREAT = { zombie: 2, husk: 2, drowned: 2.2, skeleton: 2.4, stray: 2.4, spider: 2, cave_spider: 2, creeper: 3.2, witch: 3, enderman: 4.5, piglin: 3, piglin_brute: 5.5, zombified_piglin: 3.5, blaze: 4, wither_skeleton: 4.5, vindicator: 4.5, evoker: 4, ravager: 6, hoglin: 4.5, warden: 10, wither: 12, ender_dragon: 12 }
+
+/** Rough fighting power of a kit: best weapon plus armor (about 1 = fists, 7 = full netherite with a mace). */
+function gearPower (weaponName, armorNames = []) {
+  const w = !weaponName ? 1 : /^(mace|trident)$/.test(weaponName) ? 6 : 1 + 1.1 * tierOf(weaponName)
+  const a = armorNames.reduce((sum, n) => sum + (ARMOR_VALUE[String(n || '').split('_')[0]] || 0), 0)
+  return w + a / 2
+}
+
+/** Our own fighting power. */
+function ownPower (bot) {
+  const kit = readKit(bot)
+  const armor = ['head', 'torso', 'legs', 'feet'].map((d) => safe(() => bot.inventory.slots[bot.getEquipmentDestSlot(d)]?.name))
+  return gearPower(kit.mace ? 'mace' : [kit.sword, kit.axe].filter(Boolean).sort((x, y) => tierOf(y.name) - tierOf(x.name))[0]?.name, armor)
+}
+
+/** An opponent's fighting power: players by what they wear and hold, mobs by type. */
+function opponentPower (entity) {
+  if (entity.type === 'player') return gearPower(entity.heldItem?.name, (entity.equipment || []).slice(2).map((i) => i?.name))
+  return (MOB_THREAT[entity.name] ?? 3) * 1.6
+}
+
+/**
+ * How bold to be (0..1): only players with real skill who out-gear the opponent (or are simply better)
+ * get bold. Below "mediocre" it is 0, so beginners stay careful and keep their old habits.
+ */
+function boldness ({ own, opp, skill, level, health = 20 }) {
+  const levelFactor = clamp01((level - 1) / 5) // simple 0, mediocre 0.2 ... master 1
+  const edge = 0.12 * (own - opp) + 0.5 * (skill - 0.5) + (health >= 18 ? 0.1 : health <= 10 ? -0.2 : 0)
+  return clamp01(edge * 2) * levelFactor
+}
+const clamp01 = (v) => Math.max(0, Math.min(1, v))
+
 /** Which fighting styles make sense with what we're carrying. */
 function availableStyles (bot, intel) {
   const kit = readKit(bot)
@@ -744,6 +778,6 @@ function describeKit (bot) {
 }
 
 module.exports = {
-  fight, readKit, describeKit, availableStyles, attackCooldown, potionType, hasEffect, isBlocking, solveAim,
+  fight, readKit, describeKit, availableStyles, gearPower, ownPower, opponentPower, boldness, attackCooldown, potionType, hasEffect, isBlocking, solveAim,
   throwItem, consume, douse, pearlEscape, hold, isOnFire, PROJECTILES, UNDEAD, MOB_TACTICS, ActionError
 }

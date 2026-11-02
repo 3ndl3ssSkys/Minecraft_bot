@@ -19,6 +19,7 @@
 
 const STATUSES = ['working', 'subgoal_done', 'goal_done', 'blocked', 'new_goal']
 const MAX_LONG_TERM = 4
+const COMMIT_MS = 2 * 60000 // a fresh own goal is kept this long unless it gets stuck: small models flip-flop otherwise
 const DETOUR_TAKEOVER_MS = 3 * 60000 // a "detour" this long means it really changed its mind (own goals only)
 
 const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, 160)
@@ -210,8 +211,9 @@ class Goals {
     }
     if (g && (!c || !similar(g, c.text))) {
       const underWay = c && (c.fixed || c.steps.some((s) => !s.done))
-      const changedMind = !c?.fixed && (status === 'new_goal' || !underWay ||
-        (c.detour && similar(c.detour, g) && Date.now() - c.detourAt > DETOUR_TAKEOVER_MS))
+      const young = c && !c.fixed && Date.now() - (c.at || 0) < COMMIT_MS && (c.blocked || 0) < 2
+      const takeover = c?.detour && similar(c.detour, g) && Date.now() - c.detourAt > DETOUR_TAKEOVER_MS
+      const changedMind = !c?.fixed && (takeover || (!young && (status === 'new_goal' || !underWay)))
       if (changedMind) {
         if (c) this.history.push({ text: c.text, status: 'changed', level: 'goal', at: Date.now() })
         c = this.setCurrent(g, 'self')

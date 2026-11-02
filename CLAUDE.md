@@ -46,6 +46,8 @@ Everything learned while building this bot: what it is, how it's put together, w
 - **Nothing has run against a real Minecraft server yet.** All live tests used flying-squid and the mock LLM. Expect the first real sessions to surface prompt and behaviour issues: read the user's logs and tune from them.
 - **When the user pastes output:** it uses their real name in paths. Never repeat it (see the naming rule at the top).
 
+- **Review pass (HISTORY.md §16), not yet seen by the user on a live server:** log bias, circling, suggestions-as-tasks, stock chat phrases, real parkour with a per-level skill ladder, boldness with better gear, plan queue, goal commitment, chat preempting decisions, long-term memory and profiles. Delivered as one cumulative patch against the branch (`git apply minecraft_bot_improvements.patch`). **Next for the user:** apply it, set `llm.fastModel` (`qwen3:1.7b`) plus `OLLAMA_MAX_LOADED_MODELS=2`, play, and send logs.
+
 ## Architecture
 
 Plain Node.js (CommonJS, Node ≥ 22), Mineflayer 4.39 + mineflayer-pathfinder 2.4.5. Style: no semicolons, two-space indent, single quotes, short doc comments on classes and non-obvious functions.
@@ -55,6 +57,10 @@ Perception (2s tick) → state JSON + feelings + relationships + lessons + know-
    → LLM (Ollama /api/chat or OpenAI-compatible, JSON schema) → {thought, emotion, goal, action, taskUpdate}
    → ActionExecutor runs ONE action (timeouts, AbortSignal, pause-for-typing)
    → result into Memory → next prompt
+
+Parkour (parkour.js): findJumps → chance per level (TIERS) → runJump (run-up, timed take-off, air steering) or the pathfinder wrapper
+   (getMoveParkourForward filtered by skill); every jump outcome feeds the `parkour` XP domain. Tests run it on prismarine-physics (test/tools/simbot.js).
+Memory (memory.js): importance-scored long-term memories + per-player chat history in the save file (data/profiles/<name>/brain.json with --profile).
 
 Reflexes (every physics tick, 20/s, no LLM): falls, lava, drowning, hits → take the body
    (abort the action, Brain waits on reflexes.busy) → memory event afterwards
@@ -208,6 +214,6 @@ Reflexes (every physics tick, 20/s, no LLM): falls, lava, drowning, hits → tak
 ## Ideas not done yet
 
 - A browser viewer of what the bot sees (prismarine-viewer; it would render on the viewer's device).
-- **Next to build:** long-term memories, saved chat history and per-bot profiles (spec in HISTORY.md §14).
+- **Done in HISTORY.md §16:** long-term memories (`memory.js`), saved chat history, per-bot profiles (`--profile`), real parkour (`parkour.js`), skill-based aggression, plan queue and goal commitment. Still open: a deterministic "enough logs" guard if the model ignores the hints, live testing on a real server, web lookups for real-world chat knowledge (needs a hosted model).
 - Testing against a real Paper server with Geyser/Floodgate/ViaVersion and real Qwen, then tuning prompts from real transcripts.
 - Smarter building materials (crafting planks from logs on its own when a build runs short).

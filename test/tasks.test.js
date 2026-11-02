@@ -120,4 +120,21 @@ console.log('\n== Bossiness: constant requests lower liking ==')
 const before = social.profile('Kind').affinity
 for (let i = 0; i < 6; i++) social.noteRequest('Kind')
 console.log('Kind liking', before, '→', social.profile('Kind').affinity)
+
+console.log('\n== Requests that match what it is already doing ==')
+agent.goals = { current: { text: 'get iron tools', steps: [{ text: 'mine iron ore', done: false }, { text: 'smelt the iron', done: false }], now: 0 } }
+const ironReq = { kind: 'gather', description: 'mine some iron', item: 'iron_ore', count: 5, effort: 'small', risk: 'low' }
+const fitGoal = tasks.alignment('Carl', ironReq)
+console.log('"mine iron" while goal is get iron tools →', fitGoal && fitGoal.via)
+assert.equal(fitGoal && fitGoal.via, 'goal')
+const diamondReq = { kind: 'gather', description: 'get diamonds', item: 'diamond', count: 3, effort: 'small', risk: 'low' }
+assert.equal(tasks.alignment('Carl', diamondReq), null, 'unrelated request must not count as aligned')
+assert.equal(tasks.alignment('Carl', { kind: 'attack', description: 'kill Steve', target: 'Steve' }), null, 'fights are never aligned')
+tasks.tasks.push({ id: 900, from: 'Fun', kind: 'gather', description: 'get 10 oak logs', item: 'oak_log', count: 10, status: 'active', commitCount: 10 })
+const fitTask = tasks.alignment('Fun', { kind: 'gather', description: 'chop some wood', item: 'oak_log', count: 5, effort: 'small', risk: 'low' })
+console.log('"oak logs" while already fetching oak logs for the same player →', fitTask && fitTask.via)
+assert.equal(fitTask && fitTask.via, 'task')
+assert.equal(tasks.alignment('Dan', { kind: 'gather', description: 'chop some wood', item: 'oak_log', count: 5, effort: 'small', risk: 'low' }), null, 'someone else\'s task is not "already doing it" for a different asker (falls through to normal appraisal; goal does not cover it)')
+tasks.tasks = tasks.tasks.filter((t) => t.id !== 900)
+agent.goals = undefined
 console.log('\nALL TASK CHECKS PASSED')

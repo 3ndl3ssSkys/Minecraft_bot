@@ -331,6 +331,8 @@ class Learning {
       building: a.builder ? { current: a.builder.current, history: a.builder.history.slice(-20) } : undefined,
       obeyPlayers: a.config.obedience?.players,
       intelligence: a.intelligence?.toJSON(),
+      parkour: a.parkour?.toJSON(),
+      memories: a.longMemory?.toJSON(),
       chests: a.containers?.toJSON(),
       reflexes: a.reflexes?.toJSON(),
       goals: a.goals?.toJSON(),

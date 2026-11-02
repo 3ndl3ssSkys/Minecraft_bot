@@ -1,0 +1,51 @@
+'use strict'
+const assert = require('assert')
+const fs = require('fs')
+const os = require('os')
+const path = require('path')
+const { LongTermMemory } = require('../memory')
+const { Learning } = require('../learning')
+
+const agent = { config: { memory: { enabled: true, max: 5, chatPerPlayer: 3 } }, bot: { players: { Carl: {} } }, learning: { markDirty () {} }, memory: { events: [] } }
+const m = new LongTermMemory(agent, {})
+
+console.log('== remember / recall / merge ==')
+m.fromEvent('promise', 'You promised Carl to bring him 10 iron ingots.')
+m.fromEvent('respawn', 'You died in the nether near lava and lost your diamond pickaxe.')
+m.fromEvent('refused', 'You refused to give away your food.')
+m.remember({ text: 'Carl is building a castle at the lake.', kind: 'person', importance: 6, people: ['Carl'] })
+m.remember({ text: 'carl is building a castle at the lake', importance: 8 })
+assert.equal(m.items.filter((x) => /castle/.test(x.text)).length, 1, 'near-identical memories merge')
+assert.equal(m.items.find((x) => /castle/.test(x.text)).importance, 8)
+assert.ok(m.recall('Carl iron ingots').some((t) => /iron ingots/.test(t)), 'recalls by keywords')
+assert.ok(m.recall('what happened in the nether').some((t) => /nether/.test(t)))
+assert.equal(m.recall('completely unrelated banana').length, 0, 'does not recall noise')
+assert.equal(m.items.find((x) => /promised/.test(x.text)).people[0], 'Carl')
+
+console.log('== keeps the important ones when full ==')
+for (let i = 0; i < 12; i++) m.remember({ text: `Found some ordinary cobblestone number ${i} lying around`, importance: 1 })
+assert.ok(m.items.length <= 5)
+assert.ok(m.items.some((x) => /nether/.test(x.text)), 'the big memory (death) survives pruning')
+
+console.log('== chat history per player ==')
+for (let i = 0; i < 6; i++) m.noteChat('Carl', `line ${i}`, false)
+m.noteChat('bot', 'hello Carl', true, 'Carl')
+const earlier = m.earlierWith('carl', 10, Date.now() + 1000)
+assert.equal(earlier.length, 3, 'capped per player'); assert.equal(earlier.at(-1).self, true)
+assert.equal(m.earlierWith('Carl', 10, 1).length, 0, 'only lines from before this session')
+
+console.log('== saved and loaded through the real save file ==')
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mem-'))
+const file = path.join(dir, 'profiles', 'alex', 'brain.json')
+const log = { info () {}, warn () {}, debug () {} }
+const a1 = { ...agent, config: { ...agent.config, learning: { enabled: true, file } }, log, longMemory: m, intelligence: { toJSON: () => ({}) } }
+const l1 = new Learning(a1)
+l1.save()
+clearInterval(l1.timer)
+const saved = JSON.parse(fs.readFileSync(file, 'utf8'))
+assert.ok(saved.memories && saved.memories.items.length && saved.memories.chat.carl, 'memories and chat are in the save')
+const m2 = new LongTermMemory(agent, saved.memories)
+assert.ok(m2.recall('nether death lava').length >= 1, 'a new session remembers')
+const off = new LongTermMemory({ ...agent, config: { memory: { enabled: false } } }, {})
+assert.equal(off.remember({ text: 'something worth keeping here' }), null, 'memory.enabled: false keeps nothing')
+console.log('ALL MEMORY CHECKS PASSED')

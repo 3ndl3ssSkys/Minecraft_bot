@@ -51,11 +51,13 @@ server.listen(0, async () => {
   console.log('\n== one lane without a fast model ==')
   const single = new OllamaClient(deepMerge(DEFAULT_CONFIG, { llm: { url: `${base}/api/chat`, model: 'slow-big' } }), log)
   const t1 = Date.now()
-  single.chat([{ role: 'user', content: 'decide' }], { schema, priority: 2 })
+  const pending = single.chat([{ role: 'user', content: 'decide' }], { schema, priority: 2 })
   await new Promise((r) => setTimeout(r, 20))
   await single.chat([{ role: 'user', content: 'hi' }], { schema, priority: 0 })
-  console.log(`same reply took ${Date.now() - t1} ms (waited for the decision)`)
-  assert(Date.now() - t1 >= 600)
+  const sameMs = Date.now() - t1
+  console.log(`reply took ${sameMs} ms: the running decision was cancelled instead of being waited for (~1200 ms)`)
+  assert(sameMs < 1000)
+  assert.equal((await pending).message, 'from slow-big') // and the decision still finishes afterwards
   assert.equal(seen.at(-1).body.think, undefined) // think: null → not sent
   console.log('ok')
 

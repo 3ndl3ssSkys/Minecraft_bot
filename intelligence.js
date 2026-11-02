@@ -18,7 +18,7 @@
  *   impossible   1.00
  *
  * Skill is tracked per domain (combat, building, survival, knowledge,
- * senses). With learning on, experience raises a domain's effective level
+ * senses, parkour). With learning on, experience raises a domain's effective level
  * along the same diminishing curve: a beginner starts from nothing but keeps
  * learning for a long time (with enough practice it can end up past a master),
  * a master barely improves, impossible can't.
@@ -32,7 +32,7 @@ const LABELS = {
   beginning: 'Beginning', simple: 'Simple', mediocre: 'Mediocre', complicated: 'Complicated',
   advanced: 'Advanced', hardcore: 'Hardcore Player', master: 'Master', impossible: 'Impossible'
 }
-const DOMAINS = ['combat', 'building', 'survival', 'knowledge', 'senses']
+const DOMAINS = ['combat', 'building', 'survival', 'knowledge', 'senses', 'parkour']
 
 /** Concave-down skill curve over level index 0..7 (fractional levels allowed). */
 function skillAt (index) {
@@ -55,7 +55,7 @@ const MINDSETS = {
 
 /** Ability unlock levels (index into LEVELS). */
 const UNLOCKS = {
-  sprint: 1, crit: 1, bow: 1, gaps: 1, strafe: 2, parkour: 2, shieldBlock: 2, crossbow: 2, drinkPotions: 2, mobTactics: 2,
+  sprint: 1, crit: 1, bow: 1, gaps: 1, strafe: 2, parkour: 0, shieldBlock: 2, crossbow: 2, drinkPotions: 2, mobTactics: 2,
   wtap: 3, axeVsShield: 3, totemSwap: 3, splitChase: 3, combo: 4, throwPotions: 4, undeadAware: 4, preBuffs: 4,
   pearlEscape: 4, cobweb: 5, waterClutch: 5, maceBasic: 5, soundTracking: 5, maceGood: 6, seeThroughWalls: 7
 }
@@ -135,7 +135,7 @@ class Intelligence {
 
   describe () {
     const lv = (d) => this.level(d).toFixed(1)
-    return `${this.label} (combat ${lv('combat')}, building ${lv('building')}, survival ${lv('survival')}, knowledge ${lv('knowledge')}, senses ${lv('senses')} on a 0-7 scale)`
+    return `${this.label} (combat ${lv('combat')}, building ${lv('building')}, survival ${lv('survival')}, knowledge ${lv('knowledge')}, senses ${lv('senses')}, parkour ${lv('parkour')} on a 0-7 scale)`
   }
 
   toJSON () { return { xp: this.xp } }

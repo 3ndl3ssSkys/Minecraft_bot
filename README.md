@@ -165,6 +165,12 @@ The bot runs alongside Ollama on any PC that can reach the Minecraft server; it 
   - `llm.keepAlive: "24h"` stops reloads;
   - `llm.think: false` turns off the slow "thinking" step of models like Qwen3.
 
+**Smarter and faster on a small model:** set `llm.fastModel` (`qwen3:1.7b`) and `OLLAMA_MAX_LOADED_MODELS=2` so chat never waits for a decision (without it, a chat reply now cancels a running decision and the decision restarts after). The decision prompt asks for fewer tokens, the model can promise up to 2 follow-up actions that run without asking again (`next`), a fresh goal is kept for 2 minutes, and its previous thought is fed back to it. A 4B model cannot know real-world events: for that use a hosted model as `fastModel` (see below).
+
+**Parkour skill (`parkour` domain, raised by practice):** beginning = basic 1-gap hops; simple = cleaner, plus a 2-block jump forward onto a block one higher; mediocre = 2-3 block jumps with sprint jumps, 2 (sometimes 3) onto a higher block; complicated = up to 4 block jumps, up to 3 onto a higher block, ceiling hopping, timed sprint jumps; advanced = sometimes 5 (with a drop) and sometimes 4 onto a higher block, odd-height blocks; hardcore = reliable, diagonals; master = every standard jump; impossible = Speed potions and perfect execution. A jump only gains 1 block of height, so "vertical" always means a forward jump onto a block one higher.
+
+**Memory and saves:** `memory.*` in config; `node index.js --profile alex` keeps a separate bot save in `data/profiles/alex/`.
+
 **On a GTX 1660 Super (6 GB):**
 
 | Setup | VRAM | What to expect |
