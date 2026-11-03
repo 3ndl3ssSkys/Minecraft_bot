@@ -18,10 +18,13 @@
 
 const { goals } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
+const { once } = require('events')
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)]
 
 const { ActionError, sleep, abortError, throwIfAborted, abortableSleep, normalizeName, fmtPos } = require('./util')
 const combat = require('./combat')
 const { COMBAT_STYLES } = require('./learning')
+const { chooseArrangement, tryLayout, key: layoutKey } = require('./recipes')
 const knowledge = require('./knowledge')
 const building = require('./building')
 const { signText } = require('./containers')
@@ -63,9 +66,114 @@ function argString (args, key, { def, maxLength = 256 } = {}) {
  * Resolve a possibly fuzzy block name into a list of registry block ids.
  * "oak_log" -> [oak_log]; "log" -> every *_log; "iron" -> iron_ore, deepslate_iron_ore...
  */
+/** Every log block (stripped ones excluded): any of them is "wood" for crafting. */
+function allLogIds (bot) {
+  return bot.registry.blocksArray.filter((b) => /_log$/.test(b.name) && !b.name.startsWith('stripped_')).map((b) => b.id)
+}
+const LOG_WORDS = /^(wood|woods|log|logs|tree|trees|wood_log|wood_logs|any_log|any_wood)$/
+
+const woodOf = (itemName) => itemName.replace(/_(log|stem|wood|hyphae)$/, '_planks').replace(/^bamboo_block$/, 'bamboo_planks')
+const countMatching = (inv, re) => Object.entries(inv).filter(([n]) => re.test(n)).reduce((a, [, c]) => a + c, 0)
+
+/**
+ * Make the planks and sticks a recipe needs from whatever wood is carried (any kind), so "craft a crafting table"
+ * works with cherry logs as well as oak. Returns true when something was crafted.
+ */
+async function craftIntermediates (ctx, itemDef, crafts) {
+  const { bot } = ctx
+  const recipes = bot.recipesAll(itemDef.id, null, true)
+  if (!recipes.length) return false
+  let needPlanks = Infinity
+  let needSticks = Infinity
+  for (const r of recipes) {
+    let p = 0; let st = 0
+    for (const d of r.delta) {
+      if (d.count >= 0) continue
+      const n = bot.registry.items[d.id]?.name || ''
+      if (/_planks$/.test(n)) p += -d.count * crafts
+      else if (n === 'stick') st += -d.count * crafts
+    }
+    needPlanks = Math.min(needPlanks, p); needSticks = Math.min(needSticks, st)
+  }
+  if (!Number.isFinite(needPlanks) || (needPlanks === 0 && needSticks === 0)) return false
+  const inv = () => inventorySummary(bot)
+  let did = false
+  const sticksToMake = Math.max(0, needSticks - (inv().stick || 0))
+  const planksWanted = needPlanks + Math.ceil(sticksToMake / 4) * 2
+  const held = () => countMatching(inv(), /_planks$/)
+  if (held() < planksWanted) {
+    const have = inv()
+    // Plank type: the one we already hold most of, else from the log we hold most of.
+    const types = Object.entries(have).filter(([n]) => /_planks$/.test(n)).sort((a, b) => b[1] - a[1]).map(([n]) => n)
+    const logs = Object.entries(have).filter(([n]) => /(_log|_stem|_wood|_hyphae|^bamboo_block)$/.test(n) && !n.startsWith('stripped_')).sort((a, b) => b[1] - a[1])
+    const sameType = types.length ? logs.find(([n]) => woodOf(n) === types[0]) : null
+    const log = sameType || logs[0]
+    if (log) {
+      const planksDef = bot.registry.itemsByName[woodOf(log[0])]
+      if (ctx.recipes && !ctx.recipes.knows(woodOf(log[0]))) throw unknownRecipe(woodOf(log[0]))
+      const r = planksDef && bot.recipesFor(planksDef.id, null, 1, null)[0]
+      if (r) {
+        const times = Math.min(log[1], Math.ceil((planksWanted - held()) / 4))
+        await bot.craft(r, times, null)
+        did = true
+      }
+    }
+  }
+  if (sticksToMake > 0 && held() >= 2) {
+    if (ctx.recipes && !ctx.recipes.knows('stick')) throw unknownRecipe('stick')
+    const stickDef = bot.registry.itemsByName.stick
+    const r = bot.recipesFor(stickDef.id, null, 1, null)[0]
+    if (r) { await bot.craft(r, Math.min(Math.ceil(sticksToMake / 4), Math.floor(held() / 2)), null); did = true }
+  }
+  return did
+}
+
+function unknownRecipe (name) {
+  return new ActionError('UNKNOWN_RECIPE', `You don't know how to craft ${name.replace(/_/g, ' ')} yet. Use experimentCrafting (try items together in the crafting grid and see what comes out) or askForHelp (ask the players nearby).`)
+}
+
+/** "Not enough materials", naming what is actually missing for the closest recipe. */
+function describeMissing (bot, itemDef, name) {
+  const inv = inventorySummary(bot)
+  let best = null
+  for (const r of bot.recipesAll(itemDef.id, null, true)) {
+    const missing = {}
+    let total = 0
+    for (const d of r.delta) {
+      if (d.count >= 0) continue
+      const n = bot.registry.items[d.id]?.name
+      const lack = -d.count - (inv[n] || 0)
+      if (lack > 0) { missing[n] = lack; total += lack }
+    }
+    if (!best || total < best.total) best = { missing, total, table: r.requiresTable }
+  }
+  if (!best) return `${name} cannot be crafted.`
+  return `Not enough materials for ${name}. Missing: ${JSON.stringify(best.missing)}${best.table ? ' (needs a crafting table)' : ''}.`
+}
+
+/** Put a block from the inventory on the ground right next to us. */
+async function placeNearby (ctx, itemName) {
+  const { bot } = ctx
+  const item = findInventoryItem(bot, itemName)
+  if (!item) throw new ActionError('MISSING_ITEM', `No "${itemName}" in inventory.`)
+  const base = bot.entity.position.floored()
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1], [2, 0], [-2, 0], [0, 2], [0, -2]]) {
+    for (const dy of [0, 1, -1]) {
+      const p = base.offset(dx, dy, dz)
+      const here = bot.blockAt(p); const below = bot.blockAt(p.offset(0, -1, 0)); const above = bot.blockAt(p.offset(0, 1, 0))
+      if (here && here.boundingBox === 'empty' && !/water|lava/.test(here.name) && below && below.boundingBox === 'block' && (!above || above.boundingBox === 'empty')) {
+        await placeAt(ctx, p, item)
+        return p
+      }
+    }
+  }
+  throw new ActionError('NO_SPACE', 'There is no free spot next to you to place it.')
+}
+
 function resolveBlockIds (bot, rawName) {
   const name = normalizeName(rawName)
   const byName = bot.registry.blocksByName
+  if (LOG_WORDS.test(name)) return allLogIds(bot)
   if (byName[name]) {
     // Treat ore variants as the same request (iron_ore also matches deepslate_iron_ore).
     const ids = [byName[name].id]
@@ -569,15 +677,18 @@ const ACTIONS = {
 
   mineBlock: {
     description: 'Find the nearest block(s) of a type, walk to them and mine them. Auto-equips the best tool and picks up drops.',
-    params: { blockType: 'string, e.g. "oak_log", "stone", "iron_ore"', count: 'number, optional (default 1, max 16)', maxDistance: 'number, optional search radius (default 32)' },
+    params: { blockType: 'string, e.g. "oak_log", "stone", "iron_ore", or "log" for any wood', count: 'number, optional (default 1, max 16)', maxDistance: 'number, optional search radius (default 32)', exact: 'true to never substitute another kind (default: exact whenever you are doing a task for someone)' },
     async run (ctx, args) {
       const { bot, signal } = ctx
       const blockType = argString(args, 'blockType')
       const count = Math.floor(argNumber(args, 'count', { min: 1, max: 16, def: 1 }))
       const maxDistance = argNumber(args, 'maxDistance', { min: 4, max: 64, def: 32 })
 
-      const ids = resolveBlockIds(bot, blockType)
+      let ids = resolveBlockIds(bot, blockType)
       if (ids.length === 0) throw new ActionError('UNKNOWN_BLOCK', `"${blockType}" is not a known block type.`)
+      // Wood is wood: when there is no oak around but other logs are, take those (any log works for planks, tools, tables).
+      const exact = args.exact === true || args.exact === 'true' || Boolean(ctx.tasks?.active?.()) // asked for a specific item: that item, not a stand-in
+      const anyLog = !exact && /_log$/.test(normalizeName(blockType)) ? allLogIds(bot) : null
 
       const skip = new Set() // positions we failed to reach/mine this action
       let mined = 0
@@ -587,8 +698,12 @@ const ACTIONS = {
 
       while (mined < count && failures < maxFailures) {
         throwIfAborted(signal)
-        const candidates = bot.findBlocks({ matching: ids, maxDistance, count: 64 })
+        let candidates = bot.findBlocks({ matching: ids, maxDistance, count: 64 })
           .filter((pos) => !skip.has(pos.toString()))
+        if (candidates.length === 0 && anyLog && ids !== anyLog) {
+          ids = anyLog
+          candidates = bot.findBlocks({ matching: ids, maxDistance, count: 64 }).filter((pos) => !skip.has(pos.toString()))
+        }
         if (candidates.length === 0) break
         const pos = candidates[0] // findBlocks returns nearest first
         const block = bot.blockAt(pos)
@@ -844,8 +959,74 @@ const ACTIONS = {
     }
   },
 
+  experimentCrafting: {
+    description: 'Try putting items together in the crafting grid (2x2 in your inventory, 3x3 at a crafting table) and see what they make. This is how you discover recipes you do not know yet. Give itemName to aim at one thing; it still just tries combinations.',
+    params: { itemName: 'string, optional: what you are trying to make', tries: 'number, optional (default 6, max 14)' },
+    async run (ctx, args) {
+      const { bot, recipes, signal } = ctx
+      if (!recipes) throw new ActionError('UNSUPPORTED', 'Experimenting is not available.')
+      const target = args.itemName ? normalizeName(argString(args, 'itemName')) : null
+      const tries = Math.floor(argNumber(args, 'tries', { min: 1, max: 14, def: 6 }))
+      if (target && !bot.registry.itemsByName[target]) throw new ActionError('UNKNOWN_ITEM', `"${target}" is not a known item.`)
+      if (Object.keys(inventorySummary(bot)).length === 0) throw new ActionError('NOTHING_TO_TRY', 'You are carrying nothing to experiment with. Collect some materials first.')
+      // 3x3 at a nearby crafting table (about half the time, when there is one), else the 2x2 inventory grid.
+      const table = bot.findBlock({ matching: bot.registry.blocksByName.crafting_table.id, maxDistance: 16 })
+      let win
+      let opened = null
+      if (table && (args.told || Math.random() < 0.6)) {
+        if (bot.entity.position.distanceTo(table.position) > 3.5) {
+          await gotoGoal(ctx, new goals.GoalNear(table.position.x, table.position.y, table.position.z, 2), { timeoutMs: travelTimeout(ctx, bot.entity.position.distanceTo(table.position)), label: 'crafting table' })
+        }
+        bot.activateBlock(table)
+        ;[opened] = await Promise.race([once(bot, 'windowOpen'), sleep(4000).then(() => [null])])
+        if (opened) win = { window: opened, w: 3, h: 3, first: 1, result: 0, invStart: opened.inventoryStart, invEnd: opened.inventoryEnd }
+      }
+      if (!win) win = { window: bot.inventory, w: 2, h: 2, first: 1, result: 0, invStart: bot.inventory.inventoryStart, invEnd: bot.inventory.inventoryEnd }
+      const tried = new Set()
+      const found = []
+      try {
+        for (let i = 0; i < tries; i++) {
+          throwIfAborted(signal)
+          const cells = chooseArrangement({ registry: bot.registry, inv: inventorySummary(bot), w: win.w, h: win.h, target, level: ctx.intel.level('knowledge'), tried, told: args.told })
+          if (!cells) break
+          tried.add(layoutKey(cells))
+          let out = null
+          try { out = await tryLayout(bot, win, cells) } catch (err) { ctx.log.debug(`experiment click failed: ${err.message}`); break }
+          ctx.intel.addXp('knowledge', 0.05)
+          if (!out) continue
+          const ingredients = {}
+          for (const n of cells) if (n) ingredients[n] = (ingredients[n] || 0) + 1
+          const fresh = recipes.learn(out.name, ingredients, args.how || (win.w === 3 ? 'experimenting at a crafting table' : 'experimenting in my inventory'))
+          found.push(`${out.name}${fresh ? ' (new!)' : ''}`)
+          if (!target || out.name === target || args.told) break
+        }
+      } finally {
+        if (opened) { try { bot.closeWindow(opened) } catch { /* already closed */ } }
+      }
+      return found.length ? `Worked out: ${found.join(', ')}.` : `Tried ${tried.size} combinations in the ${win.w}x${win.h} grid; nothing worked.`
+    }
+  },
+
+  askForHelp: {
+    description: 'Ask the players nearby in chat how to craft something you do not know yet. If someone answers, you try what they say.',
+    params: { itemName: 'string, what you want to craft' },
+    async run (ctx, args) {
+      const { recipes, bot } = ctx
+      const item = normalizeName(argString(args, 'itemName'))
+      if (!recipes) throw new ActionError('UNSUPPORTED', 'Not available.')
+      if (!Object.keys(bot.players).some((n) => n !== bot.username)) throw new ActionError('NOBODY_AROUND', 'There is nobody around to ask. Try experimentCrafting instead.')
+      if (!recipes.canAsk(item)) throw new ActionError('ALREADY_ASKED', `You asked about ${item} a moment ago: wait for an answer or try experimentCrafting.`)
+      const nice = item.replace(/_/g, ' ')
+      const text = pick([`anyone know how to craft ${nice}?`, `how do i make ${nice}? i can't figure it out`, `i keep failing at making ${nice}, any tips?`, `hey, how do you craft ${nice}?`])
+      const sent = await ctx.chat.send(text, 'tool')
+      if (!sent) throw new ActionError('CHAT_BLOCKED', 'Chat is blocked right now. Try experimentCrafting.')
+      recipes.noteAsked(item)
+      return `Asked for help with ${nice}. If someone answers, try what they say.`
+    }
+  },
+
   craftItem: {
-    description: 'Craft an item. Uses a nearby crafting table automatically when the recipe needs one.',
+    description: 'Craft an item from whatever you carry: makes planks and sticks from any wood by itself, and uses, places or makes a crafting table when the recipe needs one.',
     params: { itemName: 'string, e.g. "oak_planks", "stick", "wooden_pickaxe"', count: 'number of crafts, optional (default 1)' },
     async run (ctx, args) {
       const { bot } = ctx
@@ -853,21 +1034,36 @@ const ACTIONS = {
       const count = Math.floor(argNumber(args, 'count', { min: 1, max: 64, def: 1 }))
       const itemDef = bot.registry.itemsByName[name]
       if (!itemDef) throw new ActionError('UNKNOWN_ITEM', `"${name}" is not a known item.`)
+      if (ctx.recipes && !ctx.recipes.knows(name)) throw unknownRecipe(name)
 
-      // Try without a table first (2x2 inventory grid), then with one.
+      // Try without a table first (2x2 inventory grid), then with one. Missing planks/sticks are made from any wood carried.
       let recipe = bot.recipesFor(itemDef.id, null, 1, null)[0]
       let table = null
       if (!recipe) {
-        const tableBlock = bot.findBlock({ matching: bot.registry.blocksByName.crafting_table.id, maxDistance: 32 })
-        const tableRecipes = bot.recipesFor(itemDef.id, null, 1, tableBlock || true)
-        if (tableRecipes.length === 0) {
-          const anyRecipe = bot.recipesAll(itemDef.id, null, true)[0]
-          if (!anyRecipe) throw new ActionError('NO_RECIPE', `${name} cannot be crafted.`)
-          const needs = {}
-          for (const d of anyRecipe.delta) if (d.count < 0) needs[bot.registry.items[d.id]?.name] = -d.count
-          throw new ActionError('MISSING_MATERIALS', `Not enough materials for ${name}. One recipe needs: ${JSON.stringify(needs)}${anyRecipe.requiresTable ? ' (plus a crafting table)' : ''}.`)
+        await craftIntermediates(ctx, itemDef, count)
+        recipe = bot.recipesFor(itemDef.id, null, 1, null)[0]
+      }
+      if (!recipe) {
+        let tableBlock = bot.findBlock({ matching: bot.registry.blocksByName.crafting_table.id, maxDistance: 32 })
+        let tableRecipes = bot.recipesFor(itemDef.id, null, 1, tableBlock || true)
+        if (tableRecipes.length === 0) throw new ActionError('MISSING_MATERIALS', describeMissing(bot, itemDef, name))
+        if (!tableBlock) {
+          // No table around: place the one we carry, or make one from the wood we have.
+          if (!findInventoryItem(bot, 'crafting_table')) {
+            const tableDef = bot.registry.itemsByName.crafting_table
+            if (ctx.recipes && !ctx.recipes.knows('crafting_table')) throw unknownRecipe('crafting_table')
+            await craftIntermediates(ctx, tableDef, 1)
+            const r = bot.recipesFor(tableDef.id, null, 1, null)[0]
+            if (!r) throw new ActionError('NEED_CRAFTING_TABLE', `${name} needs a crafting table and you don't have the wood for one (4 planks). Mine a log first.`)
+            await bot.craft(r, 1, null)
+          }
+          await placeNearby(ctx, 'crafting_table')
+          tableBlock = bot.findBlock({ matching: bot.registry.blocksByName.crafting_table.id, maxDistance: 8 })
+          if (!tableBlock) throw new ActionError('NEED_CRAFTING_TABLE', 'Placed a crafting table but cannot find it.')
+          await craftIntermediates(ctx, itemDef, count)
+          tableRecipes = bot.recipesFor(itemDef.id, null, 1, tableBlock)
+          if (tableRecipes.length === 0) throw new ActionError('MISSING_MATERIALS', describeMissing(bot, itemDef, name))
         }
-        if (!tableBlock) throw new ActionError('NEED_CRAFTING_TABLE', `${name} needs a crafting table. Craft one (4 planks) and place it.`)
         recipe = tableRecipes[0]
         table = tableBlock
         if (bot.entity.position.distanceTo(table.position) > 3.5) {
@@ -1624,8 +1820,8 @@ class ActionExecutor {
    * @param {object} [deps.memory]   Memory (recent chat, e.g. duel invitations)
    * @param {object} [deps.tasks]    TaskManager (fights the bot agreed to)
    */
-  constructor ({ bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes, parkour }) {
-    Object.assign(this, { bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes, parkour })
+  constructor ({ bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes, parkour, recipes }) {
+    Object.assign(this, { bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes, parkour, recipes })
     this.current = null // { name, args, startedAt, controller }
     this.pauseUntil = 0
     this.pauseListeners = new Set()
@@ -1659,6 +1855,8 @@ class ActionExecutor {
       if (enabledActions?.length && !enabledActions.includes(name)) return false
       if (disabledActions?.includes(name)) return false
       if (name === 'chatMessage' && !this.chat.allows('tool')) return false
+      if ((name === 'experimentCrafting' || name === 'askForHelp') && this.recipes?.knowsEverything) return false // it already knows every recipe
+      if (name === 'askForHelp' && !this.chat.allows('tool')) return false
       return true
     })
   }
@@ -1704,6 +1902,7 @@ class ActionExecutor {
       knowledgeOpts: this.knowledgeOpts,
       reflexes: this.reflexes,
       parkour: this.parkour,
+      recipes: this.recipes,
       isPaused: () => this.paused,
       onPause: (fn) => { this.pauseListeners.add(fn); return () => this.pauseListeners.delete(fn) },
       signal: controller.signal
@@ -1758,5 +1957,8 @@ module.exports = {
   noteExplored,
   normalizeName,
   inventorySummary,
-  durabilityLeft
+  durabilityLeft,
+  craftIntermediates,
+  describeMissing,
+  resolveBlockIds
 }

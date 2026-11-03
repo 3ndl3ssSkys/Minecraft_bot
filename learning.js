@@ -333,6 +333,7 @@ class Learning {
       intelligence: a.intelligence?.toJSON(),
       parkour: a.parkour?.toJSON(),
       memories: a.longMemory?.toJSON(),
+      recipes: a.recipes?.toJSON(),
       chests: a.containers?.toJSON(),
       reflexes: a.reflexes?.toJSON(),
       goals: a.goals?.toJSON(),

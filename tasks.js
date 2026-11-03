@@ -588,6 +588,11 @@ class TaskManager {
       const item = bot.inventory.items().find((i) => i.name === t.item || i.name.includes(t.item))
       return this.forced(t, `bringing ${t.from} their ${t.item}`, { name: 'giveItem', args: { playerName: t.from, itemName: item?.name || t.item, count: Math.min(owed, have) } })
     }
+    // "Get me <item>": plan the exact item (mine that block, get a pickaxe first, craft it from what it knows).
+    if (['gather', 'craft'].includes(t.kind) && t.status === 'active' && t.item && this.agent.brain?.acquireStep) {
+      const step = this.agent.brain.acquireStep(t)
+      if (step) return this.forced(t, step.why || `getting ${t.item}`, { name: step.name, args: step.args }, false)
+    }
     if (t.kind === 'come' && online) return this.forced(t, `${t.from} asked me to come over`, { name: 'moveToPlayer', args: { playerName: t.from } })
     if (t.kind === 'follow' && online) return this.forced(t, `following ${t.from} like they asked`, { name: 'followPlayer', args: { playerName: t.from, durationSeconds: 60 } })
     if (t.kind === 'protect') {
@@ -614,6 +619,7 @@ class TaskManager {
     const t = this.active()
     if (!t) return
     if (result.ok) t.lastProgressAt = now()
+    if (['gather', 'craft'].includes(t.kind) && ['mineBlock', 'craftItem', 'experimentCrafting', 'askForHelp'].includes(name)) t.acqFails = result.ok ? 0 : (t.acqFails || 0) + 1
     if (name === 'moveToPlayer' && t.kind === 'come' && result.ok && args.playerName?.toLowerCase() === t.from.toLowerCase()) return this.finish(t, 'done')
     if (name === 'followPlayer' && t.kind === 'follow' && result.ok) return this.finish(t, 'done')
   }

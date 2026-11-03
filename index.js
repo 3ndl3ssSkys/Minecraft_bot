@@ -33,6 +33,9 @@ const { SocialModel, WEAPON, PROMISE_KINDS } = require('./social')
 const { Learning, COMBAT_STYLES } = require('./learning')
 const { ParkourSkill } = require('./parkour')
 const { LongTermMemory } = require('./memory')
+const { Autopilot } = require('./basics')
+const { RecipeBook } = require('./recipes')
+const { nextAcquireStep } = require('./acquire')
 const { TaskManager, KINDS: TASK_KINDS, EFFORTS, RISKS } = require('./tasks')
 const combat = require('./combat')
 const knowledge = require('./knowledge')
@@ -260,6 +263,7 @@ const DEFAULT_CONFIG = {
     admins: [], // most !commands (owners can add more with !admin add). Their *requests* are judged like anyone's.
     commandPrefix: '!',
     startingGoal: '', // old name for goals.current (still works)
+    autopilot: true, // early-game basics (logs, wooden and stone pickaxe) by rules, not by asking the model: fast and reliable
     allowRespawnOnPurpose: true, // it may choose to die to respawn (stuck, trapped, lost) — never on hardcore worlds
     respawnCommand: '', // e.g. "/kill" if the server lets it use that; otherwise it uses lava or a big drop nearby
     protectedPlayers: [], // never attacked, no matter what
@@ -281,6 +285,8 @@ const DEFAULT_CONFIG = {
       allowParkour: true,
       allowSprinting: true,
       allow1by1towers: true,
+      openDoors: true, // walk through doors instead of digging around them
+      digCost: 4, // breaking blocks costs this many times more in route planning: doors and soft blocks win over bare-hand stone mining
       thinkTimeoutMs: 10000,
       baseTimeoutMs: 15000,
       msPerBlock: 1200,
@@ -821,6 +827,7 @@ class Perception {
     const hasAny = (re) => Object.keys(inv).some((n) => re.test(n))
     if (state.world.phase === 'night' || state.world.phase === 'dusk') h.push('It is dark: hostile mobs spawn. Consider shelter, torches or staying near light.')
     if (!hasAny(/_pickaxe$/)) h.push('You have no pickaxe.')
+    if (this.agent.recipes && !this.agent.recipes.knowsEverything) h.push(`Recipes: ${this.agent.recipes.describe()}. If craftItem says you don't know one, use experimentCrafting or askForHelp.`)
     const count = (re) => Object.entries(inv).filter(([n]) => re.test(n)).reduce((a, [, c]) => a + (Number(c) || 0), 0)
     const logsN = count(/_log$/)
     const planksN = count(/_planks$/)
@@ -1694,6 +1701,7 @@ class ChatResponder {
     const speaker = batch[batch.length - 1].username
     const whisper = batch.every((b) => b.whisper)
     const said = batch.filter((b) => b.username === speaker).map((b) => b.message)
+    if (agent.recipes?.listening && !agent.social.isHostile(speaker)) this.recipeAnswer(speaker, said.join(' ')).catch(() => {}) // it asked how to craft something: maybe this is the answer
     const mods = emotions.modifiers()
 
     const others = Object.keys(bot.players).filter((n) => n !== bot.username && n !== speaker).slice(0, 4)
@@ -1789,6 +1797,26 @@ ${speaker}'s latest message${said.length > 1 ? 's' : ''}: ${said.map((m) => `"${
     emotions.fromLabel(out.emotion, out.emotionIntensity)
     if (out.message) await agent.chat.send(out.message, 'reply', { whisperTo: whisper && this.cfg.whisperReplies ? speaker : undefined, fallback })
     return decision
+  }
+
+  /**
+   * It asked for help with a recipe and someone answered. Read the answer, check the ingredients are real, and have the
+   * brain TRY it in the crafting grid (the game decides whether it works).
+   */
+  async recipeAnswer (speaker, text) {
+    const { recipes, llm, bot, brain, social, log } = this.agent
+    const want = recipes.listening
+    if (!want || !text) return
+    const out = await llm.chat([
+      { role: 'system', content: 'A Minecraft player asked in chat how to craft an item and someone replied. If the reply says which items make it, extract them. Respond ONLY with JSON: {"ingredients": ["item_name", ...], "item": "what it makes or empty"}. Use real Minecraft item ids with underscores (oak_planks, stick, cobblestone). Empty ingredients if the reply gives no recipe.' },
+      { role: 'user', content: `They asked about: ${want.item}\n${speaker} replied: "${text}"` }
+    ], { priority: PRIORITY.reflect, label: 'recipe-answer' }).catch(() => null)
+    const names = (Array.isArray(out?.ingredients) ? out.ingredients : []).map((n) => String(n).toLowerCase().replace(/\s+/g, '_')).filter((n) => bot.registry.itemsByName[n])
+    if (!names.length) return
+    log.info(`${speaker} told it a recipe for ${want.item}: ${[...new Set(names)].join(', ')}; trying it.`)
+    social.adjustAffinity(speaker, 1, 'tried to help with a recipe')
+    recipes.awaiting = null
+    brain.forced.push({ source: 'help', thought: `${speaker} told me how to make ${want.item.replace(/_/g, ' ')}: let me try it.`, emotion: 'curious', emotionIntensity: 5, action: { name: 'experimentCrafting', args: { itemName: want.item, tries: 3, told: [...new Set(names)], how: `told by ${speaker}` } } })
   }
 
   /** The request matches the current task or goal: agree in character, without making a second task. */
@@ -2656,6 +2684,7 @@ class Brain {
     this.wakeFn = null
     this.interruptFn = null // set while waiting on the LLM: a reflex can cut the wait short
     this.truces = new Map() // player -> when we agreed to stop fighting
+    this.autopilot = new Autopilot()
   }
 
   start () {
@@ -2808,7 +2837,7 @@ ${said ? `${name} just said: ${said}
         if (this.paused || !agent.bot?.entity || agent.dead || agent.bot.isSleeping) { await this.idle(1000); continue }
         if (agent.reflexes?.busy) { await this.idle(100); continue } // the body is busy saving itself
 
-        let decision = this.forced.shift() || this.reflex() || agent.tasks.nextForcedAction() || this.nextPlanned()
+        let decision = this.forced.shift() || this.reflex() || agent.tasks.nextForcedAction() || this.nextPlanned() || this.autopilotStep()
         if (!decision) {
           // Throttle: never ask the LLM more often than minLlmIntervalMs.
           const wait = this.lastLlmAt + config.loop.minLlmIntervalMs - Date.now()
@@ -2832,6 +2861,7 @@ ${said ? `${name} just said: ${said}
         this.learnFrom(name, result)
         agent.tasks.onActionResult(name, args, result)
         this.trackPlan(decision, result)
+        this.autopilot.onResult(decision, result)
 
         this.backoff = config.loop.errorBackoffMs
         await this.idle(config.loop.postActionDelayMs)
@@ -2849,6 +2879,50 @@ ${said ? `${name} just said: ${said}
    * who keeps playing while deciding what to do next. The busy work is
    * interrupted the moment the decision arrives.
    */
+  /** The early-game ladder by rules (see basics.js), only when nothing else needs the bot. */
+  autopilotStep () {
+    const agent = this.agent
+    const { bot, config, memory, executor } = agent
+    if (config.behavior.autopilot === false || !agent.perception?.latest) return null
+    if (agent.dangerLevel() !== 'none' || (bot.food ?? 20) <= 6 || bot.health <= 8 || agent.builder?.current || agent.tasks.active()) return null
+    if (memory.chat.length && Date.now() - memory.chat.at(-1).at < 20000 && !memory.chat.at(-1).self) return null // someone just spoke: let the reply and the model deal with it
+    const s = agent.perception.latest
+    const step = this.autopilot.step({ inventory: s.inventory.items, nearbyBlocks: s.nearbyBlocks })
+    if (step && step.name === 'craftItem') {
+      const unknown = agent.recipes.firstUnknown(step.args.itemName, s.inventory.items, bot.registry, (id) => bot.recipesAll(id, null, true))
+      if (unknown) return this.helpStep(unknown)
+    }
+    if (!step || !executor.availableTools().includes(step.name)) return null
+    return { source: 'auto', thought: step.why, emotion: 'focused', emotionIntensity: 4, action: { name: step.name, args: step.args } }
+  }
+
+  /** Doesn't know a recipe: ask the players around, or try things in the crafting grid itself. */
+  helpStep (item) {
+    const { bot, recipes, chat } = this.agent
+    const nice = item.replace(/_/g, ' ')
+    const people = Object.keys(bot.players).some((n) => n !== bot.username)
+    const ask = people && chat.allows('tool') && recipes.canAsk(item) && Math.random() < 0.5
+    const action = ask ? { name: 'askForHelp', args: { itemName: item } } : { name: 'experimentCrafting', args: { itemName: item, tries: 6 } }
+    return { source: 'auto', thought: ask ? `I don't know how to make ${nice}; I'll ask.` : `I don't know how to make ${nice}; I'll try things out.`, emotion: 'curious', emotionIntensity: 4, action }
+  }
+
+  /** The step toward a gather/craft task's exact item (see acquire.js), or null to let the model decide. */
+  acquireStep (t) {
+    const { bot, perception, recipes } = this.agent
+    const s = perception?.latest
+    if (!s || !t.item) return null
+    if (t.acqFails >= 2) { // the same step keeps failing: look somewhere else, then stop planning and let the model decide
+      t.acqFails = 0
+      t.acqExplores = (t.acqExplores || 0) + 1
+      if (t.acqExplores > 3) return null
+      return { name: 'explore', args: { distance: 32 }, why: `looking elsewhere for ${t.item}` }
+    }
+    const step = nextAcquireStep({ item: t.item, count: t.commitCount || t.count || 1, inv: s.inventory.items, near: s.nearbyBlocks, registry: bot.registry, knows: (n) => recipes.knows(n) })
+    if (!step) return null
+    if (step.unknown) return { ...this.helpStep(step.unknown).action, why: `I need to learn ${step.unknown.replace(/_/g, ' ')} first` }
+    return step
+  }
+
   /** The follow-up actions the model promised ("next"): run them without asking again, while nothing has changed. */
   trackPlan (decision, result) {
     const { memory, bot } = this.agent
@@ -2858,6 +2932,7 @@ ${said ? `${name} just said: ${said}
       this.plan.hp = bot.health
     } else if (!result.ok || decision.source !== 'plan') {
       this.plan = null
+    this.autopilot = new Autopilot()
     }
   }
 
@@ -3143,6 +3218,7 @@ class Agent {
     this.intelligence = new Intelligence(() => this.config.intelligence, saved.intelligence)
     this.parkour = new ParkourSkill(this, saved.parkour)
     this.longMemory = new LongTermMemory(this, saved.memories)
+    this.recipes = new RecipeBook(this, saved.recipes)
     this.sessionStart = Date.now()
     this.memory.long = this.longMemory
     this.senses = new Senses(this)
@@ -3339,6 +3415,7 @@ class Agent {
       builder: this.builder,
       intel: this.intelligence,
       parkour: this.parkour,
+      recipes: this.recipes,
       containers: this.containers,
       knowledgeOpts: () => this.knowledgeOpts(),
       reflexes: this.reflexes,
@@ -3477,6 +3554,8 @@ class Agent {
     const m = this.bot?.pathfinder?.movements
     if (!m) return
     const pf = this.config.behavior.pathfinding
+    m.canOpenDoors = pf.openDoors !== false
+    m.digCost = pf.digCost ?? 4
     m.allowParkour = pf.allowParkour // which jumps it may use is decided by parkour.js from its skill
     m.allowSprinting = pf.allowSprinting && this.intelligence.can('sprint', 'survival')
     this.parkour.refresh(m)
@@ -3520,6 +3599,8 @@ class Agent {
     movements.canDig = pf.canDig && config.server.platform !== 'bedrock' // no block breaking through ViaBedrock
     // Parkour and sprinting are skills too.
     movements.allowParkour = pf.allowParkour
+    movements.canOpenDoors = pf.openDoors !== false
+    movements.digCost = pf.digCost ?? 4
     movements.allowSprinting = pf.allowSprinting && this.intelligence.can('sprint', 'survival')
     // Good guest: don't dig through other players' builds while pathfinding.
     if (config.behavior.noGrief) {
