@@ -28,6 +28,7 @@
  */
 
 const ALIGN_STOP = new Set(['get', 'got', 'the', 'and', 'for', 'some', 'any', 'with', 'please', 'make', 'find', 'mine', 'gather', 'collect', 'grab', 'bring', 'give', 'need', 'want', 'can', 'you', 'me', 'more', 'few', 'lot', 'lots', 'of', 'build', 'craft', 'go', 'to', 'out', 'new', 'one', 'two', 'your', 'our'])
+const PLACEABLE = /^(crafting_table|furnace|blast_furnace|smoker|chest|barrel|torch|[a-z_]*_bed|[a-z_]*_door|anvil|enchanting_table|ladder|campfire)$/
 const KINDS = ['gather', 'craft', 'give_item', 'come', 'follow', 'attack', 'protect', 'build', 'explore', 'other']
 const EFFORTS = ['trivial', 'small', 'medium', 'large', 'huge']
 const RISKS = ['none', 'low', 'medium', 'high']
@@ -111,11 +112,18 @@ class TaskManager {
   // -------------------------------------------------------------------------
 
   normalize (from, raw = {}) {
-    const kind = KINDS.includes(raw.kind) ? raw.kind : 'other'
+    let kind = KINDS.includes(raw.kind) ? raw.kind : 'other'
+    let item = raw.item ? normItem(raw.item) : ''
+    const desc = String(raw.description || kind)
+    // "craft a crafting table" can arrive as other/build/craft: if it names an item to make, it is a craft task for that item.
+    if (['other', 'build'].includes(kind) && /^\s*(craft|make|create|get)\b/i.test(desc) && !/\b(base|house|home|cabin|farm|shelter|wall|tower|castle)\b/i.test(desc)) {
+      const found = this.itemInText(desc)
+      if (found) { kind = 'craft'; item = found }
+    }
     const req = {
       kind,
-      description: String(raw.description || kind).slice(0, 160),
-      item: raw.item ? normItem(raw.item) : '',
+      description: desc.slice(0, 160),
+      item,
       count: clamp(Math.round(Number(raw.count) || 0), 0, 64 * 36),
       target: String(raw.target || '').trim(),
       effort: EFFORTS.includes(raw.effort) ? raw.effort : 'medium',
@@ -142,6 +150,17 @@ class TaskManager {
     if (['gather', 'craft', 'give_item', 'come', 'follow'].includes(kind)) req.effort = effortBucket(minutes)
     if (kind === 'attack' && DANGEROUS_MOBS.has(normItem(req.target))) req.risk = 'high'
     return req
+  }
+
+  /** The longest real item name mentioned in some text ("craft a crafting table" -> crafting_table). */
+  itemInText (text) {
+    const t = ` ${String(text).toLowerCase().replace(/[_-]/g, ' ')} `
+    let best = ''
+    for (const it of this.agent.bot?.registry?.itemsArray || []) {
+      const n = it.name.replace(/_/g, ' ')
+      if (n.length >= 4 && n.length > best.length && (t.includes(` ${n} `) || t.includes(` ${n}s `))) best = it.name
+    }
+    return best
   }
 
   /**
@@ -441,7 +460,9 @@ class TaskManager {
 
   progress (t) {
     if (!['gather', 'craft'].includes(t.kind)) return t.delivered
-    return Math.max(0, this.countItem(t.item) - t.startCount + t.delivered)
+    // What it carries now (plus what it already handed over), or what it has made/mined for this task: a crafted
+    // table that was placed, or logs turned into planks, still count as done.
+    return Math.max(0, this.countItem(t.item) - t.startCount + t.delivered, t.made || 0)
   }
 
   /** Called every perception tick. */
@@ -457,7 +478,8 @@ class TaskManager {
       const liking = clamp(social.profile(t.from).affinity / 100, 0, 1)
       t.salience -= minutes * 0.02 * (0.5 + forgetfulness) * (1.4 - liking)
       if (forgetfulness && t.salience < 0.35 && Math.random() < forgetfulness * 0.25 * minutes) this.forget(t, 'faded')
-      if (now() - t.createdAt > 3 * 3600000) this.forget(t, 'too long ago')
+      t.age = (t.age || 0) + minutes // time it has been remembered while the bot was actually playing: days offline don't count
+      if (t.age > 180) this.forget(t, 'too long ago')
     }
 
     const a = this.active()
@@ -480,7 +502,9 @@ class TaskManager {
   next () {
     if (this.active()) return
     const { social } = this.agent
-    const t = this.queued().sort((a, b) => (b.salience + social.profile(b.from).affinity / 200) - (a.salience + social.profile(a.from).affinity / 200))[0]
+    // Which to do first: what is fresh in mind, who asked (liking), urgent kinds, quick wins, and the ones waiting longest.
+    const rank = (t) => t.salience + social.profile(t.from).affinity / 200 + (['come', 'protect'].includes(t.kind) ? 0.3 : 0) + (['trivial', 'small'].includes(t.effort) ? 0.15 : 0) + Math.min(0.3, (t.age || 0) / 300)
+    const t = this.queued().sort((a, b) => rank(b) - rank(a))[0]
     if (t) {
       this.agent.memory.addEvent('task', `You're getting to what ${t.from} asked earlier: ${t.description}`)
       this.start(t)
@@ -580,6 +604,8 @@ class TaskManager {
     if (t.attempts >= 3) { this.wrapUp(t, 'it kept not working'); return null }
 
     if (['gather', 'craft'].includes(t.kind) && t.status === 'active' && this.progress(t) >= t.commitCount) t.status = 'delivering'
+    // Made for its own use (a crafting table, a furnace...): nothing to hand over, so it is simply done.
+    if (t.status === 'delivering' && t.kind === 'craft' && PLACEABLE.test(t.item || '') && !/\b(give|bring|hand)\b/i.test(t.description)) { this.finish(t, 'done'); return null }
     if (t.status === 'delivering' || t.kind === 'give_item') {
       if (!online) return null
       const owed = t.commitCount - t.delivered
@@ -619,6 +645,16 @@ class TaskManager {
     const t = this.active()
     if (!t) return
     if (result.ok) t.lastProgressAt = now()
+    if (result.ok && ['gather', 'craft'].includes(t.kind) && t.item) {
+      if (name === 'mineBlock') {
+        const m = String(result.message || '').match(/Mined (\d+)\/\d+ ([a-z_]+)/)
+        const blk = m && this.agent.bot.registry.blocksByName[m[2]]
+        const itemId = this.agent.bot.registry.itemsByName[t.item]?.id
+        if (m && (m[2] === t.item || (blk && Array.isArray(blk.drops) && blk.drops.includes(itemId)))) t.made = (t.made || 0) + Number(m[1])
+      } else if (name === 'craftItem' && normItem(args.itemName || '') === t.item) {
+        t.made = (t.made || 0) + (Number(args.count) || 1)
+      }
+    }
     if (['gather', 'craft'].includes(t.kind) && ['mineBlock', 'craftItem', 'experimentCrafting', 'askForHelp'].includes(name)) t.acqFails = result.ok ? 0 : (t.acqFails || 0) + 1
     if (name === 'moveToPlayer' && t.kind === 'come' && result.ok && args.playerName?.toLowerCase() === t.from.toLowerCase()) return this.finish(t, 'done')
     if (name === 'followPlayer' && t.kind === 'follow' && result.ok) return this.finish(t, 'done')

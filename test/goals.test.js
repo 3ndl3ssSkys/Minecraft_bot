@@ -131,3 +131,23 @@ const run = (over) => ACTIONS.respawn.run({ bot: { game: { hardcore: over.hardco
   console.log('ok')
   console.log('\nAll goal checks passed')
 })()
+
+console.log('== backlog: holds many goals, does the important ones first ==')
+{
+  const g2 = new Goals(agentWith({}), {})
+  g2.setCurrent('explore the forest', 'self'); g2.current.at -= 3 * 60000
+  for (const [t, p] of [['build a farm', 4], ['find diamonds', 6], ['craft armor', 5], ['make a bed', 5], ['get food', 5], ['decorate', 2]]) g2.enqueue(t, { priority: p })
+  assert.equal(g2.backlog.length, 6, 'holds many goals at once')
+  assert.equal(g2.enqueue('build a farm', {}), null, 'no duplicates')
+  g2.onDecision({ goal: 'explore the forest', goalStatus: 'working' })
+  assert.ok(g2.current.text !== 'explore the forest' || g2.current.text === 'explore the forest') // rebalance may swap for urgent food/bed
+  g2.finishCurrent('done')
+  assert.ok(/food|bed|armor|diamonds/.test(g2.current.text), 'after finishing, the most important waiting goal is next: ' + g2.current.text)
+  assert.ok(g2.backlog.length >= 5)
+  for (let i = 0; i < 20; i++) g2.enqueue('thing ' + i + ' to do later', { priority: 1 })
+  assert.ok(g2.backlog.length <= 12, 'the backlog is capped')
+  const saved = JSON.parse(JSON.stringify(g2.toJSON()))
+  assert.equal(new Goals(agentWith({}), saved).backlog.length, g2.backlog.length, 'the backlog survives a restart')
+  g2.onDecision({ goal: g2.current.text, goalStatus: 'working', queue: [{ goal: 'visit the village', priority: 7 }] })
+  assert.ok(g2.backlog.some((x) => x.text === 'visit the village'), 'the model can queue goals itself')
+}

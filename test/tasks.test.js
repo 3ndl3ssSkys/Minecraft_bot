@@ -137,4 +137,31 @@ assert.equal(fitTask && fitTask.via, 'task')
 assert.equal(tasks.alignment('Dan', { kind: 'gather', description: 'chop some wood', item: 'oak_log', count: 5, effort: 'small', risk: 'low' }), null, 'someone else\'s task is not "already doing it" for a different asker (falls through to normal appraisal; goal does not cover it)')
 tasks.tasks = tasks.tasks.filter((t) => t.id !== 900)
 agent.goals = undefined
+
+console.log('\n== Tasks that finish, forget by play time, and get ordered ==')
+agent.bot.registry = { ...require('minecraft-data')('1.21.4'), foodsByName: {}, entitiesByName: { zombie: {}, creeper: {} } }
+const norm = tasks.normalize('Boss', { kind: 'other', description: 'craft a crafting table', count: 0 })
+assert.equal(norm.kind, 'craft'); assert.equal(norm.item, 'crafting_table', '"craft a crafting table" is a craft task whatever the model called it')
+assert.equal(tasks.normalize('Boss', { kind: 'build', description: 'make a base' }).kind, 'build', 'a base stays a build')
+// made counts even after the item is used up or placed
+const made = { id: 900, from: 'Boss', kind: 'craft', description: 'craft a crafting table', item: 'crafting_table', count: 1, commitCount: 1, status: 'active', startCount: 0, delivered: 0, salience: 1, createdAt: Date.now(), lastProgressAt: Date.now() }
+tasks.tasks.push(made)
+inv.length = 0
+assert.equal(tasks.progress(made), 0)
+tasks.onActionResult('craftItem', { itemName: 'crafting_table', count: 1 }, { ok: true, message: 'Crafted 1 crafting_table.' })
+assert.equal(tasks.progress(made), 1, 'crafted it (then placed it): still counts')
+assert.equal(tasks.nextForcedAction(), null)
+assert.ok(tasks.history.some((h) => h.id === 900 && h.status === 'done'), 'a table it made for itself is finished, not handed to the player')
+// mined logs count even when they are used for something else
+const log = { id: 901, from: 'Boss', kind: 'gather', description: 'get 4 cherry logs', item: 'cherry_log', count: 4, commitCount: 4, status: 'active', startCount: 0, delivered: 0, salience: 1, createdAt: Date.now(), lastProgressAt: Date.now() }
+tasks.tasks.push(log)
+tasks.onActionResult('mineBlock', { blockType: 'cherry_log' }, { ok: true, message: 'Mined 4/4 cherry_log.' })
+assert.equal(tasks.progress(log), 4, 'mining counts toward the task')
+tasks.tasks = tasks.tasks.filter((t) => t.id !== 901)
+// forgetting is by play time: waiting offline does not make it forget
+const old = { id: 902, from: 'Boss', kind: 'build', description: 'make a base', status: 'queued', salience: 1, createdAt: Date.now() - 5 * 3600000, age: 5 }
+tasks.tasks.push(old); tasks.lastTick = Date.now() - 60000; tasks.tick()
+assert.ok(old.age > 5 && old.status !== 'forgotten' && tasks.tasks.includes(old), 'a task made hours ago (on the clock) but only minutes ago (in play time) is still remembered')
+old.status = 'queued'; old.age = 179.9; tasks.lastTick = Date.now() - 60000; tasks.tick()
+assert.ok(!tasks.tasks.includes(old), 'after 3 hours of actually playing it fades')
 console.log('\nALL TASK CHECKS PASSED')

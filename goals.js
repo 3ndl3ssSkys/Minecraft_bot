@@ -19,6 +19,7 @@
 
 const STATUSES = ['working', 'subgoal_done', 'goal_done', 'blocked', 'new_goal']
 const MAX_LONG_TERM = 4
+const MAX_BACKLOG = 12 // goals it can hold besides the one it is on; the most important gets done first
 const COMMIT_MS = 2 * 60000 // a fresh own goal is kept this long unless it gets stuck: small models flip-flop otherwise
 const DETOUR_TAKEOVER_MS = 3 * 60000 // a "detour" this long means it really changed its mind (own goals only)
 
@@ -59,6 +60,7 @@ class Goals {
     this.longTerm = data.longTerm || [] // { id, text, source, fixed, status, at }
     this.current = data.current || null // { text, source, fixed, parent, steps: [{ text, done }], now, detour, blocked, at }
     this.history = data.history || [] // { text, status, at }
+    this.backlog = data.backlog || [] // waiting goals: { text, priority 1-10, source, at }
     this.nextId = Math.max(0, ...this.longTerm.map((g) => g.id)) + 1
     this.lastPlanAt = 0
     this.planning = false
@@ -119,6 +121,47 @@ class Goals {
     this.dirty()
   }
 
+  /** How much a goal matters right now: its priority, survival basics, who asked (and how much they are liked), and waiting time. */
+  score (g) {
+    const urgent = /\b(eat|food|hungry|shelter|bed|sleep|heal|armor|armour|safe|survive|weapon|sword|torch|light)\b/i.test(g.text) ? 3 : 0
+    const asker = g.source && !['self', 'config'].includes(g.source) ? 1 + (this.agent.social?.profile?.(g.source)?.affinity ?? 50) / 50 : 0
+    const waited = g.at ? Math.min(2, (Date.now() - g.at) / (30 * 60000)) : 0
+    return (g.priority ?? 5) + urgent + asker + waited
+  }
+
+  /** Keep a goal for later (instead of dropping it). Returns the entry or null. */
+  enqueue (text, { priority = 5, source = 'self' } = {}) {
+    const t = clean(text)
+    if (!t || (this.current && similar(this.current.text, t)) || this.backlog.some((g) => similar(g.text, t))) return null
+    const g = { text: t, priority: Math.max(1, Math.min(10, Math.round(Number(priority) || 5))), source, at: Date.now() }
+    this.backlog.push(g)
+    if (this.backlog.length > MAX_BACKLOG) { this.backlog.sort((a, b) => this.score(b) - this.score(a)); this.backlog.length = MAX_BACKLOG }
+    this.dirty()
+    return g
+  }
+
+  /** Take the most important waiting goal out of the backlog. */
+  pickNext () {
+    if (!this.backlog.length) return null
+    this.backlog.sort((a, b) => this.score(b) - this.score(a))
+    return this.backlog.shift()
+  }
+
+  /** Something much more important is waiting than what it is doing: swap (the old one goes back to the backlog). */
+  rebalance () {
+    const c = this.current
+    if (!c || c.fixed || !this.backlog.length || Date.now() - (c.at || 0) < COMMIT_MS) return
+    this.backlog.sort((a, b) => this.score(b) - this.score(a))
+    const top = this.backlog[0]
+    if (this.score(top) >= this.score({ text: c.text, priority: c.priority, source: c.source }) + 3) {
+      this.backlog.shift()
+      this.agent.memory.addEvent('goal', `Something more important came up, so you switched to: ${top.text}.`)
+      this.setCurrent(top.text, top.source)
+      this.current.priority = top.priority
+      this.enqueue(c.text, { priority: c.priority ?? 5, source: c.source }) // the goal it was on waits its turn
+    }
+  }
+
   setCurrent (text, source = 'self', { steps = null, parent = null } = {}) {
     const t = clean(text)
     if (!t) { this.current = null; this.dirty(); return null }
@@ -154,7 +197,14 @@ class Goals {
     this.agent.memory.addEvent('goal', status === 'done' ? `You finished your goal: ${c.text}.` : `You gave up on your goal: ${c.text}.`)
     if (status === 'done') this.agent.emotions?.stimulate({ joy: 0.12, boredom: -0.1 }, `you finished ${c.text}`)
     this.current = null
-    this.want(`just ${status === 'done' ? 'finished' : 'gave up on'} "${c.text}"`)
+    const next = this.pickNext() // the most important waiting goal comes next
+    if (next) {
+      this.setCurrent(next.text, next.source)
+      this.current.priority = next.priority
+      this.agent.memory.addEvent('goal', `Next on your list: ${next.text}.`)
+    } else {
+      this.want(`just ${status === 'done' ? 'finished' : 'gave up on'} "${c.text}"`)
+    }
     this.dirty()
   }
 
@@ -198,7 +248,8 @@ class Goals {
    * waits. Its own goals it can drop by saying new_goal, or by staying on the detour for a
    * few minutes; a set goal only an owner or finishing it can end.
    */
-  onDecision ({ goal, subgoal, goalStatus } = {}) {
+  onDecision ({ goal, subgoal, goalStatus, queue } = {}) {
+    if (Array.isArray(queue)) for (const q of queue.slice(0, 3)) this.enqueue(q?.goal ?? q?.text ?? q, { priority: q?.priority })
     const g = clean(goal)
     const sub = clean(subgoal)
     const status = STATUSES.includes(goalStatus) ? goalStatus : 'working'
@@ -215,8 +266,10 @@ class Goals {
       const takeover = c?.detour && similar(c.detour, g) && Date.now() - c.detourAt > DETOUR_TAKEOVER_MS
       const changedMind = !c?.fixed && (takeover || (!young && (status === 'new_goal' || !underWay)))
       if (changedMind) {
-        if (c) this.history.push({ text: c.text, status: 'changed', level: 'goal', at: Date.now() })
+        const old = c
+        if (old) this.history.push({ text: old.text, status: 'changed', level: 'goal', at: Date.now() })
         c = this.setCurrent(g, 'self')
+        if (old && !old.fixed && (old.steps.some((s) => !s.done) || !old.steps.length)) this.enqueue(old.text, { priority: old.priority ?? 5, source: old.source }) // not finished: keep it for later
       } else if (!c.detour || !similar(c.detour, g)) {
         c.detour = g // something comes first; the plan waits
         c.detourAt = Date.now()
@@ -233,6 +286,7 @@ class Goals {
     } else if (status !== 'working') {
       c.blocked = 0
     }
+    this.rebalance()
   }
 
   want (reason) { this.planWanted = reason }
@@ -356,6 +410,7 @@ ${s?.status.task ? `You're doing something for ${s.status.task.for}: ${s.status.
       current: c ? `${c.text} (${who(c)})` : null
     }
     if (c?.detour) out.detour = `${c.detour} — first, then back to the current goal`
+    if (this.backlog.length) out.queued = [...this.backlog].sort((a, b) => this.score(b) - this.score(a)).slice(0, 6).map((g) => `${g.text} (priority ${g.priority}${g.source !== 'self' ? `, from ${g.source}` : ''})`)
     if (c?.steps.length) out.steps = c.steps.map((s, i) => `${s.done ? '[x]' : i === c.now ? '[>]' : '[ ]'} ${s.text}`)
     const parent = c && this.longTerm.find((g) => g.id === c.parent)
     if (parent) out.currentGoalServes = parent.text
@@ -383,6 +438,7 @@ ${s?.status.task ? `You're doing something for ${s.status.task.for}: ${s.status.
       `long-term: ${lt.map((g, i) => `${i + 1}) ${g.text}`).join(' ') || 'none'}`,
       `now: ${c ? c.text : 'none'}${c?.detour ? ` (detour: ${c.detour})` : ''}`
     ]
+    if (this.backlog.length) lines.push(`queued: ${[...this.backlog].sort((a, b) => this.score(b) - this.score(a)).slice(0, 6).map((g, i) => `${i + 1}) ${g.text}`).join(' ')}`)
     if (c?.steps.length) lines.push(`steps: ${c.steps.map((s, i) => `${s.done ? 'x' : i === c.now ? '>' : '-'} ${s.text}`).join(', ')}`)
     return lines
   }
@@ -390,7 +446,7 @@ ${s?.status.task ? `You're doing something for ${s.status.task.for}: ${s.status.
   activeLongTerm (n) { return this.longTerm.filter((g) => g.status === 'active')[n - 1] || null }
 
   toJSON () {
-    return { life: this.life, longTerm: this.longTerm, current: this.current, history: this.history, lastConfig: this.lastConfig }
+    return { life: this.life, longTerm: this.longTerm, current: this.current, history: this.history, backlog: this.backlog, lastConfig: this.lastConfig }
   }
 }
 

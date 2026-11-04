@@ -62,7 +62,8 @@ const ctxOf = (inv) => { const bot = fakeBot(inv); bot.inventory = { items: () =
   assert.ok(c4.bot.recipesFor(items.crafting_table.id).length > 0, 'with a different log it makes a full set of the other wood')
   const msg = describeMissing(ctxOf({ cherry_planks: 2 }).bot, items.crafting_table, 'crafting_table')
   console.log(' ', msg)
-  assert.ok(/Missing: \{"cherry_planks":2\}/.test(msg), 'names the closest recipe and what is actually missing')
+  assert.ok(/"planks \(any wood\)":2/.test(msg) && /Any kind of log works/.test(msg) && /You carry: 2 cherry_planks/.test(msg), 'says any wood works, never "cherry", and what is carried')
+  assert.ok(!/cherry_planks":/.test(msg))
 }
 console.log('ok')
 
@@ -73,6 +74,9 @@ const logIds = resolveBlockIds({ registry: mcData }, 'wood')
 assert.ok(logIds.length >= 9 && logIds.includes(mcData.blocksByName.cherry_log.id) && logIds.includes(mcData.blocksByName.oak_log.id) && !logIds.includes(mcData.blocksByName.stripped_oak_log.id))
 assert.equal(resolveBlockIds({ registry: mcData }, 'logs').length, logIds.length)
 assert.deepEqual(resolveBlockIds({ registry: mcData }, 'oak_log'), [mcData.blocksByName.oak_log.id])
+const cobbleIds = resolveBlockIds({ registry: mcData }, 'cobblestone')
+assert.ok(cobbleIds.includes(mcData.blocksByName.cobblestone.id) && cobbleIds.includes(mcData.blocksByName.stone.id), 'asking for cobblestone also finds the stone you mine to get it')
+assert.ok(resolveBlockIds({ registry: mcData }, 'coal').includes(mcData.blocksByName.coal_ore.id), 'coal means coal ore')
 console.log('ok')
 console.log('\nALL BASICS CHECKS PASSED')
 

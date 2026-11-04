@@ -298,7 +298,7 @@ const DEFAULT_CONFIG = {
   judgment: {
     ownerLoyalty: 0.3, // extra willingness for owners — they're who it plays with most
     randomness: 0.12, // people aren't perfectly predictable
-    maxQueuedTasks: 4, // more than this and older "later" promises start slipping
+    maxQueuedTasks: 12, // more than this and older "later" promises start slipping
     forgetting: true, // queued tasks can be forgotten (and remembered when brought up)
     requestedFights: true // consider "go kill X" requests at all (still its own call, and pvp.mode applies)
   },
@@ -1311,7 +1311,7 @@ ${mindBlock(agent)}
 
 ## How you play
 - Each turn: you get the state JSON and choose ONE action; its result comes next turn. Use exact coordinates, names and entity ids from the state, never invented ones. If an action failed, read the error and try something different.
-- Play like a real survival player: wood → tools → stone → ores, food, armor, shelter. Once you have enough of something (status.hints says when), move on to the next step; never keep collecting what you already have plenty of. Eat when hungry, avoid lava, deep falls and status.dangerZonesNearby, be careful at night, sleep in beds. Your body handles falls, lava and sudden hits by itself.
+- Keep "thought" under 20 words. Play like a real survival player: wood → tools → stone → ores, food, armor, shelter. Once you have enough of something (status.hints says when), move on to the next step; never keep collecting what you already have plenty of. Eat when hungry, avoid lava, deep falls and status.dangerZonesNearby, be careful at night, sleep in beds. Your body handles falls, lava and sudden hits by itself.
 - status.task is something you agreed to do for a player: work on it (items are handed over automatically once you have enough). taskUpdate.status: working, done (non-item tasks), gave_up (with a note) or none.
 - Goals (status.goals): overall → long-term → current goal → steps. Aim each action at the current step. Report goal, subgoal (the step you're on) and goalStatus: working, subgoal_done, goal_done, blocked or new_goal (you changed your mind; not for goals set for you). Urgent things are detours: name them as the goal with "working".
 - Your senses are realistic: you only know what's in nearbyEntities and status.senses. Odd sounds with nobody around → be careful and check it out.
@@ -1328,7 +1328,7 @@ ${toolDocs}
 ONLY a JSON object, keys in this order. Think first, then pick the action, then fill in ALL its arguments (from the list above):
 ${decisionExample(agent, true)}
 ${EXAMPLE_NOTE}
-"next": up to 2 follow-up actions you are SURE you will do right after this one (they run without asking you again); [] when unsure. Optional extras, only when they change: "emotion" (one of ${EMOTIONS.join(', ')}) with "emotionIntensity" 1-10, and "taskUpdate" (only if status.task exists).`
+"next": up to 2 follow-up actions you are SURE you will do right after this one (they run without asking you again); [] when unsure. Optional extras, only when they change: "queue" (up to 3 things you want to do later: [{"goal":"short text","priority":1-10}]; the engine keeps a backlog and does the most important first), "emotion" (one of ${EMOTIONS.join(', ')}) with "emotionIntensity" 1-10, and "taskUpdate" (only if status.task exists).`
 }
 
 function buildDecisionPrompt (agent, toolDocs) {
@@ -1340,7 +1340,7 @@ ${mindBlock(agent)}
 
 ## How you play
 - Each turn you get your current state as JSON and choose exactly ONE action. You'll see its result next turn.
-- Play like a thoughtful human survival player: punch trees → craft planks, sticks, a crafting table and tools → mine stone and ores → get food, armor and shelter. Move on to the next step as soon as you have enough of something (status.hints tells you); don't keep gathering what you already have plenty of. Pursue your goal and ambitions, but stay flexible.
+- Keep "thought" under 20 words. Play like a thoughtful human survival player: punch trees → craft planks, sticks, a crafting table and tools → mine stone and ores → get food, armor and shelter. Move on to the next step as soon as you have enough of something (status.hints tells you); don't keep gathering what you already have plenty of. Pursue your goal and ambitions, but stay flexible.
 - Use exact coordinates, block names and entity ids from the state. Never invent ids or coordinates you have not seen.
 - Read recentActions: if an action failed, understand the error code and try something different instead of repeating it.
 - If a player asked you for something and you agreed (see status.task / recentChat), prioritise it.
@@ -1368,6 +1368,7 @@ Reply with ONLY a JSON object, no other text, keys in this order (think first, t
 ${decisionExample(agent)}
 ${EXAMPLE_NOTE}
 "next": up to 2 follow-up actions you are SURE you will do right after this one (they run without asking you again); [] when unsure.
+"queue": optional, up to 3 things you want to do later: [{"goal":"short text","priority":1-10}] (the engine keeps a backlog and does the most important first).
 emotion is one of: ${EMOTIONS.join(', ')}. goalStatus: working|subgoal_done|goal_done|blocked|new_goal. taskUpdate.status: none|working|done|gave_up.`
 }
 
@@ -1743,6 +1744,8 @@ ${speaker}'s latest message${said.length > 1 ? 's' : ''}: ${said.map((m) => `"${
       { schema: ANALYSIS_SCHEMA, priority: PRIORITY.reply, label: 'reply' })
 
     emotions.fromLabel(out.emotion, out.emotionIntensity)
+    // A promise is something THEY say they will do ("I'll bring you iron"): an instruction to us ("you need to place a table") is not one.
+    if (out.promise?.made && !/\b(i|i'll|ill|i will|i'm|im|i am|i can|let me|we'll)\b/i.test(said.join(' '))) out.promise = { ...out.promise, made: false }
     social.onChatAnalysis(speaker, out)
     memory.lastTalkedWith.set(speaker, Date.now())
     const recalled = out.remindsOfTask ? tasks.recall(speaker) : null
@@ -2901,7 +2904,12 @@ ${said ? `${name} just said: ${said}
     const { bot, recipes, chat } = this.agent
     const nice = item.replace(/_/g, ' ')
     const people = Object.keys(bot.players).some((n) => n !== bot.username)
-    const ask = people && chat.allows('tool') && recipes.canAsk(item) && Math.random() < 0.5
+    // Asks more when it trusts someone who is around, and a lot when it is just starting out and has no idea what to do.
+    let trust = 0
+    for (const n of Object.keys(bot.players)) if (n !== bot.username) trust = Math.max(trust, this.agent.social.profile(n).trust || 0)
+    const justStarting = this.agent.memory.actions.length < 25 || recipes.level < 1
+    const chance = Math.min(0.95, 0.3 + (trust >= 70 ? 0.3 : trust >= 50 ? 0.15 : 0) + (justStarting ? 0.35 : 0))
+    const ask = people && chat.allows('tool') && recipes.canAsk(item) && Math.random() < chance
     const action = ask ? { name: 'askForHelp', args: { itemName: item } } : { name: 'experimentCrafting', args: { itemName: item, tries: 6 } }
     return { source: 'auto', thought: ask ? `I don't know how to make ${nice}; I'll ask.` : `I don't know how to make ${nice}; I'll try things out.`, emotion: 'curious', emotionIntensity: 4, action }
   }
@@ -3149,6 +3157,8 @@ ${said ? `${name} just said: ${said}
     const streak = memory.failureStreak()
     if (streak >= 2) nudges.push(`Your last ${streak} actions failed. Change your approach (different action, target or location).`)
     if (!memory.goal) nudges.push('You have no current goal: pick a sensible one based on your ambitions and situation.')
+    const carried = Object.entries(state.inventory.items).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([n, c]) => `${c} ${n}`)
+    nudges.push(`Before gathering or crafting anything, check what you already carry: ${carried.join(', ') || 'nothing'}.`)
     const lastThought = memory.actions.at(-1)?.thought
     if (lastThought) nudges.push(`Your previous thought: "${lastThought}" Stay on your plan and keep your goal text the same unless something changed.`)
 

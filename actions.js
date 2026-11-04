@@ -132,23 +132,29 @@ function unknownRecipe (name) {
   return new ActionError('UNKNOWN_RECIPE', `You don't know how to craft ${name.replace(/_/g, ' ')} yet. Use experimentCrafting (try items together in the crafting grid and see what comes out) or askForHelp (ask the players nearby).`)
 }
 
-/** "Not enough materials", naming what is actually missing for the closest recipe. */
+/** "Not enough materials", naming what is actually missing (any wood counts for planks) and what is carried. */
 function describeMissing (bot, itemDef, name) {
   const inv = inventorySummary(bot)
+  const heldPlanks = countMatching(inv, /_planks$/)
   let best = null
   for (const r of bot.recipesAll(itemDef.id, null, true)) {
     const missing = {}
     let total = 0
+    let planks = 0
     for (const d of r.delta) {
       if (d.count >= 0) continue
       const n = bot.registry.items[d.id]?.name
+      if (/_planks$/.test(n)) { planks += -d.count; continue }
       const lack = -d.count - (inv[n] || 0)
       if (lack > 0) { missing[n] = lack; total += lack }
     }
+    if (planks) { const lack = planks - heldPlanks; if (lack > 0) { missing['planks (any wood)'] = lack; total += lack } }
     if (!best || total < best.total) best = { missing, total, table: r.requiresTable }
   }
   if (!best) return `${name} cannot be crafted.`
-  return `Not enough materials for ${name}. Missing: ${JSON.stringify(best.missing)}${best.table ? ' (needs a crafting table)' : ''}.`
+  const carried = Object.entries(inv).slice(0, 12).map(([n, c]) => `${c} ${n}`).join(', ') || 'nothing'
+  const wood = 'Any kind of log works: mine whatever trees are closest.'
+  return `Not enough materials for ${name}. Missing: ${JSON.stringify(best.missing)}${best.table ? ' (needs a crafting table)' : ''}. ${/planks/.test(Object.keys(best.missing).join()) ? wood + ' ' : ''}You carry: ${carried}.`
 }
 
 /** Put a block from the inventory on the ground right next to us. */
@@ -178,12 +184,23 @@ function resolveBlockIds (bot, rawName) {
     // Treat ore variants as the same request (iron_ore also matches deepslate_iron_ore).
     const ids = [byName[name].id]
     if (byName[`deepslate_${name}`]) ids.push(byName[`deepslate_${name}`].id)
-    return ids
+    return withDropSources(bot, name, ids)
   }
   const matches = bot.registry.blocksArray.filter((b) =>
     b.name === name || b.name.endsWith(`_${name}`) || b.name.startsWith(`${name}_`) || b.name.includes(name)
   )
-  return matches.slice(0, 32).map((b) => b.id)
+  return withDropSources(bot, name, matches.slice(0, 32).map((b) => b.id))
+}
+
+/** Asking for "cobblestone" means the stone you mine to get it, not only placed cobblestone. */
+function withDropSources (bot, name, ids) {
+  const item = bot.registry.itemsByName[name]
+  if (!item) return ids
+  const out = [...ids]
+  for (const b of bot.registry.blocksArray) {
+    if (Array.isArray(b.drops) && b.drops.includes(item.id) && !/^infested_/.test(b.name) && !out.includes(b.id) && out.length < 48) out.push(b.id)
+  }
+  return out
 }
 
 /** Find an inventory item by (fuzzy) name. Prefers exact matches. */
@@ -682,12 +699,25 @@ const ACTIONS = {
       const { bot, signal } = ctx
       const blockType = argString(args, 'blockType')
       const count = Math.floor(argNumber(args, 'count', { min: 1, max: 16, def: 1 }))
-      const maxDistance = argNumber(args, 'maxDistance', { min: 4, max: 64, def: 32 })
+      const askedDistance = argNumber(args, 'maxDistance', { min: 4, max: 64, def: 32 })
+      let maxDistance = Math.max(askedDistance, 16) // a model asking for 5 blocks only makes it miss what is right behind a tree
+      let widened = askedDistance >= 64
 
       let ids = resolveBlockIds(bot, blockType)
       if (ids.length === 0) throw new ActionError('UNKNOWN_BLOCK', `"${blockType}" is not a known block type.`)
       // Wood is wood: when there is no oak around but other logs are, take those (any log works for planks, tools, tables).
-      const exact = args.exact === true || args.exact === 'true' || Boolean(ctx.tasks?.active?.()) // asked for a specific item: that item, not a stand-in
+      // Exact when someone asked for exactly this item (a gather task for it) or the call says so; crafting wood is any wood.
+      const task = ctx.tasks?.active?.()
+      const wanted = normalizeName(blockType)
+      const taskWantsThis = Boolean(task && task.kind === 'gather' && task.item && (task.item === wanted || task.item === wanted.replace(/_ore$/, '')))
+      const exact = args.exact === true || args.exact === 'true' || taskWantsThis
+      // Plenty already? (not for someone's task)
+      if (!task && args.count !== undefined) {
+        const first = bot.registry.blocks[ids[0]]
+        const dropName = Array.isArray(first?.drops) && first.drops[0] != null ? bot.registry.items[first.drops[0]]?.name : null
+        const have = dropName ? (inventorySummary(bot)[dropName] || 0) : 0
+        if (dropName && have >= Math.max(16, count * 3)) return `You already carry ${have} ${dropName}: no need to mine more.`
+      }
       const anyLog = !exact && /_log$/.test(normalizeName(blockType)) ? allLogIds(bot) : null
 
       const skip = new Set() // positions we failed to reach/mine this action
@@ -702,6 +732,11 @@ const ACTIONS = {
           .filter((pos) => !skip.has(pos.toString()))
         if (candidates.length === 0 && anyLog && ids !== anyLog) {
           ids = anyLog
+          candidates = bot.findBlocks({ matching: ids, maxDistance, count: 64 }).filter((pos) => !skip.has(pos.toString()))
+        }
+        if (candidates.length === 0 && !widened) { // nothing close: look much further before giving up
+          widened = true
+          maxDistance = 64
           candidates = bot.findBlocks({ matching: ids, maxDistance, count: 64 }).filter((pos) => !skip.has(pos.toString()))
         }
         if (candidates.length === 0) break
