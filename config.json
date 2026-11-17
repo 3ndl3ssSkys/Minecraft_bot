@@ -38,6 +38,7 @@
     "keepAlive": "24h",
     "timeoutMs": 90000,
     "maxRetries": 2,
+    "preemptForChat": true,
     "useJsonSchema": true
   },
   "servers": {},
@@ -156,6 +157,7 @@
     "admins": [],
     "commandPrefix": "!",
     "startingGoal": "",
+    "autopilot": true,
     "allowRespawnOnPurpose": true,
     "respawnCommand": "",
     "protectedPlayers": [],
@@ -172,12 +174,23 @@
     "maxTravelDistance": 128,
     "enabledActions": [],
     "disabledActions": [],
-    "pathfinding": { "canDig": true, "allowParkour": true, "allowSprinting": true, "allow1by1towers": true, "thinkTimeoutMs": 10000, "baseTimeoutMs": 15000, "msPerBlock": 1200, "maxTimeoutMs": 180000 }
+    "pathfinding": {
+      "canDig": true,
+      "allowParkour": true,
+      "allowSprinting": true,
+      "allow1by1towers": true,
+      "openDoors": true,
+      "digCost": 4,
+      "thinkTimeoutMs": 10000,
+      "baseTimeoutMs": 15000,
+      "msPerBlock": 1200,
+      "maxTimeoutMs": 180000
+    }
   },
   "judgment": {
     "ownerLoyalty": 0.3,
     "randomness": 0.12,
-    "maxQueuedTasks": 4,
+    "maxQueuedTasks": 12,
     "forgetting": true,
     "requestedFights": true
   },
@@ -234,6 +247,13 @@
     "allowSparring": true,
     "neverAttackOwners": true
   },
+  "memory": {
+    "enabled": true,
+    "max": 120,
+    "chatPerPlayer": 40,
+    "consolidate": true
+  },
+  "profile": "",
   "learning": {
     "enabled": true,
     "file": "data/brain.json",
@@ -338,6 +358,7 @@
   },
   "logging": {
     "level": "info",
-    "logThoughts": true
+    "logThoughts": true,
+    "trainingData": false
   }
 }

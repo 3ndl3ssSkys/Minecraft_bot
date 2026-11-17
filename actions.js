@@ -29,6 +29,8 @@ const knowledge = require('./knowledge')
 const building = require('./building')
 const { signText } = require('./containers')
 
+const safe = (fn) => { try { return fn() } catch { return undefined } }
+
 function round1 (n) {
   return Math.round(n * 10) / 10
 }
@@ -471,7 +473,7 @@ function insideOwnBuild (bot, pos) {
 }
 
 /** Actions that need block breaking or inventory windows — not available through ViaBedrock yet. */
-const BEDROCK_UNSUPPORTED = new Set(['mineBlock', 'craftItem', 'smeltItem', 'storeItems', 'takeItems', 'inspectContainer', 'planBuilding', 'build', 'cancelBuilding'])
+const BEDROCK_UNSUPPORTED = new Set(['obtainItem', 'mineBlock', 'craftItem', 'smeltItem', 'storeItems', 'takeItems', 'inspectContainer', 'planBuilding', 'build', 'cancelBuilding'])
 
 // Wall-mounted things: place them against the side of a block, not on the floor.
 const WALL_MOUNTED = /^(torch|soul_torch|ladder|\w+_wall_sign|lever|\w+_button|tripwire_hook)$/
@@ -984,13 +986,26 @@ const ACTIONS = {
   },
 
   collectDrops: {
-    description: 'Pick up dropped items lying on the ground nearby.',
-    params: { radius: 'number, optional (default 12)' },
+    description: 'Pick up items lying on the ground nearby that are worth having (nearbyEntities shows "pickUp: take/leave" for each). ' +
+      "Leaves other players' things, junk and anything next to a monster or in lava. itemName: only that item. everything: true also takes junk.",
+    params: { radius: 'number, optional (default 12)', itemName: 'string, optional', everything: 'optional boolean' },
     async run (ctx, args) {
       const radius = argNumber(args, 'radius', { min: 2, max: 32, def: 12 })
-      const n = await collectNearbyDrops(ctx, ctx.bot.entity.position, radius, 30000)
-      if (n === 0) throw new ActionError('NOT_FOUND', `No dropped items within ${radius} blocks.`)
-      return `Picked up ${n} item stack(s).`
+      const only = args.itemName ? normalizeName(argString(args, 'itemName')) : null
+      const verdict = (e) => ctx.dropVerdict?.(e)
+      const filter = (e) => {
+        const it = safe(() => e.getDroppedItem())
+        if (only) return it?.name === only || it?.name?.includes(only)
+        const v = verdict(e)
+        if (!v) return true
+        if (v.take) return true
+        return Boolean(args.everything) && /junk|plenty|too far/.test(v.why) // never other players' things
+      }
+      const left = Object.values(ctx.bot.entities).filter((e) => e.name === 'item' && e.position.distanceTo(ctx.bot.entity.position) <= radius && !filter(e))
+      const n = await collectNearbyDrops(ctx, ctx.bot.entity.position, radius, 30000, filter)
+      const leftNote = left.length ? ` Left ${left.length} (${[...new Set(left.map((e) => verdict(e)?.why).filter(Boolean))].slice(0, 2).join('; ')}).` : ''
+      if (n === 0) throw new ActionError('NOT_FOUND', `Nothing worth picking up within ${radius} blocks.${leftNote}`)
+      return `Picked up ${n} item stack(s).${leftNote}`
     }
   },
 
@@ -1185,7 +1200,8 @@ const ACTIONS = {
       const itemName = argString(args, 'itemName')
       const count = Math.floor(argNumber(args, 'count', { min: 1, max: 64, def: 8 }))
       const waitSeconds = argNumber(args, 'waitSeconds', { min: 0, max: 120, def: 30 })
-      const block = findNearestBlock(bot, ['furnace', 'smoker', 'blast_furnace'])
+      let block = findNearestBlock(bot, ['furnace', 'smoker', 'blast_furnace'])
+      if (!block && findInventoryItem(bot, 'furnace')) block = bot.blockAt(await placeNearby(ctx, 'furnace')) // carried one: set it down
       if (!block) throw new ActionError('NO_FURNACE', 'No furnace within 32 blocks. Craft one from 8 cobblestone and place it.')
       await goNextTo(ctx, block, block.name)
 
@@ -1609,6 +1625,25 @@ const ACTIONS = {
     }
   },
 
+  obtainItem: {
+    description: 'Get any item by doing the whole chain yourself, step by step, without stopping to think: gathers wood, makes the tools it needs, ' +
+      'mines with the right pickaxe, crafts, smelts (furnace and fuel included) and hunts animals. The best way to get tools, armor, food or materials. ' +
+      'itemName "food" = whatever cooked meat the animals around give.',
+    params: { itemName: 'string, e.g. "iron_pickaxe", "torch", "cooked_beef", "food"', count: 'number, optional (default 1)' },
+    async run (ctx, args) {
+      const { bot } = ctx
+      const name = normalizeName(argString(args, 'itemName'))
+      const count = Math.floor(argNumber(args, 'count', { min: 1, max: 64, def: 1 }))
+      if (name !== 'food' && !bot.registry.itemsByName[name]) {
+        const close = Object.keys(bot.registry.itemsByName).filter((n) => n.includes(name) || name.includes(n)).slice(0, 5)
+        throw new ActionError('UNKNOWN_ITEM', `There is no item called "${name}".${close.length ? ` Did you mean: ${close.join(', ')}?` : ''}`)
+      }
+      if (!ctx.startObtain) throw new ActionError('UNAVAILABLE', 'Not available right now.')
+      const target = ctx.startObtain(name, count)
+      return `Working on getting ${count} ${target}: I'll do each step myself.`
+    }
+  },
+
   respawn: {
     description: 'Die on purpose so you respawn at your bed or the world spawn. Only when it really makes sense: hopelessly stuck or trapped, ' +
       'lost far from home with nothing valuable on you, or someone you trust asks. You drop everything you carry where you die.',
@@ -1717,7 +1752,7 @@ async function digWithAbort (ctx, block) {
 }
 
 /** Walk over item entities near `center`. Returns how many we reached. */
-async function collectNearbyDrops (ctx, center, radius, budgetMs) {
+async function collectNearbyDrops (ctx, center, radius, budgetMs, filter = () => true) {
   const { bot, signal } = ctx
   const end = Date.now() + budgetMs
   const visited = new Set()
@@ -1726,7 +1761,7 @@ async function collectNearbyDrops (ctx, center, radius, budgetMs) {
   while (Date.now() < end) {
     throwIfAborted(signal)
     const drop = Object.values(bot.entities)
-      .filter((e) => e.name === 'item' && !visited.has(e.id) && e.position.distanceTo(center) <= radius)
+      .filter((e) => e.name === 'item' && !visited.has(e.id) && e.position.distanceTo(center) <= radius && filter(e))
       .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0]
     if (!drop) break
     visited.add(drop.id)
@@ -1787,6 +1822,7 @@ async function performGesture (bot, gesture, signal) {
 
 /** One-line hints for the compact prompt (small GPUs read every token of the prompt, every decision). */
 const SHORT = {
+  obtainItem: 'GET ANY ITEM: does the whole chain itself (wood, tools, mining, crafting, smelting, hunting) - the best way to get things',
   moveToBlock: 'walk/climb/swim to a coordinate from the state',
   moveToPlayer: 'walk to a player',
   followPlayer: 'follow a player for a while',
@@ -1798,7 +1834,7 @@ const SHORT = {
   attackTarget: 'fight an entity with your whole kit and real tactics',
   retreat: 'run away from an entity',
   eatFood: 'eat (best food if none given)',
-  collectDrops: 'pick up items on the ground',
+  collectDrops: 'pick up the items on the ground worth having (see pickUp in nearbyEntities)',
   craftItem: 'craft (uses a nearby crafting table)',
   giveItem: 'walk over and toss a player items',
   sleepInBed: 'sleep in a nearby bed (night only)',
@@ -1855,8 +1891,8 @@ class ActionExecutor {
    * @param {object} [deps.memory]   Memory (recent chat, e.g. duel invitations)
    * @param {object} [deps.tasks]    TaskManager (fights the bot agreed to)
    */
-  constructor ({ bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes, parkour, recipes }) {
-    Object.assign(this, { bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes, parkour, recipes })
+  constructor ({ bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes, parkour, recipes, startObtain, dropVerdict }) {
+    Object.assign(this, { bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes, parkour, recipes, startObtain, dropVerdict })
     this.current = null // { name, args, startedAt, controller }
     this.pauseUntil = 0
     this.pauseListeners = new Set()
@@ -1936,6 +1972,8 @@ class ActionExecutor {
       containers: this.containers,
       knowledgeOpts: this.knowledgeOpts,
       reflexes: this.reflexes,
+      startObtain: this.startObtain,
+      dropVerdict: this.dropVerdict,
       parkour: this.parkour,
       recipes: this.recipes,
       isPaused: () => this.paused,

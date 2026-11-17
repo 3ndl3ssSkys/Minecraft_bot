@@ -91,7 +91,7 @@ const SMELTING = {
   iron_ingot: ['raw_iron', 'iron_ore', 'deepslate_iron_ore'], gold_ingot: ['raw_gold', 'gold_ore', 'deepslate_gold_ore', 'nether_gold_ore'],
   copper_ingot: ['raw_copper', 'copper_ore'], glass: ['sand', 'red_sand'], stone: ['cobblestone'], smooth_stone: ['stone'],
   charcoal: ['any log'], brick: ['clay_ball'], netherite_scrap: ['ancient_debris'], cooked_beef: ['beef'], cooked_porkchop: ['porkchop'],
-  cooked_chicken: ['chicken'], cooked_mutton: ['mutton'], cooked_cod: ['cod'], cooked_salmon: ['salmon'], baked_potato: ['potato'],
+  cooked_chicken: ['chicken'], cooked_mutton: ['mutton'], cooked_rabbit: ['rabbit'], cooked_cod: ['cod'], cooked_salmon: ['salmon'], baked_potato: ['potato'],
   dried_kelp: ['kelp'], terracotta: ['clay'], green_dye: ['cactus'], deepslate: ['cobbled_deepslate'], sponge: ['wet_sponge'], lime_dye: ['sea_pickle']
 }
 

@@ -35,7 +35,8 @@ const { ParkourSkill } = require('./parkour')
 const { LongTermMemory } = require('./memory')
 const { Autopilot } = require('./basics')
 const { RecipeBook } = require('./recipes')
-const { nextAcquireStep } = require('./acquire')
+const { nextAcquireStep, foodTarget } = require('./acquire')
+const { judgeDrop } = require('./pickup')
 const { TaskManager, KINDS: TASK_KINDS, EFFORTS, RISKS } = require('./tasks')
 const combat = require('./combat')
 const knowledge = require('./knowledge')
@@ -395,7 +396,13 @@ const DEFAULT_CONFIG = {
     maxErrorBackoffMs: 60000,
     historySize: 8
   },
-  logging: { level: 'info', logThoughts: true }
+  logging: {
+    level: 'info',
+    logThoughts: true,
+    // Record every model decision (prompt, answer, and whether the action worked) to <bot save folder>/training/decisions.jsonl.
+    // That's the raw material for fine-tuning a small model on what worked (see TRAINING.md). ~5-10 KB per decision.
+    trainingData: false
+  }
 }
 
 const DEFAULT_PERSONALITY = {
@@ -662,6 +669,14 @@ class Memory {
   }
 }
 
+/** Smallest signed difference between two angles (radians). */
+function angleDiff (a, b) {
+  let d = (a - b) % (2 * Math.PI)
+  if (d > Math.PI) d -= 2 * Math.PI
+  if (d < -Math.PI) d += 2 * Math.PI
+  return d
+}
+
 function clampInt (v, min, max, def) {
   const n = Math.round(Number(v))
   return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : def
@@ -732,7 +747,13 @@ class Perception {
         if (tag?.tag) out.nameTag = tag.tag
         if (tag?.tamed) out.tamed = true
         if (tag?.owner) out.owner = tag.owner
-        if (kind === 'item') out.item = safe(() => e.getDroppedItem()?.name)
+        if (kind === 'item') {
+          const it = safe(() => e.getDroppedItem())
+          out.item = it?.name
+          if (it?.count > 1) out.count = it.count
+          const v = this.agent.dropVerdict(e)
+          if (v) out.pickUp = `${v.take ? 'take' : 'leave'}: ${v.why}`
+        }
         if (kind === 'player') {
           if (how !== 'name tag through wall' && how !== 'memory') {
             out.holding = e.heldItem?.name || null
@@ -1281,7 +1302,9 @@ const DECISION_EXAMPLES = [
   { thought: 'I have a wooden pickaxe and stone is right here, so I stock up on cobblestone.', goal: 'get stone tools', subgoal: 'mine 8 cobblestone', goalStatus: 'working', action: { name: 'mineBlock', args: { blockType: 'cobblestone', count: 8 } }, next: [{ name: 'craftItem', args: { itemName: 'stone_pickaxe', count: 1 } }], taskUpdate: { status: 'none', note: '' }, emotion: 'focused', emotionIntensity: 5 },
   { thought: 'Plenty of planks already, so I make a crafting table before anything else.', goal: 'set up a workbench', subgoal: 'craft a crafting table', goalStatus: 'working', action: { name: 'craftItem', args: { itemName: 'crafting_table', count: 1 } }, next: [{ name: 'craftItem', args: { itemName: 'wooden_pickaxe', count: 1 } }], taskUpdate: { status: 'none', note: '' }, emotion: 'calm', emotionIntensity: 4 },
   { thought: 'Nothing useful around here, so I head somewhere new to find ore.', goal: 'find iron', subgoal: 'explore east', goalStatus: 'working', action: { name: 'explore', args: { direction: 'east', distance: 32 } }, next: [], taskUpdate: { status: 'none', note: '' }, emotion: 'curious', emotionIntensity: 5 },
-  { thought: 'Iron ore is visible a few blocks away and I have a stone pickaxe.', goal: 'get iron tools', subgoal: 'mine iron ore', goalStatus: 'working', action: { name: 'mineBlock', args: { blockType: 'iron_ore', count: 3 } }, next: [], taskUpdate: { status: 'none', note: '' }, emotion: 'excited', emotionIntensity: 6 }
+  { thought: 'Iron ore is visible a few blocks away and I have a stone pickaxe.', goal: 'get iron tools', subgoal: 'mine iron ore', goalStatus: 'working', action: { name: 'mineBlock', args: { blockType: 'iron_ore', count: 3 } }, next: [], taskUpdate: { status: 'none', note: '' }, emotion: 'excited', emotionIntensity: 6 },
+  { thought: 'I want an iron pickaxe; obtainItem handles the ore, the furnace and the crafting for me.', goal: 'get iron tools', subgoal: 'get an iron pickaxe', goalStatus: 'working', action: { name: 'obtainItem', args: { itemName: 'iron_pickaxe', count: 1 } }, next: [], taskUpdate: { status: 'none', note: '' }, emotion: 'determined', emotionIntensity: 6 },
+  { thought: "I'm getting hungry and there are cows nearby, so I get some proper food.", goal: 'stay fed', subgoal: 'cook some meat', goalStatus: 'working', action: { name: 'obtainItem', args: { itemName: 'food', count: 4 } }, next: [], taskUpdate: { status: 'none', note: '' }, emotion: 'calm', emotionIntensity: 4 }
 ]
 const EXAMPLE_NOTE = 'That is only a format example. Choose your action from your own state, inventory and goals, never from the example.'
 
@@ -1317,6 +1340,8 @@ ${mindBlock(agent)}
 - Your senses are realistic: you only know what's in nearbyEntities and status.senses. Odd sounds with nobody around → be careful and check it out.
 - Be a good guest: don't break other players' builds, never take from someone's private chest (inspectContainer tells you whose it is), follow rules on signs and in chat.
 - People: nearbyEntities shows your trust in each player and how they seem. Generous with friends, guarded with strangers, keep away from people who hurt you. Fight players only if they attack you or ask for a duel (sparring: true).
+- Items on the ground: nearbyEntities shows "pickUp: take/leave" with a reason (whose it is, junk, danger). collectDrops follows that; don't grab other players' things.
+- To get an item (tools, armor, food, torches, materials), use obtainItem: it does the whole chain itself (wood, tools, mining, crafting, smelting, hunting) much faster than you choosing each step. Use mineBlock/craftItem only for a single specific step.
 - Your feelings (status.feelings) colour how you play. Building: planBuilding with your own idea, then build. Unsure how something works: knowledge.
 - ${chatPolicy(config.chat.mode)}${config.server.platform === 'bedrock' ? "\n- You're on a Bedrock bridge: no breaking blocks, chests or crafting." : ''}
 - "thought": one short sentence.
@@ -1346,6 +1371,8 @@ ${mindBlock(agent)}
 - If a player asked you for something and you agreed (see status.task / recentChat), prioritise it.
 - Goals (status.goals): an overall goal → long-term goals → your current goal → its steps. Choose actions that move the current step forward, and keep the bigger goals in mind. Each turn report "goal" (your current goal), "subgoal" (the step you're on) and "goalStatus": working, subgoal_done (you just finished that step), goal_done (the whole current goal is finished), blocked (you can't make progress — say why in thought) or new_goal (you've changed your mind and are dropping the current goal for this one; not for goals set for you). Urgent things (danger, hunger, nightfall, a player's task) come first: just name them as your goal with "working" — that's a detour, and you get back to the current goal afterwards (status.goals.detour). The planner keeps the bigger goals up to date; you can still change your own whenever you want.
 - Survive: eat when hungry, avoid lava, deep falls and status.dangerZonesNearby, fight or flee from hostile mobs, be careful at night.
+- Items on the ground: nearbyEntities shows "pickUp: take/leave" with a reason (whose it is, junk, danger). collectDrops follows that; don't grab other players' things.
+- To get an item (tools, armor, food, torches, materials), use obtainItem: it does the whole chain itself (wood, tools, mining, crafting, smelting, hunting) much faster than you choosing each step. Use mineBlock/craftItem only for a single specific step.
 - Use the game's systems: smelt ores and cook food (smeltItem), store loot in chests (status.knownContainers remembers what's where), sleep in a bed at night, open doors, fish, and useItem for potions, pearls, buckets, bone meal and the like. If you're unsure how something works or how to get an item, use knowledge — but you only know what a player of your skill knows; otherwise experiment or ask.
 - Your senses are realistic: nearbyEntities is what you can see or hear ("perceived" says how; "last seen" means it went out of sight). status.senses lists sounds and particles; "source unseen" means you can't see what made it. If something sounds wrong (footsteps, a chest opening, mining, with nobody visible), be cautious and check it out — less so if you know other players are around.
 - Name tags: you know who a player is only from their name tag ("unknown player" = you can't read it — they're invisible, too far, or their tag is hidden). Tags show through walls unless the player sneaks, so "name tag through wall" means you know they're there. A nameTag field shows ranks or prefixes like [Admin] and the names of named mobs and pets; "tamed" means it has a collar (someone's pet).
@@ -2316,7 +2343,8 @@ class EventReactor {
     this.healthLog = [] // { at, h } — to know health *before* a hit
     this.seenNearbyPlayers = new Map() // username -> last time seen nearby
     this.seenHostiles = new Set()
-    this.drops = new Map() // item entity id -> { player, at } (who tossed it)
+    this.drops = new Map() // item entity id -> { player, gift, deathOf, at } (where it came from)
+    this.deathSpots = [] // { player, pos, at }: players' items spill here when they die
     this.pendingDeathCause = null
     this.pendingKiller = null
   }
@@ -2368,11 +2396,14 @@ class EventReactor {
         this.pendingKiller = killer
       } else if (victim) {
         if (killer) social.onPlayerKilled(victim, killer)
+        const pos = bot.players[victim]?.entity?.position?.clone()
+        if (pos) this.deathSpots = [...this.deathSpots.filter((d) => Date.now() - d.at < 300000), { player: victim, pos, at: Date.now() }]
         this.trigger('playerDied', { player: victim, cause: text })
       }
     })
 
     bot.on('death', () => {
+      if (bot.entity) agent.ownDeath = { pos: bot.entity.position.clone(), at: Date.now() } // our things lie here for 5 minutes
       const cause = this.pendingDeathCause || 'unknown causes'
       const killer = this.pendingKiller
       learning.stats.deaths++
@@ -2414,14 +2445,25 @@ class EventReactor {
     bot.on('entitySwingArm', (entity) => social.onSwing(entity))
     bot.on('entityUncrouch', (entity) => social.onCrouch(entity))
 
-    // Remember who tossed each dropped item, so picking it up counts as a gift from them.
+    // Remember where each dropped item came from: tossed to us (a gift), dropped by a player for themselves,
+    // or spilled where someone died. That decides whether picking it up is fine (pickup.js).
     bot.on('entitySpawn', (entity) => {
       if (entity.name !== 'item') return
+      const now = Date.now()
+      const death = this.deathSpots.find((d) => now - d.at < 3000 && d.pos && d.pos.distanceTo(entity.position) < 4)
       const thrower = Object.values(bot.players)
         .map((p) => p.entity)
         .find((e) => e && e !== bot.entity && e.position.offset(0, 1.3, 0).distanceTo(entity.position) < 1.6)
-      if (thrower) this.drops.set(entity.id, { player: thrower.username, at: Date.now() })
-      if (this.drops.size > 200) for (const [id, d] of this.drops) if (Date.now() - d.at > 60000) this.drops.delete(id)
+      if (death) this.drops.set(entity.id, { deathOf: death.player, at: now })
+      else if (thrower) {
+        // Tossed our way (they're facing us and we're close) = a gift; otherwise it's their own drop.
+        const me = bot.entity?.position
+        const toMe = me && me.minus(thrower.position)
+        const facing = toMe && Math.abs(angleDiff(Math.atan2(-toMe.x, -toMe.z), thrower.yaw)) < 0.6
+        const gift = Boolean(me && facing && toMe.norm() < 8)
+        this.drops.set(entity.id, { player: thrower.username, gift, at: now })
+      }
+      if (this.drops.size > 200) for (const [id, d] of this.drops) if (now - d.at > 300000) this.drops.delete(id)
     })
     bot.on('playerCollect', (collector, collected) => {
       if (collector !== bot.entity) return
@@ -2429,7 +2471,7 @@ class EventReactor {
       if (!item) return
       const from = this.drops.get(collected.id)
       this.drops.delete(collected.id)
-      if (from && Date.now() - from.at < 60000) social.onGift(from.player, item.name, item.count)
+      if (from?.gift && Date.now() - from.at < 60000) social.onGift(from.player, item.name, item.count)
       this.trigger('itemPickup', { item: item.name })
     })
 
@@ -2840,7 +2882,7 @@ ${said ? `${name} just said: ${said}
         if (this.paused || !agent.bot?.entity || agent.dead || agent.bot.isSleeping) { await this.idle(1000); continue }
         if (agent.reflexes?.busy) { await this.idle(100); continue } // the body is busy saving itself
 
-        let decision = this.forced.shift() || this.reflex() || agent.tasks.nextForcedAction() || this.nextPlanned() || this.autopilotStep()
+        let decision = this.forced.shift() || this.reflex() || agent.tasks.nextForcedAction() || this.obtainStep() || this.nextPlanned() || this.autopilotStep()
         if (!decision) {
           // Throttle: never ask the LLM more often than minLlmIntervalMs.
           const wait = this.lastLlmAt + config.loop.minLlmIntervalMs - Date.now()
@@ -2865,6 +2907,8 @@ ${said ? `${name} just said: ${said}
         agent.tasks.onActionResult(name, args, result)
         this.trackPlan(decision, result)
         this.autopilot.onResult(decision, result)
+        this.onObtainResult(decision, result)
+        if (config.logging.trainingData && decision.source === 'llm') this.recordTraining(decision, result)
 
         this.backoff = config.loop.errorBackoffMs
         await this.idle(config.loop.postActionDelayMs)
@@ -2882,21 +2926,114 @@ ${said ? `${name} just said: ${said}
    * who keeps playing while deciding what to do next. The busy work is
    * interrupted the moment the decision arrives.
    */
+  /** One line of training data: what the model saw, what it answered, and how that went (TRAINING.md). */
+  recordTraining (decision, result) {
+    const x = this.lastExchange
+    if (!x) return
+    this.lastExchange = null
+    const file = path.join(path.dirname(path.resolve(__dirname, this.agent.config.learning.file)), 'training', 'decisions.jsonl')
+    const line = { at: new Date(x.at).toISOString(), model: this.agent.config.llm.model, messages: x.messages, answer: x.out, ok: result.ok, code: result.code || null, result: String(result.message || '').slice(0, 200) }
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true })
+      fs.appendFileSync(file, JSON.stringify(line) + '\n')
+    } catch (err) { this.agent.log.debug(`training data not written: ${err.message}`) }
+  }
+
   /** The early-game ladder by rules (see basics.js), only when nothing else needs the bot. */
   autopilotStep () {
     const agent = this.agent
     const { bot, config, memory, executor } = agent
-    if (config.behavior.autopilot === false || !agent.perception?.latest) return null
-    if (agent.dangerLevel() !== 'none' || (bot.food ?? 20) <= 6 || bot.health <= 8 || agent.builder?.current || agent.tasks.active()) return null
+    if (config.behavior.autopilot === false || !agent.perception?.latest || this.obtain) return null
+    if (agent.dangerLevel() !== 'none' || agent.builder?.current || agent.tasks.active()) return null
+    // No food at all and getting hungry: animals nearby → hunt and cook (this matters most when already hungry).
+    const s0 = agent.perception.latest
+    const foodCount = Object.entries(s0.inventory.items).filter(([n]) => bot.registry.foodsByName[n] && !/rotten_flesh|spider_eye|poisonous_potato|pufferfish/.test(n)).reduce((a, [, c]) => a + c, 0)
+    const animals = this.mobsAround(s0).filter((m) => /^(cow|pig|sheep|chicken|rabbit|mooshroom)$/.test(m.name))
+    if (foodCount === 0 && (bot.food ?? 20) <= 14 && animals.length && Date.now() - (this.lastFoodRun || 0) > 120000) {
+      this.lastFoodRun = Date.now()
+      this.startObtain('food', 3)
+      return this.obtainStep()
+    }
+    if ((bot.food ?? 20) <= 6 || bot.health <= 8) return null
     if (memory.chat.length && Date.now() - memory.chat.at(-1).at < 20000 && !memory.chat.at(-1).self) return null // someone just spoke: let the reply and the model deal with it
     const s = agent.perception.latest
     const step = this.autopilot.step({ inventory: s.inventory.items, nearbyBlocks: s.nearbyBlocks })
+    // After the stone pickaxe: a sword before anything else (then the model is in charge, with obtainItem).
+    if (!step && !Object.keys(s.inventory.items).some((n) => /_sword$/.test(n)) && !this.swordTried) {
+      this.swordTried = true
+      this.startObtain('stone_sword', 1)
+      return this.obtainStep()
+    }
     if (step && step.name === 'craftItem') {
       const unknown = agent.recipes.firstUnknown(step.args.itemName, s.inventory.items, bot.registry, (id) => bot.recipesAll(id, null, true))
       if (unknown) return this.helpStep(unknown)
     }
     if (!step || !executor.availableTools().includes(step.name)) return null
     return { source: 'auto', thought: step.why, emotion: 'focused', emotionIntensity: 4, action: { name: step.name, args: step.args } }
+  }
+
+  /**
+   * obtainItem: the model said "get X" once; now every step (wood, tools, mining, crafting, smelting, hunting)
+   * is planned by acquire.js and done at full speed, without asking the model in between.
+   * @returns {string} the item it's going for ("food" becomes a cooked meat the animals around give)
+   */
+  startObtain (item, count = 1) {
+    const s = this.agent.perception?.latest
+    const target = item === 'food' ? foodTarget(this.mobsAround(s)) : item
+    this.obtain = { item: target, count, fails: 0, explores: 0, steps: 0, at: Date.now(), then: null, smelt: null }
+    this.agent.log.info(`Getting ${count} ${target}: planning every step myself.`)
+    this.wake()
+    return target
+  }
+
+  mobsAround (s) {
+    return (s?.nearbyEntities || []).filter((e) => e.id !== undefined && e.kind !== 'player').map((e) => ({ id: e.id, name: e.name, distance: e.distance }))
+  }
+
+  obtainStep () {
+    const o = this.obtain
+    const agent = this.agent
+    const s = agent.perception?.latest
+    if (!o || !s || agent.dangerLevel() === 'high' || agent.tasks.active()) return null // danger and promises come first; it carries on afterwards
+    const { bot, memory, log, executor, recipes } = agent
+    const inv = s.inventory.items
+    const have = inv[o.item] || 0
+    const stop = (text) => { memory.addEvent('obtain', text); log.info(text); this.obtain = null; return null }
+    if (have >= o.count) return stop(`You got what you set out to get: ${have} ${o.item}.`)
+    if (o.steps >= 80 || Date.now() - o.at > 25 * 60000) return stop(`You gave up on getting ${o.item} for now: it was taking too long.`)
+    const decide = (step) => {
+      if (!executor.availableTools().includes(step.name)) return stop(`You can't get ${o.item} here (${step.name} isn't possible).`)
+      o.steps++
+      o.pending = step
+      return { source: 'obtain', thought: step.why, emotion: 'focused', emotionIntensity: 4, action: { name: step.name, args: step.args } }
+    }
+    if (o.then) { const name = o.then; o.then = null; return decide({ name, args: { radius: 10 }, why: 'picking up what dropped' }) }
+    if (o.fails >= 2) {
+      o.fails = 0
+      if (++o.explores > 3) return stop(`You couldn't get ${o.item}: ${o.lastError || 'nothing worked'}.`)
+      return decide({ name: 'explore', args: { distance: 40 }, why: `looking somewhere else (for ${o.item})` })
+    }
+    // Items still cooking in the furnace: go back and collect them instead of fetching more input.
+    if (o.smelt && Date.now() - o.smelt.at < 180000 && (inv[o.smelt.input] || 0) < o.count - have) {
+      return decide({ name: 'smeltItem', args: { itemName: o.smelt.input, count: o.count - have, waitSeconds: 30 }, why: `collecting ${o.item} from the furnace` })
+    }
+    const step = nextAcquireStep({ item: o.item, count: o.count, inv, near: s.nearbyBlocks, registry: bot.registry, knows: (n) => recipes.knows(n), mobs: this.mobsAround(s) })
+    if (!step) return stop(`You don't know how to get ${o.item} by yourself.`)
+    if (step.unknown) return { ...this.helpStep(step.unknown), source: 'obtain' }
+    return decide(step)
+  }
+
+  onObtainResult (decision, result) {
+    const o = this.obtain
+    if (!o || decision.source !== 'obtain') return
+    if (result.ok) {
+      o.fails = 0
+      if (o.pending?.then) o.then = o.pending.then
+      if (decision.action.name === 'smeltItem') o.smelt = { input: decision.action.args.itemName, at: Date.now() }
+    } else if (result.code !== 'ABORTED') {
+      o.fails++
+      o.lastError = result.message
+    }
   }
 
   /** Doesn't know a recipe: ask the players around, or try things in the crafting grid itself. */
@@ -2940,7 +3077,6 @@ ${said ? `${name} just said: ${said}
       this.plan.hp = bot.health
     } else if (!result.ok || decision.source !== 'plan') {
       this.plan = null
-    this.autopilot = new Autopilot()
     }
   }
 
@@ -2988,7 +3124,7 @@ ${said ? `${name} just said: ${said}
     const add = (w, name, args, label) => options.push({ w, name, args, label })
     const me = bot.entity.position
 
-    if (Object.values(bot.entities).some((e) => e.name === 'item' && e.position.distanceTo(me) < 6)) add(3, 'collectDrops', { radius: 6 }, 'picked up items lying around')
+    if (Object.values(bot.entities).some((e) => e.name === 'item' && e.position.distanceTo(me) < 8 && agent.dropVerdict(e)?.take)) add(3, 'collectDrops', { radius: 8 }, 'picked up items worth having')
     const ids = ['chest', 'trapped_chest', 'barrel'].map((n) => bot.registry.blocksByName[n]?.id).filter((x) => x !== undefined)
     const chest = bot.findBlocks({ matching: ids, maxDistance: 12, count: 6 }).find((p) => !agent.containers.seenRecently(p))
     if (chest) add(2.5, 'inspectContainer', { x: chest.x, y: chest.y, z: chest.z }, 'checked a chest')
@@ -3175,6 +3311,7 @@ ${said ? `${name} just said: ${said}
       }
     ]
     const out = await agent.llm.chat(messages, { schema: config.llm.decisionSchema ? decisionSchema(tools) : undefined, priority: PRIORITY.decision, label: 'decision', temperature: config.mind.decisionTemperature ?? undefined })
+    this.lastExchange = { messages, out, at: Date.now() }
 
     const decision = {
       source: 'llm',
@@ -3308,6 +3445,39 @@ class Agent {
 
   dangerLevel () { return this.dangerInfo().level }
 
+  /** Take or leave a dropped item entity? (see pickup.js) */
+  dropVerdict (entity) {
+    const bot = this.bot
+    if (!bot?.entity || entity?.name !== 'item') return null
+    const it = safe(() => entity.getDroppedItem())
+    if (!it) return null
+    const origin = this.reactor?.drops.get(entity.id)
+    const inv = inventorySummary(bot)
+    const fresh = origin && Date.now() - origin.at < 300000
+    const owner = fresh ? origin.deathOf || origin.player : null
+    const hostile = Object.values(bot.entities).find((e) => e.kind === 'Hostile mobs' && e.position.distanceTo(entity.position) < 4)
+    const at = bot.blockAt(entity.position)
+    const pretty = (n) => String(n || '').replace(/_/g, ' ')
+    const task = this.tasks.active()
+    const wantedBy = this.brain?.obtain?.item === it.name ? `getting ${pretty(it.name)}`
+      : task?.item && (task.item === it.name || it.name.includes(task.item)) ? `${task.from}'s request`
+        : this.memory.goal && this.memory.goal.toLowerCase().includes(pretty(it.name)) ? 'your goal' : null
+    return judgeDrop({
+      item: it.name,
+      count: it.count,
+      distance: entity.position.distanceTo(bot.entity.position),
+      from: fresh && origin.player ? { player: origin.player, gift: origin.gift } : null,
+      deathOf: fresh ? origin.deathOf : null,
+      ownDeath: Boolean(this.ownDeath && Date.now() - this.ownDeath.at < 300000 && this.ownDeath.pos.distanceTo(entity.position) < 8),
+      present: owner ? Boolean(bot.players[owner]?.entity) : undefined,
+      freeSlots: bot.inventory.emptySlotCount(),
+      carried: inv[it.name] || 0,
+      wanted: wantedBy,
+      hostileNear: hostile?.name,
+      hazard: at && /lava|fire/.test(at.name) ? at.name.replace(/_/g, ' ') : null
+    })
+  }
+
   /** Change a runtime setting (from !set, !emotion...). Persists across restarts. */
   applySetting (key, raw, by) {
     if (!SETTABLE[key]) return { ok: false, error: `"${key}" can't be changed in game.` }
@@ -3429,6 +3599,8 @@ class Agent {
       containers: this.containers,
       knowledgeOpts: () => this.knowledgeOpts(),
       reflexes: this.reflexes,
+      startObtain: (item, count) => this.brain.startObtain(item, count),
+      dropVerdict: (entity) => this.dropVerdict(entity),
       notify: (type, data) => this.onActionEvent(type, data)
     })
     this.reactor = new EventReactor(this)
