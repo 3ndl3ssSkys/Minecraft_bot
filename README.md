@@ -652,6 +652,12 @@ The bot knows Minecraft the way an experienced player does:
 | `attackTarget` | `entityId, maxSeconds?, style?, sparring?` — style: aggressive, balanced, cautious, hitAndRun, comboAxe, ranged, mace |
 | `retreat` | `entityId, distance?` |
 | `eatFood` | `foodName?` |
+| `shelter` | — get through the night: sleeps in a bed (places a carried one), otherwise digs in two blocks, covers its head, waits for morning and climbs out. Done by itself at nightfall unless it's a skilled, armed player (`behavior.nightShelter`). |
+| `pillarUp` | `height?` — jump-place blocks under itself. Done by itself when surrounded by zombies and hurt. |
+| `climbOut` | `maxHeight?` — out of a pit or hole: pillars up with blocks, or digs a staircase without. Done by itself after two failed moves while walled in. |
+| `bridge` | `direction, length?` — crosses a gap crouched, placing blocks in front. |
+| `stripMine` | `ore?, minutes?` — goes to the best depth for the ore (1.18+ or older worlds), tunnels 2 high, avoids lava and water, mines ores it uncovers, places torches; continues in the same direction next time. |
+| `placeTorch` | — lights up where it is. Done by itself in dark tunnels when it carries torches. |
 | `dropItems` | `itemNames, keep?` — throw items on the ground (`"junk"` = rotten flesh, seeds, dirt, gravel...; valuables only when named exactly). `collectDrops` also throws out a stack of junk by itself when the inventory is full and something better is lying there. |
 | `obtainItem` | `itemName, count?` — get any item by doing the whole chain itself: wood, the tools it needs, mining with the right pickaxe, crafting, smelting (furnace and fuel included) and hunting. `"food"` = a cooked meat the animals around give. One model decision, then every step runs at full speed without asking the model again; it looks elsewhere when something isn't found and gives up after a few tries. |
 | `collectDrops` | `radius?, itemName?, everything?` — picks up what's worth having: valuables, what its goal or task needs, useful things, its own items where it died. Leaves things another player dropped for themselves or lost when they died, junk, and anything next to a monster or in lava (`pickup.js`). Each item in `nearbyEntities` shows `pickUp: take/leave` with the reason. |

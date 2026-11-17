@@ -157,6 +157,7 @@
     "admins": [],
     "commandPrefix": "!",
     "startingGoal": "",
+    "nightShelter": true,
     "autopilot": true,
     "allowRespawnOnPurpose": true,
     "respawnCommand": "",
@@ -349,8 +350,9 @@
     ]
   },
   "loop": {
-    "minLlmIntervalMs": 2500,
-    "postActionDelayMs": 600,
+    "minLlmIntervalMs": 1000,
+    "postActionDelayMs": 150,
+    "prethink": true,
     "maxActionMs": 180000,
     "errorBackoffMs": 3000,
     "maxErrorBackoffMs": 60000,

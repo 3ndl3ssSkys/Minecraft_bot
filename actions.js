@@ -474,7 +474,7 @@ function insideOwnBuild (bot, pos) {
 }
 
 /** Actions that need block breaking or inventory windows — not available through ViaBedrock yet. */
-const BEDROCK_UNSUPPORTED = new Set(['dropItems', 'obtainItem', 'mineBlock', 'craftItem', 'smeltItem', 'storeItems', 'takeItems', 'inspectContainer', 'planBuilding', 'build', 'cancelBuilding'])
+const BEDROCK_UNSUPPORTED = new Set(['stripMine', 'climbOut', 'shelter', 'dropItems', 'obtainItem', 'mineBlock', 'craftItem', 'smeltItem', 'storeItems', 'takeItems', 'inspectContainer', 'planBuilding', 'build', 'cancelBuilding'])
 
 // Wall-mounted things: place them against the side of a block, not on the floor.
 const WALL_MOUNTED = /^(torch|soul_torch|ladder|\w+_wall_sign|lever|\w+_button|tripwire_hook)$/
@@ -1177,8 +1177,13 @@ const ACTIONS = {
     async run (ctx) {
       const { bot, signal } = ctx
       if (bot.isSleeping) return 'Already in bed.'
-      const bed = bot.findBlock({ matching: (b) => bot.isABed(b), maxDistance: 32 })
-      if (!bed) throw new ActionError('NO_BED', 'No bed within 32 blocks. Craft one (3 wool + 3 planks) and place it.')
+      let bed = bot.findBlock({ matching: (b) => bot.isABed(b), maxDistance: 32 })
+      const carried = !bed && bot.inventory.items().find((i) => /_bed$/.test(i.name))
+      if (carried) { // set the carried bed down first (it also becomes the respawn point)
+        await placeNearby(ctx, carried.name).catch(() => {})
+        bed = bot.findBlock({ matching: (b) => bot.isABed(b), maxDistance: 6 })
+      }
+      if (!bed) throw new ActionError('NO_BED', 'No bed within 32 blocks. obtainItem bed (3 wool from sheep + 3 planks), or shelter for the night.')
       await goNextTo(ctx, bed, 'bed')
       try {
         await bot.sleep(bed)
@@ -1670,8 +1675,12 @@ const ACTIONS = {
     params: { itemName: 'string, e.g. "iron_pickaxe", "torch", "cooked_beef", "food"', count: 'number, optional (default 1)' },
     async run (ctx, args) {
       const { bot } = ctx
-      const name = normalizeName(argString(args, 'itemName'))
+      let name = normalizeName(argString(args, 'itemName'))
       const count = Math.floor(argNumber(args, 'count', { min: 1, max: 64, def: 1 }))
+      if (name === 'bed') { // any colour: the one whose wool it has most of
+        const wool = bot.inventory.items().filter((i) => /_wool$/.test(i.name)).sort((a, b) => b.count - a.count)[0]
+        name = wool ? wool.name.replace(/_wool$/, '_bed') : 'white_bed'
+      }
       if (name !== 'food' && !bot.registry.itemsByName[name]) {
         const close = Object.keys(bot.registry.itemsByName).filter((n) => n.includes(name) || name.includes(n)).slice(0, 5)
         throw new ActionError('UNKNOWN_ITEM', `There is no item called "${name}".${close.length ? ` Did you mean: ${close.join(', ')}?` : ''}`)
@@ -2058,6 +2067,11 @@ class ActionExecutor {
     } catch { /* bot may already be disconnected */ }
   }
 }
+
+// Situational survival skills (shelter, pillar, climb out, bridge, strip mine, torches): see skills.js.
+require('./skills').install(ACTIONS, {
+  argNumber, argString, ActionError, sleep, gotoGoal, goals, placeAt, digWithAbort, equipToolFor, findInventoryItem, throwIfAborted, collectNearbyDrops
+}, SHORT)
 
 module.exports = {
   ACTIONS,

@@ -113,6 +113,7 @@ function nextAcquireStep (o) {
   const kinds = MOB_DROPS[item]
   if (kinds) {
     const prey = (o.mobs || []).filter((m) => kinds.includes(m.name)).sort((a, b) => (a.distance ?? 99) - (b.distance ?? 99))[0]
+    if (prey && /_wool$/.test(item) && inv.shears > 0) return { name: 'useItem', args: { itemName: 'shears', target: String(prey.id) }, why: `shearing a sheep for ${item}`, then: 'collectDrops' }
     if (prey) return { name: 'attackTarget', args: { entityId: prey.id, maxSeconds: 20 }, why: `hunting a ${prey.name} for ${item}`, then: 'collectDrops' }
     return { name: 'explore', args: { distance: 40 }, why: `looking for a ${kinds[0]} (for ${item})` }
   }

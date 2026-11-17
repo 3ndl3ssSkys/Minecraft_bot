@@ -264,6 +264,7 @@ const DEFAULT_CONFIG = {
     admins: [], // most !commands (owners can add more with !admin add). Their *requests* are judged like anyone's.
     commandPrefix: '!',
     startingGoal: '', // old name for goals.current (still works)
+    nightShelter: true, // at nightfall: bed if it has one, otherwise dig in (skilled, armed players keep playing)
     autopilot: true, // early-game basics (logs, wooden and stone pickaxe) by rules, not by asking the model: fast and reliable
     allowRespawnOnPurpose: true, // it may choose to die to respawn (stuck, trapped, lost) — never on hardcore worlds
     respawnCommand: '', // e.g. "/kill" if the server lets it use that; otherwise it uses lava or a big drop nearby
@@ -389,8 +390,9 @@ const DEFAULT_CONFIG = {
     ]
   },
   loop: {
-    minLlmIntervalMs: 2500, // never call the LLM for decisions more often than this
-    postActionDelayMs: 600,
+    minLlmIntervalMs: 1000, // never call the LLM for decisions more often than this
+    postActionDelayMs: 150, // pause between actions (players don't stop between things)
+    prethink: true, // think about the next move while the current one runs, so there's no wait when it ends
     maxActionMs: 180000, // hard safety timeout for any single action
     errorBackoffMs: 3000,
     maxErrorBackoffMs: 60000,
@@ -2930,7 +2932,8 @@ ${said ? `${name} just said: ${said}
         if (this.paused || !agent.bot?.entity || agent.dead || agent.bot.isSleeping) { await this.idle(1000); continue }
         if (agent.reflexes?.busy) { await this.idle(100); continue } // the body is busy saving itself
 
-        let decision = this.forced.shift() || this.reflex() || agent.tasks.nextForcedAction() || this.obtainStep() || this.nextPlanned() || this.autopilotStep()
+        let decision = this.forced.shift() || this.reflex() || this.habitStep() || agent.tasks.nextForcedAction() || this.obtainStep() || this.nextPlanned() || this.autopilotStep()
+        if (!decision) decision = await this.usePrethought()
         if (!decision) {
           // Throttle: never ask the LLM more often than minLlmIntervalMs.
           const wait = this.lastLlmAt + config.loop.minLlmIntervalMs - Date.now()
@@ -2945,7 +2948,9 @@ ${said ? `${name} just said: ${said}
         const { name, args } = decision.action
         log.info(`▶ ${name}(${JSON.stringify(args)})${decision.source !== 'llm' ? ` [${decision.source}]` : ''}`)
         const stopWatching = name === 'attackTarget' ? this.watchFight(args, decision) : null
-        const result = await agent.executor.execute(name, args)
+        const running = agent.executor.execute(name, args)
+        this.prethink(decision)
+        const result = await running
         stopWatching?.()
         agent.memory.addAction(decision, result)
         if (result.ok) log.info(`✔ ${name}: ${result.message} (${(result.durationMs / 1000).toFixed(1)}s)`)
@@ -2956,6 +2961,7 @@ ${said ? `${name} just said: ${said}
         this.trackPlan(decision, result)
         this.autopilot.onResult(decision, result)
         this.onObtainResult(decision, result)
+        if (!result.ok) this.prethought = null // it was planned assuming this worked
         if (config.logging.trainingData && decision.source === 'llm') this.recordTraining(decision, result)
 
         this.backoff = config.loop.errorBackoffMs
@@ -2974,6 +2980,59 @@ ${said ? `${name} just said: ${said}
    * who keeps playing while deciding what to do next. The busy work is
    * interrupted the moment the decision arrives.
    */
+  /**
+   * Think about the next move while this one runs, so there's no pause when it ends. Only for actions that take a
+   * while and when the model isn't needed for anything else; the answer is used only if nothing changed meanwhile.
+   */
+  prethink (decision) {
+    const agent = this.agent
+    if (agent.config.loop.prethink === false || this.prethought || decision.source === 'reflex') return
+    if (/^(wait|chatMessage|emote|eatFood|equipItem|dropItems|placeTorch)$/.test(decision.action.name)) return
+    if (this.obtain || agent.tasks.active()) return // code is driving: no model needed next
+    const started = { at: Date.now(), chat: agent.memory.chat.length, hp: agent.bot.health, goal: agent.memory.goal }
+    const promise = this.decide({ upcoming: decision.action })
+    promise.catch(() => {})
+    this.prethought = { promise, ...started }
+    this.lastLlmAt = Date.now()
+  }
+
+  /** The decision thought up during the last action, if it still fits (no chat, damage or goal change since). */
+  async usePrethought () {
+    const p = this.prethought
+    this.prethought = null
+    if (!p) return null
+    const agent = this.agent
+    const fresh = Date.now() - p.at < 30000 && agent.memory.chat.length === p.chat && agent.bot.health >= p.hp - 1 && agent.memory.goal === p.goal
+    if (!fresh) return null
+    const interrupted = new Promise((resolve) => { this.interruptFn = resolve }) // a hit still gets an instant reflex
+    try { return await Promise.race([p.promise, interrupted]) } catch { return null } finally { this.interruptFn = null }
+  }
+
+  /** Small habits between actions: light up dark tunnels, get out when walled in and stuck. */
+  habitStep () {
+    const agent = this.agent
+    const { bot, memory, executor } = agent
+    const s = agent.perception?.latest
+    if (!s || !bot.entity || agent.dangerLevel() === 'high') return null
+    const now = Date.now()
+    const tools = executor.availableTools()
+    // Torches underground when it's dark (like a player lighting a cave as they go).
+    const light = bot.blockAt(bot.entity.position.floored().offset(0, 1, 0))?.light
+    if (tools.includes('placeTorch') && /underground/.test(s.layout || '') && Number.isFinite(light) && light < 6 && now - (this.lastTorchAt || 0) > 15000 &&
+      bot.inventory.items().some((i) => i.name === 'torch') && !bot.findBlock({ matching: (b) => /torch/.test(b.name), maxDistance: 7 })) {
+      this.lastTorchAt = now
+      return { source: 'habit', thought: 'Dark here, putting a torch down.', emotion: 'calm', emotionIntensity: 3, action: { name: 'placeTorch', args: {} } }
+    }
+    // Two moves failed and we're walled in or in a hole: climb out first.
+    const last = memory.actions.slice(-2)
+    if (tools.includes('climbOut') && last.length === 2 && last.every((a) => !a.ok && /NO_PATH|STUCK|PATH_TIMEOUT/.test(a.code || '')) &&
+      /walled in|blocked/.test(s.layout || '') && now - (this.lastClimbAt || 0) > 60000) {
+      this.lastClimbAt = now
+      return { source: 'habit', thought: "I'm stuck down here. Climbing out first.", emotion: 'determined', emotionIntensity: 5, action: { name: 'climbOut', args: {} } }
+    }
+    return null
+  }
+
   /** One line of training data: what the model saw, what it answered, and how that went (TRAINING.md). */
   recordTraining (decision, result) {
     const x = this.lastExchange
@@ -2993,6 +3052,18 @@ ${said ? `${name} just said: ${said}
     const { bot, config, memory, executor } = agent
     if (config.behavior.autopilot === false || !agent.perception?.latest || this.obtain) return null
     if (agent.dangerLevel() !== 'none' || agent.builder?.current || agent.tasks.active()) return null
+    // Nightfall: a bed if it has one; otherwise dig in, unless it's a skilled, armed player who'd rather keep going.
+    const t = bot.time?.timeOfDay ?? 6000
+    const night = t > 12900 && t < 23000
+    if (night && config.behavior.nightShelter !== false && this.shelterDay !== bot.time.day && /^outdoors/.test(agent.perception.latest.layout || '') && executor.availableTools().includes('shelter')) {
+      const inv0 = agent.perception.latest.inventory.items
+      const bed = Object.keys(inv0).some((n) => /_bed$/.test(n)) || bot.findBlock({ matching: (b) => bot.isABed(b), maxDistance: 24 })
+      const armed = Object.keys(inv0).some((n) => /_(sword|axe)$/.test(n)) && bot.health >= 14
+      if (bed || !armed || agent.intelligence.level('survival') < 3) {
+        this.shelterDay = bot.time.day
+        return { source: 'auto', thought: bed ? 'Night already. Bed time.' : "It's getting dark and I'm not ready for monsters. Digging in till morning.", emotion: 'calm', emotionIntensity: 4, action: { name: 'shelter', args: {} } }
+      }
+    }
     // No food at all and getting hungry: animals nearby → hunt and cook (this matters most when already hungry).
     const s0 = agent.perception.latest
     const foodCount = Object.entries(s0.inventory.items).filter(([n]) => bot.registry.foodsByName[n] && !/rotten_flesh|spider_eye|poisonous_potato|pufferfish/.test(n)).reduce((a, [, c]) => a + c, 0)
@@ -3258,6 +3329,13 @@ ${said ? `${name} just said: ${said}
     const make = (reflexKey, thought, emotion, action) => dryRun ? true : { source: 'reflex', reflexKey, thought, emotion, action }
     const social = this.agent.social
 
+    // Surrounded by melee monsters and hurt: go up where they can't follow (if we know the trick and have blocks).
+    const melee = hostiles.filter((e) => /zombie|husk|drowned|piglin_brute|vindicator|zoglin|hoglin/.test(e.name) && e.position.distanceTo(me) < 6)
+    const blocks = bot.inventory.items().filter((i) => /^(cobblestone|dirt|cobbled_deepslate|netherrack|stone)$/.test(i.name)).reduce((a, i) => a + i.count, 0)
+    if (melee.length >= 3 && bot.health <= 12 && blocks >= 3 && this.agent.intelligence.level('survival') >= 2 && ready('pillar', 30000)) {
+      return make('pillar', `${melee.length} of them and I'm hurt. Up I go where they can't reach.`, 'scared', { name: 'pillarUp', args: { height: 3 } })
+    }
+
     // A creeper hissing right next to us — even if we can't see it.
     const ca = this.agent.creeperAlert
     if (ca && Date.now() - ca.at < 2500 && ready('creeper', 3000)) {
@@ -3321,7 +3399,7 @@ ${said ? `${name} just said: ${said}
     return null
   }
 
-  async decide () {
+  async decide ({ upcoming } = {}) {
     const agent = this.agent
     const { log, memory, executor, config, social, learning, emotions } = agent
     agent.goals.maybePlan() // step back and plan in the background when it's time
@@ -3338,6 +3416,7 @@ ${said ? `${name} just said: ${said}
 
     const remembered = agent.longMemory?.forPrompt([memory.goal, state.status.task?.what, state.nearbyEntities.map((e) => e.name).join(' '), Object.keys(state.nearbyBlocks).join(' ')].filter(Boolean).join(' '), 3) || []
     const nudges = []
+    if (upcoming) nudges.push(`You are in the middle of ${upcoming.name}(${JSON.stringify(upcoming.args)}). Choose what to do RIGHT AFTER it finishes (assume it works).`)
     const streak = memory.failureStreak()
     if (streak >= 2) nudges.push(`Your last ${streak} actions failed. Change your approach (different action, target or location).`)
     if (!memory.goal) nudges.push('You have no current goal: pick a sensible one based on your ambitions and situation.')

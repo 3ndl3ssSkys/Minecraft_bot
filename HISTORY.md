@@ -322,6 +322,29 @@ It also had a stray line that reset the autopilot after nearly every action. Tha
 - getting out of a pit or hole on purpose;
 - a bed from sheep.
 
+## 19. All the situational skills, and "under a second"
+
+**Asked:**
+- **Skills:** build all the missing situational skills.
+- **Speed:** the bot should move and decide in under a second.
+
+**Done:**
+- **`skills.js`:** `shelter` (bed, or dig in / cover / wait / climb out), `pillarUp`, `climbOut` (pillar or staircase), `bridge`, `stripMine` (version-aware ore depths, lava/water checks, ores it uncovers, torches, keeps its heading), `placeTorch`.
+- **Beds:** `obtainItem bed` makes a bed from sheep, shearing them when it has shears. `sleepInBed` places a carried bed.
+- **Automatic use:**
+  - **night routine:** bed or shelter, unless skilled and armed;
+  - **pillar escape:** when surrounded by zombies and hurt;
+  - **torches:** in dark tunnels;
+  - **climbing out:** when stuck and walled in.
+- **Speed:** the next decision is thought up during the current action (`prethink`); shorter pauses between actions.
+
+**Live (flying-squid):**
+- **Shelter:** dug in, covered, saw it was daytime, opened up and climbed out.
+- **Pre-thinking:** with a 2 s mock model, 0–1 s gaps between actions.
+- **Pillar:** flying-squid never confirmed jump-placed blocks; capped and checked now, unverified on Paper.
+
+**Not verified yet:** `pillarUp`, `bridge`, `stripMine` and night sleeping on a real server.
+
 ## Where it stands now
 
 **Next for the user:**
