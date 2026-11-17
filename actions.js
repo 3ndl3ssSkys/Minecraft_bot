@@ -474,6 +474,8 @@ function insideOwnBuild (bot, pos) {
 }
 
 /** Actions that need block breaking or inventory windows — not available through ViaBedrock yet. */
+const ADVENTURE_BLOCKED = new Set(['mineBlock', 'placeBlock', 'planBuilding', 'build', 'cancelBuilding', 'stripMine', 'shelter', 'pillarUp', 'bridge', 'climbOut', 'placeTorch', 'obtainItem', 'parkour'])
+const SPECTATOR_OK = new Set(['moveToPlayer', 'followPlayer', 'chatMessage', 'wait', 'emote', 'knowledge', 'readSigns'])
 const BEDROCK_UNSUPPORTED = new Set(['stripMine', 'climbOut', 'shelter', 'dropItems', 'obtainItem', 'mineBlock', 'craftItem', 'smeltItem', 'storeItems', 'takeItems', 'inspectContainer', 'planBuilding', 'build', 'cancelBuilding'])
 
 // Wall-mounted things: place them against the side of a block, not on the floor.
@@ -1685,6 +1687,13 @@ const ACTIONS = {
         const close = Object.keys(bot.registry.itemsByName).filter((n) => n.includes(name) || name.includes(n)).slice(0, 5)
         throw new ActionError('UNKNOWN_ITEM', `There is no item called "${name}".${close.length ? ` Did you mean: ${close.join(', ')}?` : ''}`)
       }
+      if (bot.game?.gameMode === 'creative' && name !== 'food') {
+        // Creative: pick it from the creative inventory, like a player would.
+        const Item = require('prismarine-item')(bot.registry)
+        const slot = bot.inventory.firstEmptyHotbarSlot() ?? 36
+        await bot.creative.setInventorySlot(slot, new Item(bot.registry.itemsByName[name].id, Math.min(count, bot.registry.itemsByName[name].stackSize || 64)))
+        return `Took ${count} ${name} from the creative inventory.`
+      }
       if (!ctx.startObtain) throw new ActionError('UNAVAILABLE', 'Not available right now.')
       const target = ctx.startObtain(name, count)
       return `Working on getting ${count} ${target}: I'll do each step myself.`
@@ -1971,6 +1980,10 @@ class ActionExecutor {
     return Object.keys(ACTIONS).filter((name) => {
       // Through ViaProxy → Geyser, block breaking and inventory windows aren't translated (yet).
       if (bedrock && BEDROCK_UNSUPPORTED.has(name)) return false
+      // Game modes: adventure can't break or place blocks; spectator can only look around and talk.
+      const mode = this.bot?.game?.gameMode
+      if (mode === 'adventure' && ADVENTURE_BLOCKED.has(name)) return false
+      if (mode === 'spectator' && !SPECTATOR_OK.has(name)) return false
       if (enabledActions?.length && !enabledActions.includes(name)) return false
       if (disabledActions?.includes(name)) return false
       if (name === 'chatMessage' && !this.chat.allows('tool')) return false
@@ -2001,6 +2014,11 @@ class ActionExecutor {
       return finish({ ok: false, code: 'UNKNOWN_ACTION', message: `"${name}" is not an available action. Use one of: ${this.availableTools().join(', ')}.` })
     }
     if (!this.bot.entity) return finish({ ok: false, code: 'NOT_SPAWNED', message: 'Bot is not spawned.' })
+    // Without F3 it thinks in offsets from itself ("dx 6, dz -3"): turn them into the block they point at.
+    if (args && typeof args === 'object' && ['dx', 'dy', 'dz'].some((k) => Number.isFinite(Number(args[k]))) && !Number.isFinite(Number(args.x))) {
+      const p = this.bot.entity.position.floored()
+      args = { ...args, x: p.x + Math.round(Number(args.dx) || 0), y: p.y + Math.round(Number(args.dy) || 0), z: p.z + Math.round(Number(args.dz) || 0) }
+    }
 
     const controller = new AbortController()
     this.current = { name, args, startedAt: started, controller }

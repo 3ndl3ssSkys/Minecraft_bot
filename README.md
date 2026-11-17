@@ -494,6 +494,35 @@ At `0` it's purely its own call. At `1` it does whatever it physically can. Hard
 | `obedience.whoCanInstruct` | `everyone` | who may ask at all; others only get favours (lower chance, no obedience) |
 | `obedience.overrideConscience` | false | let very high obedience override loyalty and promises |
 
+## Watch it in a browser (`viewer`, off by default)
+
+Start it with `npm run viewer` (or `npm start -- --viewer`), or type `!viewer on` in game. Then open **http://localhost:3007**. The page shows:
+- **Its view:** what it sees, first person, live as it moves (prismarine-viewer). Worlds newer than 1.21.4, like 26.1, are translated block by block so they still render.
+- **Where it is:** coordinates, facing, dimension, game mode and day/night. You always see its coordinates, even when the bot itself doesn't know them.
+- **How it's doing:** health, food, what it's doing, its goal, how it feels, and what's around it.
+- **Its inventory:** the hotbar with the selected slot, armor and off-hand.
+- **A live feed:** chat, its thoughts and its actions.
+- **A message box** with three modes:
+  - **Talk to it:** a message from you as its owner.
+  - **!command:** any owner command.
+  - **Make it say:** it says your text in game chat.
+
+It only listens on your PC. To watch from another device, set `viewer.host` to `"0.0.0.0"` **and** a `viewer.password`, then open `http://<pc>:3007/?key=<password>`. `viewer.viewDistance` (chunks, default 4) controls how much the browser draws.
+
+## Game modes and coordinates
+
+**Game modes:** it reads the game mode and plays accordingly.
+- **Creative:** no reflexes or survival routines; `obtainItem` takes things straight from the creative inventory; it builds freely.
+- **Adventure:** no breaking or placing blocks, and no digging while walking.
+- **Spectator:** it only looks, follows and talks.
+- **Hardcore:** it's told it has one life, and it never dies on purpose.
+
+**Coordinates (F3):** it only knows its own coordinates if it knows the F3 screen.
+- **Simple and up** know it from the start. **Beginners** learn it when someone tells them ("press f3 to see your coords").
+- **Servers can hide them:** when a server hides F3 coordinates (`reducedDebugInfo`), it doesn't see them, however smart it is.
+- **Without F3** it thinks in "6 east, 2 down" from itself, and its actions take `dx, dy, dz`.
+- **Override:** `perception.coordinates: true/false`.
+
 ## Goals (`goals`)
 
 It always knows what it's working toward, on four levels:

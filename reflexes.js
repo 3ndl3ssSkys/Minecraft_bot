@@ -319,6 +319,7 @@ class Reflexes {
   tick () {
     const { bot, agent } = this
     if (!this.cfg.enabled || !bot?.entity || agent.dead) return
+    if (/creative|spectator/.test(bot.game?.gameMode || '')) return // can't get hurt: nothing to save it from
     const e = bot.entity
     this.ticks++
 

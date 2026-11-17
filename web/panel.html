@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bot viewer</title>
+<style>
+  :root { --bg: #14161a; --panel: #1d2026; --line: #2c3038; --text: #e6e6e6; --dim: #9aa0aa; --accent: #6cc070; --warn: #e0b050; --bad: #e06060; --you: #7fb2ff; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif; }
+  .app { display: grid; grid-template-columns: 1fr 380px; height: 100vh; }
+  .view { position: relative; background: #000; }
+  .view iframe { border: 0; width: 100%; height: 100%; }
+  .hud { position: absolute; left: 10px; top: 10px; background: rgba(0,0,0,.55); padding: 6px 10px; border-radius: 6px; font: 13px/1.5 ui-monospace, monospace; pointer-events: none; }
+  .side { display: flex; flex-direction: column; border-left: 1px solid var(--line); background: var(--panel); min-width: 0; }
+  .card { padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  .card h2 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--dim); }
+  .row { display: flex; justify-content: space-between; gap: 8px; }
+  .row span:first-child { color: var(--dim); }
+  .bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin: 2px 0 6px; }
+  .bar > div { height: 100%; }
+  .grid { display: grid; grid-template-columns: repeat(9, 1fr); gap: 3px; }
+  .slot { aspect-ratio: 1; background: #121418; border: 1px solid var(--line); border-radius: 3px; font-size: 9px; line-height: 1.1; padding: 2px; overflow: hidden; position: relative; color: var(--dim); }
+  .slot.sel { border-color: var(--accent); }
+  .slot b { position: absolute; right: 2px; bottom: 1px; color: var(--text); font-size: 10px; }
+  .feed { flex: 1; overflow-y: auto; padding: 8px 12px; font: 12px/1.45 ui-monospace, monospace; }
+  .feed div { white-space: pre-wrap; word-break: break-word; }
+  .k-chat { color: var(--text); } .k-mind { color: #c8a8ff; } .k-warn { color: var(--warn); } .k-info { color: var(--dim); } .k-you { color: var(--you); }
+  form { display: flex; gap: 6px; padding: 10px 12px; border-top: 1px solid var(--line); }
+  select, input, button { background: #121418; color: var(--text); border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; font: inherit; }
+  input { flex: 1; min-width: 0; }
+  button { cursor: pointer; }
+  .off { padding: 20px; color: var(--dim); }
+  @media (max-width: 800px) { .app { grid-template-columns: 1fr; grid-template-rows: 45vh 1fr; } .side { border-left: 0; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="view">
+    <iframe id="view" title="What the bot sees"></iframe>
+    <div class="hud" id="hud">connecting…</div>
+  </div>
+  <div class="side">
+    <div class="card" id="status"><div class="off">Waiting for the bot…</div></div>
+    <div class="card"><h2>Inventory</h2><div class="grid" id="inv"></div></div>
+    <div class="feed" id="feed"></div>
+    <form id="send">
+      <select id="mode" title="What your message does">
+        <option value="talk">Talk to it</option>
+        <option value="command">!command</option>
+        <option value="say">Make it say</option>
+      </select>
+      <input id="text" autocomplete="off" placeholder="Type here… (!help for commands)">
+      <button>Send</button>
+    </form>
+  </div>
+</div>
+<script>
+  const key = new URLSearchParams(location.search).get('key') || ''
+  const q = key ? `?key=${encodeURIComponent(key)}` : ''
+  const $ = (id) => document.getElementById(id)
+  const esc = (s) => String(s ?? '').replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]))
+  const pretty = (n) => String(n || '').replace(/_/g, ' ')
+  let botId = null
+
+  function slot (it, sel) {
+    return `<div class="slot${sel ? ' sel' : ''}" title="${it ? esc(pretty(it.name)) + ' x' + it.count : 'empty'}">${it ? esc(pretty(it.name)) + (it.count > 1 ? `<b>${it.count}</b>` : '') : ''}</div>`
+  }
+
+  function render (s) {
+    if (!s.online) { $('status').innerHTML = '<div class="off">The bot isn\'t in a world right now.</div>'; $('hud').textContent = 'offline'; return }
+    if (s.botId !== botId) { botId = s.botId; $('view').src = `/view/${q}` } // (re)joined: reload the view
+    const day = s.time != null ? (s.time < 12500 || s.time > 23300 ? 'day' : 'night') : ''
+    $('hud').innerHTML = `XYZ ${s.position.x} / ${s.position.y} / ${s.position.z} · facing ${s.facing}<br>${esc(s.dimension)} · ${esc(s.gameMode)}${s.hardcore ? ' (hardcore)' : ''} · ${day}`
+    const bar = (v, max, color) => `<div class="bar"><div style="width:${Math.max(0, Math.min(100, v / max * 100))}%;background:${color}"></div></div>`
+    $('status').innerHTML = `<h2>${esc(s.name)}</h2>
+      <div class="row"><span>Health</span><span>${s.health}/20</span></div>${bar(s.health, 20, 'var(--bad)')}
+      <div class="row"><span>Food</span><span>${s.food}/20</span></div>${bar(s.food, 20, 'var(--warn)')}
+      <div class="row"><span>Doing</span><span>${esc(s.action || 'thinking')}</span></div>
+      <div class="row"><span>Goal</span><span>${esc(s.goal || '—')}</span></div>
+      <div class="row"><span>Feeling</span><span>${esc(s.feeling || '—')}</span></div>
+      <div class="row"><span>Around it</span><span>${esc(s.layout || '—')}</span></div>
+      <div class="row"><span>Knows its coordinates (F3)</span><span>${s.knowsCoords ? 'yes' : 'no'}</span></div>
+      <div class="row"><span>Players</span><span>${esc(s.players.join(', ') || 'nobody')}</span></div>`
+    $('inv').innerHTML = s.armor.map((a) => slot(a)).join('') + slot(s.offhand) + '<div></div><div></div><div></div><div></div>' +
+      s.main.map((it) => slot(it)).join('') + s.hotbar.map((it, i) => slot(it, i === s.selected)).join('')
+  }
+
+  function addLine (l) {
+    const div = document.createElement('div')
+    div.className = `k-${l.kind}`
+    div.textContent = `${new Date(l.at).toLocaleTimeString()} ${l.text.replace(/\x1b\[[0-9;]*m/g, '')}`
+    const feed = $('feed')
+    const atBottom = feed.scrollTop + feed.clientHeight >= feed.scrollHeight - 30
+    feed.appendChild(div)
+    while (feed.children.length > 400) feed.removeChild(feed.firstChild)
+    if (atBottom) feed.scrollTop = feed.scrollHeight
+  }
+
+  const events = new EventSource(`/events${q}`)
+  events.addEventListener('state', (e) => render(JSON.parse(e.data)))
+  events.addEventListener('line', (e) => addLine(JSON.parse(e.data)))
+  events.addEventListener('feed', (e) => JSON.parse(e.data).forEach(addLine))
+  fetch(`/state${q}`).then((r) => r.json()).then(render).catch(() => {})
+
+  $('mode').addEventListener('change', () => { $('text').placeholder = { talk: 'Say something to it…', command: 'e.g. goals, status, stop', say: 'It will say this in game chat' }[$('mode').value] })
+  $('send').addEventListener('submit', async (e) => {
+    e.preventDefault()
+    const text = $('text').value.trim()
+    if (!text) return
+    $('text').value = ''
+    const r = await fetch(`/send${q}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: $('mode').value, text }) }).then((x) => x.json()).catch(() => ({ ok: false, error: 'not sent' }))
+    if (!r.ok) addLine({ at: Date.now(), kind: 'warn', text: `Not sent: ${r.error}` })
+  })
+</script>
+</body>
+</html>

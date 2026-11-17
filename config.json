@@ -273,6 +273,7 @@
       "follow": "admin",
       "goal": "admin",
       "goals": "admin",
+      "viewer": "owner",
       "mode": "admin",
       "emotion": "admin",
       "trust": "admin",
@@ -306,7 +307,16 @@
       "obedience.whoCanInstruct"
     ]
   },
+  "viewer": {
+    "enabled": false,
+    "port": 3007,
+    "host": "127.0.0.1",
+    "password": "",
+    "firstPerson": true,
+    "viewDistance": 4
+  },
   "perception": {
+    "coordinates": "auto",
     "intervalMs": 2000,
     "entityRadius": 24,
     "maxEntities": 12,

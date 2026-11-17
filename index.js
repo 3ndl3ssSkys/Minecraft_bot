@@ -36,7 +36,9 @@ const { LongTermMemory } = require('./memory')
 const { Autopilot } = require('./basics')
 const { RecipeBook } = require('./recipes')
 const { nextAcquireStep, foodTarget } = require('./acquire')
+const F3_FACT = 'f3 coordinates debug screen' // knownFacts key (knowledge.js)
 const { judgeDrop } = require('./pickup')
+const { BotViewer } = require('./viewer')
 const { TaskManager, KINDS: TASK_KINDS, EFFORTS, RISKS } = require('./tasks')
 const combat = require('./combat')
 const knowledge = require('./knowledge')
@@ -368,14 +370,27 @@ const DEFAULT_CONFIG = {
     // Minimum role per !command. 'admin' commands also work for owners.
     permissions: {
       help: 'admin', status: 'admin', stop: 'admin', pause: 'admin', resume: 'admin', come: 'admin', follow: 'admin',
-      goal: 'admin', goals: 'admin', mode: 'admin', emotion: 'admin', trust: 'admin', tasks: 'admin', settings: 'admin', get: 'admin', set: 'admin',
+      goal: 'admin', goals: 'admin', viewer: 'owner', mode: 'admin', emotion: 'admin', trust: 'admin', tasks: 'admin', settings: 'admin', get: 'admin', set: 'admin',
       reactions: 'admin', lessons: 'admin', obey: 'admin', build: 'admin', admin: 'owner', persona: 'owner', forget: 'owner', save: 'owner',
       iq: 'owner', intelligence: 'owner', mind: 'owner', chests: 'admin', senses: 'admin'
     },
     // Settings under these prefixes can only be changed by owners, even with !set / !obey.
     ownerOnlySettings: ['trust.', 'pvp.', 'learning.', 'intelligence.', 'mind.', 'obedience.levels.owner', 'obedience.levels.admin', 'obedience.overrideConscience', 'obedience.whoCanInstruct']
   },
+  // Watch it in a browser: its view, inventory, coordinates and chat, and talk to it (viewer.js). Off by default;
+  // turn on here, with "npm start -- --viewer", or "!viewer on". Needs the optional prismarine-viewer package.
+  viewer: {
+    enabled: false,
+    port: 3007,
+    host: '127.0.0.1', // only this PC; to open it to your network set host "0.0.0.0" AND a password
+    password: '', // then open http://<this-pc>:3007/?key=<password>
+    firstPerson: true,
+    viewDistance: 4 // chunks around it to show (more = heavier for the browser)
+  },
   perception: {
+    // Its own coordinates: 'auto' = only if it knows the F3 screen (Simple and up, or once someone tells it),
+    // and the server doesn't hide them (reducedDebugInfo). Without them it thinks in "6 east, 2 down".
+    coordinates: 'auto',
     intervalMs: 2000,
     entityRadius: 24,
     maxEntities: 12,
@@ -540,6 +555,7 @@ function parseArgs () {
   const out = { file: null, server: process.env.BOT_SERVER || null, profile: process.env.BOT_PROFILE || null }
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--server') out.server = args[++i]
+    else if (args[i] === '--viewer') out.viewer = true
     else if (args[i] === '--profile') out.profile = args[++i]
     else if (!args[i].startsWith('--') && !out.file) out.file = args[i]
   }
@@ -564,6 +580,7 @@ function loadConfig (log) {
   }
   const config = deepMerge(DEFAULT_CONFIG, user)
   // A named server profile overrides the default server settings.
+  if (cli.viewer) config.viewer.enabled = true
   if (cli.server) {
     const profile = config.servers?.[cli.server]
     if (!profile) throw new Error(`No server profile "${cli.server}" in config.servers (have: ${Object.keys(config.servers || {}).join(', ') || 'none'})`)
@@ -902,6 +919,11 @@ class Perception {
     if (logsN + planksN / 4 >= 8) h.push(`You already carry ${logsN} logs and ${planksN} planks, which is plenty. Do NOT chop more trees: craft what you need, or go for stone, ores, food or exploring.`)
     if (hasAny(/^wooden_pickaxe$/) && !hasAny(/^(stone|iron|diamond|netherite)_pickaxe$/)) h.push('You have a wooden pickaxe: mine cobblestone and make stone tools next.')
     if (hasAny(/^stone_pickaxe$/) && !hasAny(/^(iron|diamond|netherite)_pickaxe$/)) h.push('You have a stone pickaxe: look for coal and iron ore (caves, hillsides, below y=60) and smelt it.')
+    const mode = state.self.gameMode
+    if (mode === 'creative') h.push('Creative mode: you can\'t get hurt or hungry, obtainItem takes anything straight from the creative inventory, blocks break instantly. Build big, explore, have fun; no need to gather.')
+    else if (mode === 'adventure') h.push('Adventure mode: you can\'t break or place blocks here. Explore, talk, trade, fight, use doors and buttons.')
+    else if (mode === 'spectator') h.push('Spectator mode: you can only look around, follow players and talk.')
+    if (this.bot.game?.hardcore) h.push('Hardcore: you have ONE life. Play it safe; avoid needless risks.')
     if (state.self.food <= 6) h.push('You are hungry; eat or find food soon.')
     if (state.self.health <= 8) h.push('Your health is low; avoid fights and eat to regenerate.')
     if (state.inventory.freeSlots <= 2) h.push('Your inventory is almost full.')
@@ -1958,6 +1980,12 @@ ${speaker}'s latest message${said.length > 1 ? 's' : ''}: ${said.map((m) => `"${
         if (!CHAT_MODES.includes(arg)) return reply(`chat mode is "${config.chat.mode}". options: ${CHAT_MODES.join(', ')}`)
         agent.applySetting('chat.mode', arg)
         return reply(`chat mode set to ${arg}.`)
+      case 'viewer': {
+        if (rest[0] === 'off') { agent.viewer.stop(); agent.config.viewer.enabled = false; return reply('viewer off.') }
+        const url = agent.viewer.start()
+        agent.config.viewer.enabled = Boolean(url)
+        return reply(url ? `viewer on: ${url}` : 'viewer unavailable (npm install in the bot folder adds it).')
+      }
       case 'goals':
         for (const line of agent.goals.describe()) reply(line)
         return
@@ -2198,7 +2226,7 @@ ${speaker}'s latest message${said.length > 1 ? 's' : ''}: ${said.map((m) => `"${
 
       case 'help':
       default:
-        return reply('commands: status stop pause resume come follow goal goals mode emotion trust obey tasks build chests senses iq mind admin set get settings persona reactions lessons forget save')
+        return reply('commands: status stop pause resume come follow goal goals viewer mode emotion trust obey tasks build chests senses iq mind admin set get settings persona reactions lessons forget save')
     }
   }
 }
@@ -3051,6 +3079,7 @@ ${said ? `${name} just said: ${said}
     const agent = this.agent
     const { bot, config, memory, executor } = agent
     if (config.behavior.autopilot === false || !agent.perception?.latest || this.obtain) return null
+    if (/creative|spectator|adventure/.test(bot.game?.gameMode || '')) return null // survival routines (tools, food, night) don't apply
     if (agent.dangerLevel() !== 'none' || agent.builder?.current || agent.tasks.active()) return null
     // Nightfall: a bed if it has one; otherwise dig in, unless it's a skilled, armed player who'd rather keep going.
     const t = bot.time?.timeOfDay ?? 6000
@@ -3429,7 +3458,7 @@ ${said ? `${name} just said: ${said}
       { role: 'system', content: buildDecisionPrompt(agent, executor.describeTools(usesCompactPrompt(config))) },
       {
         role: 'user',
-        content: `Current state:\n${JSON.stringify(state)}\n\n` +
+        content: `Current state:\n${JSON.stringify(agent.promptState(state))}\n\n` +
           `People you know (online):\n${social.peopleSummary(state.onlinePlayers.slice(0, 6)) || '- nobody else is online'}\n\n` +
           `What you've learned from experience:\n${learned.map((l) => `- ${l}`).join('\n') || '- nothing yet'}\n\n` +
           `${remembered.length ? `Things you remember (from earlier):\n${remembered.map((l) => `- ${l}`).join('\n')}\n\n` : ''}` +
@@ -3504,6 +3533,7 @@ class Agent {
     this.knownFacts = new Set(saved.knownFacts || []) // facts above its level it has learned
     this.reflexes = new Reflexes(this, saved.reflexes)
     this.goals = new Goals(this, saved.goals)
+    this.viewer = new BotViewer(this)
     this.memory.goals = this.goals
     this.learnedItems = new Set(saved.learnedItems || []) // recipes it worked out itself
     this.builder = { current: saved.building?.current || null, history: saved.building?.history || [], owner: config.server.username }
@@ -3534,6 +3564,12 @@ class Agent {
   learnFacts (text, from, chance = 0.4) {
     if (!this.config.intelligence.learn) return
     this.reflexes?.learnFromText(text, from)
+    // "press f3 to see your coords": the words-based fact matching can't see "f3", so check it directly.
+    if (!this.knownFacts.has(F3_FACT) && /\bf3\b/i.test(text) && /coord|position|where|debug|xyz/i.test(text)) {
+      this.knownFacts.add(F3_FACT)
+      this.memory.addEvent('learned', `${from ? `${from} told you` : 'You learned'}: F3 shows your coordinates. Now you always know where you are.`)
+      this.learning.markDirty()
+    }
     for (const f of knowledge.learnFrom(text, this.knowledgeOpts(), chance)) {
       this.knownFacts.add(f.keys)
       this.intelligence.addXp('knowledge', 2)
@@ -3571,6 +3607,40 @@ class Agent {
   }
 
   dangerLevel () { return this.dangerInfo().level }
+
+  /** survival | creative | adventure | spectator, as the server says. */
+  gameMode () { return this.bot?.game?.gameMode || 'survival' }
+
+  /** Does it see its own coordinates? Only with the F3 screen: it has to know the key, and the server must not hide it. */
+  coordsKnown () {
+    const c = this.config.perception.coordinates
+    if (this.reducedDebugInfo) return false
+    if (typeof c === 'boolean') return c
+    return this.intelligence.knowledgeTier() >= 1 || this.knownFacts.has(F3_FACT)
+  }
+
+  /**
+   * The state as the model gets it: without F3, every position becomes relative ("dx 6, dy -2, dz -3" from
+   * itself), and its own position is unknown. Actions accept dx/dy/dz then (ActionExecutor converts them).
+   */
+  promptState (state) {
+    if (this.coordsKnown() || !this.bot?.entity) return state
+    const me = this.bot.entity.position
+    const rel = (v) => {
+      if (Array.isArray(v)) return v.map(rel)
+      if (!v || typeof v !== 'object') return v
+      if (Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z) && Object.keys(v).length <= 3) {
+        return { dx: Math.round(v.x - me.x), dy: Math.round(v.y - me.y), dz: Math.round(v.z - me.z) }
+      }
+      const out = {}
+      for (const [k, val] of Object.entries(v)) out[k] = rel(val)
+      return out
+    }
+    const s = rel(state)
+    s.self.position = "unknown: you don't know how to show your coordinates (the F3 screen). Positions are relative to you: dx = east(+)/west(-), dz = south(+)/north(-), dy = up/down. Give actions dx, dy, dz instead of x, y, z."
+    s.recentActions = state.recentActions // what it did, as it did it
+    return s
+  }
 
   /** Take or leave a dropped item entity? (see pickup.js) */
   dropVerdict (entity) {
@@ -3752,6 +3822,12 @@ class Agent {
       this.recentFallSpeed = Math.min(vy, this.recentFallSpeed * 0.9)
     })
     this.reflexes.attach(bot) // falls, lava, drowning, flinching: every tick, no LLM
+    // Servers can hide F3 coordinates (reducedDebugInfo): then it can't know them however smart it is.
+    bot._client.on('login', (p) => { this.reducedDebugInfo = Boolean(p.reducedDebugInfo ?? p.worldState?.reducedDebugInfo) })
+    bot._client.on('entity_status', (p) => {
+      if (bot.entity && p.entityId === bot.entity.id && (p.entityStatus === 22 || p.entityStatus === 23)) this.reducedDebugInfo = p.entityStatus === 22
+    })
+    bot.on('game', () => this.refreshMovements()) // game mode changes: digging allowed or not
     bot.on('chat', (username, message) => this.responder.onMessage(username, message))
     bot.on('whisper', (username, message) => this.responder.onMessage(username, message, { whisper: true }))
     bot.on('kicked', (reason) => {
@@ -3865,6 +3941,7 @@ class Agent {
     const pf = this.config.behavior.pathfinding
     m.canOpenDoors = pf.openDoors !== false
     m.digCost = pf.digCost ?? 4
+    m.canDig = pf.canDig && this.config.server.platform !== 'bedrock' && !/adventure|spectator/.test(this.bot.game?.gameMode || '')
     m.allowParkour = pf.allowParkour // which jumps it may use is decided by parkour.js from its skill
     m.allowSprinting = pf.allowSprinting && this.intelligence.can('sprint', 'survival')
     this.parkour.refresh(m)
@@ -3902,10 +3979,11 @@ class Agent {
     const { bot, config, log } = this
     this.reconnectAttempts = 0
     log.info(`Spawned in ${bot.game.dimension} at ${bot.entity.position.floored()} (Minecraft ${bot.version}).`)
+    if (config.viewer.enabled) this.viewer.start()
 
     const pf = config.behavior.pathfinding
     const movements = new Movements(bot)
-    movements.canDig = pf.canDig && config.server.platform !== 'bedrock' // no block breaking through ViaBedrock
+    movements.canDig = pf.canDig && config.server.platform !== 'bedrock' && !/adventure|spectator/.test(bot.game?.gameMode || '') // no block breaking through ViaBedrock or in adventure
     // Parkour and sprinting are skills too.
     movements.allowParkour = pf.allowParkour
     movements.canOpenDoors = pf.openDoors !== false
@@ -3995,6 +4073,7 @@ class Agent {
     if (this.shuttingDown) return
     this.shuttingDown = true
     this.log.info('Shutting down...')
+    this.viewer?.stop()
     this.brain?.stop()
     this.smalltalk?.stop()
     this.executor?.abort('shutdown')

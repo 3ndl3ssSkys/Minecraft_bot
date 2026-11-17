@@ -30,6 +30,7 @@ const FACTS = [
   ['animals breeding cows sheep chickens pigs', 'Breed cows/sheep with wheat, pigs with carrots/potatoes/beetroot, chickens with seeds. Sheep give wool (shears keep the sheep alive). Cows give leather and milk.', 2],
   // Crafting essentials
   ['bed sleep night', 'Bed: 3 wool + 3 planks. Sleeping skips the night and sets your spawn. Beds explode in the Nether and the End.', 1],
+  ['f3 coordinates debug screen', 'F3 opens the debug screen: your exact coordinates (X Y Z), the direction you face, the biome and the light level. Write down coordinates of your base so you can find it again.', 1],
   ['torch light mobs spawn', 'Torches: coal/charcoal + stick (4 torches). Hostile mobs spawn at light level 0, so lighting an area stops spawns. Charcoal comes from smelting logs.', 1],
   ['chest storage barrel shulker', 'Storage: chest (8 planks), barrel (6 planks + 2 slabs). Shulker boxes (2 shulker shells from End cities + chest) keep items when broken.', 1],
   ['glass sand smelt window', 'Glass: smelt sand. 6 glass → 16 glass panes. Use glass for windows; panes are cheaper.', 2],

@@ -345,6 +345,30 @@ It also had a stray line that reset the autopilot after nearly every action. Tha
 
 **Not verified yet:** `pillarUp`, `bridge`, `stripMine` and night sleeping on a real server.
 
+## 20. Viewer, F3 coordinates, game modes
+
+**Asked:**
+- **Viewer:** an optional view of what the bot sees, where you can also chat and give it commands, watch it play, see its inventory and see its coordinates.
+- **F3:** it should only see its own coordinates if it knows the F3 key.
+- **Game modes:** it should be smart in the different game modes, and move and interact like a real player.
+
+**Done:**
+- **The viewer:** `viewer.js` and `web/panel.html` (prismarine-viewer, optional dependency), with 26.x worlds translated to 1.21.4.
+- **Coordinates:** F3-gated, with relative positions (`dx/dy/dz`) when it doesn't know them.
+- **Game modes:** creative, adventure, spectator and hardcore are handled.
+
+**Tests:** `test/viewer.test.js` checks the translation, including block properties.
+
+**Live (flying-squid 1.21.4 + Chromium):**
+- the panel loaded and the first-person view rendered;
+- the HUD showed coordinates;
+- the status and inventory updated live;
+- `!status` sent from the panel came back in the feed.
+
+**Not verified yet:**
+- the viewer against the user's real 26.1 server (the translation is tested only in the unit test);
+- creative and adventure play on a real server.
+
 ## Where it stands now
 
 **Next for the user:**
