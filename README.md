@@ -27,6 +27,8 @@ Perception (every 2s) ──► state JSON + feelings + relationships + lessons 
         └──────────── result fed back into the next prompt ◄──── ActionExecutor (one action at a time)
 ```
 
+> **Could we train our own Minecraft model?** See [TRAINING.md](TRAINING.md): not from scratch, but a fine-tune of the small model on the bot's own good decisions is realistic (`logging.trainingData` records them).
+
 > **New here?** On Windows, start with [START-HERE.md](START-HERE.md) (exact commands, step by step). [SETUP.md](SETUP.md) covers everything else, from an empty PC to friends' servers. [CONFIGURING.md](CONFIGURING.md) shows how to set goals, feelings, personality, chat, reactions, fighting and reflexes. [CLAUDE.md](CLAUDE.md) holds the project's design notes and lessons learned.
 
 ## Quick start
@@ -650,7 +652,8 @@ The bot knows Minecraft the way an experienced player does:
 | `attackTarget` | `entityId, maxSeconds?, style?, sparring?` — style: aggressive, balanced, cautious, hitAndRun, comboAxe, ranged, mace |
 | `retreat` | `entityId, distance?` |
 | `eatFood` | `foodName?` |
-| `collectDrops` | `radius?` |
+| `obtainItem` | `itemName, count?` — get any item by doing the whole chain itself: wood, the tools it needs, mining with the right pickaxe, crafting, smelting (furnace and fuel included) and hunting. `"food"` = a cooked meat the animals around give. One model decision, then every step runs at full speed without asking the model again; it looks elsewhere when something isn't found and gives up after a few tries. |
+| `collectDrops` | `radius?, itemName?, everything?` — picks up what's worth having: valuables, what its goal or task needs, useful things, its own items where it died. Leaves things another player dropped for themselves or lost when they died, junk, and anything next to a monster or in lava (`pickup.js`). Each item in `nearbyEntities` shows `pickUp: take/leave` with the reason. |
 | `chatMessage` | `text` |
 | `useItem` | `itemName, target?` ("self", "feet", entity id, "x,y,z"): drink or eat, throw (splash potions, pearls, wind charges, snowballs), place buckets, use on blocks or entities (bone meal, flint and steel, shears, name tags, leads) |
 | `knowledge` | `topic` — instant lookup of items, recipes and how-tos |

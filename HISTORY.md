@@ -257,6 +257,43 @@ The user also asked about a claim from Google that Qwen 1.7B gives sub-300 ms re
 
 **How to continue:** `git diff` shows everything uncommitted; `npm run check && npm test` must pass; smoke scripts used so far were throwaway (in /tmp), real tests belong in `test/`.
 
+## 17. "Actually make it intelligent"; could we train a model?; items on the ground
+
+**Asked for:**
+- **Smarter:** make it actually intelligent.
+- **Training:** could we train a Minecraft model that plays like a player, extremely fast?
+- **Ground items:** it should recognise items on the ground and pick them up or leave them, depending on the item and the situation.
+
+**Found:** another session (commits `bb8c319`, `34d01fc`, `88f93fe`) had added:
+- parkour, long-term memory and bot profiles, aggression;
+- an autopilot for the early game, recipe knowledge by level, and exact "get X" planning for tasks.
+
+It also had a stray line that reset the autopilot after nearly every action. That's fixed.
+
+**Done (commit `1cca776`):**
+- **The planner learned smelting and hunting** (`acquire.js`): it plans iron ingots from an empty inventory (wood → wooden pickaxe → stone → stone pickaxe → iron ore → furnace → fuel → smelt), and cooked meat (hunt → collect → cook).
+- **A new `obtainItem` skill:** one model decision ("get an iron pickaxe", "get food"), then the Brain runs every step without asking the model again, at full speed. Prompts and examples steer the model to use it.
+- **The autopilot goes further:** after the stone pickaxe it gets a stone sword, and hunts and cooks when it has no food.
+- **Smelting** places a carried furnace if none is nearby.
+- **`pickup.js`:** take or leave ground items with a reason. The verdicts appear in `nearbyEntities`, `collectDrops` follows them, and busy work only goes for things worth taking.
+- **`TRAINING.md`:**
+  - training from scratch isn't realistic (VPT-scale);
+  - a LoRA fine-tune of the 4B on recorded good decisions is;
+  - `logging.trainingData` records the data.
+- **Tests:** smelting and hunting plans (`test/recipes.test.js`), `test/pickup.test.js`.
+- **Live (flying-squid + mock):** one `obtainItem` decision became a chain of planned steps with explore-and-retry. The test world has no trees, so it couldn't succeed there.
+
+**Not verified yet:**
+- the full `obtainItem` chain on a real server: crafting, furnace placement, smelting, hunting;
+- gift-direction detection with real players.
+
+**Ideas for the next skills:**
+- night shelter;
+- a bed from sheep;
+- armor upgrades;
+- torch-lit diamond mining at the right depth;
+- farming.
+
 ## Where it stands now
 
 **Next for the user:**
