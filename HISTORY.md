@@ -294,6 +294,34 @@ It also had a stray line that reset the autopilot after nearly every action. Tha
 - torch-lit diamond mining at the right depth;
 - farming.
 
+## 18. Dropping items, surroundings, doors vs mining, reasonable builds, niche strategies
+
+**Asked:** can it drop items, build reasonable constructions, understand the layout of its surroundings, use doors or mine out (and know what to mine out), and use niche strategies?
+
+**State before:**
+- **Dropping:** only `giveItem` (walks to a player and tosses).
+- **Surroundings:** just the top 10 block counts.
+- **Doors and digging:** the pathfinder already opened doors, avoided digging into liquids, and never broke player-built blocks (`noGrief`).
+- **Building:** could plan a stone keep with glass windows on day one.
+- **Niche strategies:** in code — clutches, lava, drowning, combat tactics per mob, parkour, truces, mace and pearls.
+
+**Done:**
+- `dropItems` (junk filter, valuables only by exact name).
+- Making room: when full and something worth having is on the ground, it throws out junk first.
+- `Perception.layout()`.
+- Building picks practical materials and leaves the windows open until it has glass.
+
+**Live:** `layout: outdoors` on flat ground; `dropItems junk` dropped the dirt and kept the diamonds. flying-squid refuses some tosses, so the rotten flesh stayed.
+
+**Not done yet (situational strategies worth adding as code skills):**
+- shelter for the night (dig in, or block yourself in);
+- pillaring up away from mobs;
+- lighting caves;
+- bridging gaps;
+- strip mining at the right depth for diamonds;
+- getting out of a pit or hole on purpose;
+- a bed from sheep.
+
 ## Where it stands now
 
 **Next for the user:**

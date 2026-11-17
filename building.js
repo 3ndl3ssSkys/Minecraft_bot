@@ -167,7 +167,11 @@ function planBuilding (bot, opts = {}, helpers = {}) {
   const p = bot.entity.position.floored()
   const seedText = `${bot.username}|${opts.concept || ''}|${p.x},${p.z}|${Date.now() >> 16}`
   const rng = seededRandom(seedText)
-  const styleName = styleFromConcept(opts.concept, purpose, rng)
+  let styleName = styleFromConcept(opts.concept, purpose, rng)
+  // Be practical: a stone keep only when it asked for one or has the stone; otherwise wood.
+  const invNow = inventoryCounts(bot)
+  const stoneHave = Object.entries(invNow).filter(([n]) => CLASSES.STONE(n)).reduce((a, [, c]) => a + c, 0)
+  if (styleName === 'keep' && !/stone|castle|keep|fort/i.test(opts.concept || '') && stoneHave < 64) styleName = 'cabin'
   // Skill shapes ambition: a beginner builds a box; a master adds every touch.
   const cx = Number.isFinite(opts.complexity) ? opts.complexity : 7
   const style = { ...STYLES[styleName] }
@@ -389,6 +393,10 @@ function planBuilding (bot, opts = {}, helpers = {}) {
   // --- Materials (now that we know how much of each role we need).
   const registry = bot.registry
   const inv = inventoryCounts(bot)
+  // No glass yet (it needs smelting): leave the windows open; glass can go in later.
+  if (!Object.keys(inv).some((n) => /glass|iron_bars/.test(n))) {
+    for (const c of cells.values()) if (c.role === 'window') { c.remove = true; delete c.role }
+  }
   const roleNeeds = {}
   for (const c of cells.values()) if (!c.remove && !c.fixed) roleNeeds[c.role] = (roleNeeds[c.role] || 0) + 1
   const candidates = {

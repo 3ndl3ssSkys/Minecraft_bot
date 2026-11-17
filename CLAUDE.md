@@ -113,6 +113,12 @@ Reflexes (every physics tick, 20/s, no LLM): falls, lava, drowning, hits → tak
 - **The mind keeps a say** (user asked "can the AI still decide to stop attacking?"): reflexes start fights, but `pvp.rethinkSeconds` check-ins (reaction priority → fast lane) can stop or flee; chat replies get the last 90 s of memory events so words match actions.
 - **Goals** (user's design): overall → encompassing/long-term → goal → subgoals, each set or self-made; set goals stay (detours instead), own goals can change (`new_goal`). Config goals re-apply only when the config changed (`lastConfig`).
 - **Skills in code, the model chooses** (user: "actually make it intelligent"): `obtainItem` sets `Brain.obtain`; `obtainStep` (in the loop after tasks, before the plan queue and the autopilot) runs `acquire.js` steps until it has the item, explores after 2 failures, stops after 3 searches / 80 steps / 25 min, goes back to a furnace that's still cooking (`o.smelt`). The autopilot then gets a stone sword and hunts and cooks when it has no food. Training a model from scratch isn't realistic; fine-tuning the 4B on recorded good decisions is (TRAINING.md, `logging.trainingData`).
+- **Layout and building sense** (user asked whether it understands its surroundings, doors vs mining, reasonable builds):
+  - `Perception.layout()` (state `layout`): outdoors / under a roof / underground, blocked sides, drop-offs, a door nearby, darkness.
+  - Doors: the pathfinder opens them (`pathfinding.openDoors`).
+  - Digging: it digs only when it's cheaper than walking around (`digCost` 4); `dontCreateFlow` keeps it from digging into water or lava; `noGrief` stops it digging through player-built blocks.
+  - `planBuilding` picks wood instead of a stone keep unless it has 64+ stone or the concept asks for stone, and leaves the windows open until it has glass.
+  - `dropItems` throws things away.
 - **Ground items** (user asked): take or leave with a reason, never other players' things while they're around; gifts only when tossed toward the bot (thrower facing it, within 8 blocks).
 - **Dying on purpose** (user asked for it): the `respawn` action, never on hardcore, 10-min cooldown, `reflexes.standDown` so it doesn't clutch out of its own choice; its death isn't mourned, recorded as a danger zone, or turned into a lesson.
 - **Senses:**

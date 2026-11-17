@@ -652,6 +652,7 @@ The bot knows Minecraft the way an experienced player does:
 | `attackTarget` | `entityId, maxSeconds?, style?, sparring?` — style: aggressive, balanced, cautious, hitAndRun, comboAxe, ranged, mace |
 | `retreat` | `entityId, distance?` |
 | `eatFood` | `foodName?` |
+| `dropItems` | `itemNames, keep?` — throw items on the ground (`"junk"` = rotten flesh, seeds, dirt, gravel...; valuables only when named exactly). `collectDrops` also throws out a stack of junk by itself when the inventory is full and something better is lying there. |
 | `obtainItem` | `itemName, count?` — get any item by doing the whole chain itself: wood, the tools it needs, mining with the right pickaxe, crafting, smelting (furnace and fuel included) and hunting. `"food"` = a cooked meat the animals around give. One model decision, then every step runs at full speed without asking the model again; it looks elsewhere when something isn't found and gives up after a few tries. |
 | `collectDrops` | `radius?, itemName?, everything?` — picks up what's worth having: valuables, what its goal or task needs, useful things, its own items where it died. Leaves things another player dropped for themselves or lost when they died, junk, and anything next to a monster or in lava (`pickup.js`). Each item in `nearbyEntities` shows `pickUp: take/leave` with the reason. |
 | `chatMessage` | `text` |

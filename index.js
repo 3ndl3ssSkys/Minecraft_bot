@@ -823,6 +823,51 @@ class Perception {
     return Object.fromEntries(Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 10))
   }
 
+  /**
+   * The shape of the place, in a few words: outdoors / under a roof / underground, which ways are
+   * blocked or open, drop-offs, a door close by, darkness. Cheap (a few hundred block reads).
+   */
+  layout () {
+    const { bot } = this
+    const p = bot.entity.position.floored()
+    const solid = (b) => b && b.boundingBox === 'block'
+    const out = []
+    let roof = null
+    for (let dy = 2; dy <= 24; dy++) if (solid(bot.blockAt(p.offset(0, dy, 0)))) { roof = dy; break }
+    if (roof === null) out.push('outdoors')
+    else if (p.y < 56 && roof > 0) out.push(`underground (y ${p.y}, rock ${roof} above)`)
+    else out.push(`under a roof ${roof} blocks up`)
+    const dirs = { north: [0, -1], south: [0, 1], east: [1, 0], west: [-1, 0] }
+    const blocked = []
+    const drops = []
+    for (const [name, [dx, dz]] of Object.entries(dirs)) {
+      let free = 0
+      for (let i = 1; i <= 6; i++) {
+        if (solid(bot.blockAt(p.offset(dx * i, 0, dz * i))) || solid(bot.blockAt(p.offset(dx * i, 1, dz * i)))) break
+        free++
+      }
+      if (free === 0) blocked.push(name)
+      for (let i = 1; i <= Math.min(3, free); i++) {
+        let depth = 0
+        while (depth < 10 && !solid(bot.blockAt(p.offset(dx * i, -1 - depth, dz * i)))) depth++
+        if (depth >= 4) { drops.push(`${name} (${depth >= 10 ? '10+' : depth} down)`); break }
+      }
+    }
+    if (blocked.length === 4) out.push('walled in on all sides')
+    else if (blocked.length) out.push(`blocked to the ${blocked.join(' and ')}`)
+    if (drops.length) out.push(`drop-off to the ${drops.join(', ')}`)
+    const doorIds = this.doorIds || (this.doorIds = bot.registry.blocksArray.filter((b) => /_door$/.test(b.name)).map((b) => b.id))
+    const door = bot.findBlock({ matching: doorIds, maxDistance: 8 })
+    if (door) {
+      const d = door.position.minus(p)
+      const side = Math.abs(d.x) > Math.abs(d.z) ? (d.x > 0 ? 'east' : 'west') : (d.z > 0 ? 'south' : 'north')
+      out.push(`a door ${Math.round(door.position.distanceTo(p))} blocks ${side}`)
+    }
+    const light = bot.blockAt(p.offset(0, 1, 0))?.light
+    if (roof !== null && Number.isFinite(light) && light < 8) out.push('dark here (monsters can spawn)')
+    return out.join('; ')
+  }
+
   /** Signs it can see and read. */
   visibleSigns () {
     const { bot } = this
@@ -901,6 +946,7 @@ class Perception {
       nearbyEntities: this.nearbyEntities(),
       nearbyBlocks: this.nearbyBlocks(),
       surroundings: this.surroundings(),
+      layout: this.layout(),
       onlinePlayers: Object.keys(bot.players).filter((n) => n !== bot.username),
       status: {
         currentAction: executor.current ? executor.current.name : null,
@@ -1340,6 +1386,7 @@ ${mindBlock(agent)}
 - Your senses are realistic: you only know what's in nearbyEntities and status.senses. Odd sounds with nobody around → be careful and check it out.
 - Be a good guest: don't break other players' builds, never take from someone's private chest (inspectContainer tells you whose it is), follow rules on signs and in chat.
 - People: nearbyEntities shows your trust in each player and how they seem. Generous with friends, guarded with strangers, keep away from people who hurt you. Fight players only if they attack you or ask for a duel (sparring: true).
+- layout tells you the shape of the place (outdoors/underground, blocked sides, drop-offs, doors, darkness). Walking uses doors by itself and only digs through natural blocks when there's no easier way, never through other players' builds.
 - Items on the ground: nearbyEntities shows "pickUp: take/leave" with a reason (whose it is, junk, danger). collectDrops follows that; don't grab other players' things.
 - To get an item (tools, armor, food, torches, materials), use obtainItem: it does the whole chain itself (wood, tools, mining, crafting, smelting, hunting) much faster than you choosing each step. Use mineBlock/craftItem only for a single specific step.
 - Your feelings (status.feelings) colour how you play. Building: planBuilding with your own idea, then build. Unsure how something works: knowledge.
@@ -1371,6 +1418,7 @@ ${mindBlock(agent)}
 - If a player asked you for something and you agreed (see status.task / recentChat), prioritise it.
 - Goals (status.goals): an overall goal → long-term goals → your current goal → its steps. Choose actions that move the current step forward, and keep the bigger goals in mind. Each turn report "goal" (your current goal), "subgoal" (the step you're on) and "goalStatus": working, subgoal_done (you just finished that step), goal_done (the whole current goal is finished), blocked (you can't make progress — say why in thought) or new_goal (you've changed your mind and are dropping the current goal for this one; not for goals set for you). Urgent things (danger, hunger, nightfall, a player's task) come first: just name them as your goal with "working" — that's a detour, and you get back to the current goal afterwards (status.goals.detour). The planner keeps the bigger goals up to date; you can still change your own whenever you want.
 - Survive: eat when hungry, avoid lava, deep falls and status.dangerZonesNearby, fight or flee from hostile mobs, be careful at night.
+- layout tells you the shape of the place (outdoors/underground, blocked sides, drop-offs, doors, darkness). Walking uses doors by itself and only digs through natural blocks when there's no easier way, never through other players' builds.
 - Items on the ground: nearbyEntities shows "pickUp: take/leave" with a reason (whose it is, junk, danger). collectDrops follows that; don't grab other players' things.
 - To get an item (tools, armor, food, torches, materials), use obtainItem: it does the whole chain itself (wood, tools, mining, crafting, smelting, hunting) much faster than you choosing each step. Use mineBlock/craftItem only for a single specific step.
 - Use the game's systems: smelt ores and cook food (smeltItem), store loot in chests (status.knownContainers remembers what's where), sleep in a bed at night, open doors, fish, and useItem for potions, pearls, buckets, bone meal and the like. If you're unsure how something works or how to get an item, use knowledge — but you only know what a player of your skill knows; otherwise experiment or ask.

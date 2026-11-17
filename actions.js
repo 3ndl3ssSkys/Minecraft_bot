@@ -30,6 +30,7 @@ const building = require('./building')
 const { signText } = require('./containers')
 
 const safe = (fn) => { try { return fn() } catch { return undefined } }
+const { JUNK, VALUABLE } = require('./pickup')
 
 function round1 (n) {
   return Math.round(n * 10) / 10
@@ -473,7 +474,7 @@ function insideOwnBuild (bot, pos) {
 }
 
 /** Actions that need block breaking or inventory windows — not available through ViaBedrock yet. */
-const BEDROCK_UNSUPPORTED = new Set(['obtainItem', 'mineBlock', 'craftItem', 'smeltItem', 'storeItems', 'takeItems', 'inspectContainer', 'planBuilding', 'build', 'cancelBuilding'])
+const BEDROCK_UNSUPPORTED = new Set(['dropItems', 'obtainItem', 'mineBlock', 'craftItem', 'smeltItem', 'storeItems', 'takeItems', 'inspectContainer', 'planBuilding', 'build', 'cancelBuilding'])
 
 // Wall-mounted things: place them against the side of a block, not on the floor.
 const WALL_MOUNTED = /^(torch|soul_torch|ladder|\w+_wall_sign|lever|\w+_button|tripwire_hook)$/
@@ -1002,6 +1003,11 @@ const ACTIONS = {
         return Boolean(args.everything) && /junk|plenty|too far/.test(v.why) // never other players' things
       }
       const left = Object.values(ctx.bot.entities).filter((e) => e.name === 'item' && e.position.distanceTo(ctx.bot.entity.position) <= radius && !filter(e))
+      // Full, and something worth having is lying there: throw out a stack of junk first, like a player would.
+      if (ctx.bot.inventory.emptySlotCount() === 0 && Object.values(ctx.bot.entities).some((e) => e.name === 'item' && filter(e))) {
+        const junk = ctx.bot.inventory.items().find((i) => JUNK.test(i.name))
+        if (junk) await ctx.bot.toss(junk.type, null, junk.count)
+      }
       const n = await collectNearbyDrops(ctx, ctx.bot.entity.position, radius, 30000, filter)
       const leftNote = left.length ? ` Left ${left.length} (${[...new Set(left.map((e) => verdict(e)?.why).filter(Boolean))].slice(0, 2).join('; ')}).` : ''
       if (n === 0) throw new ActionError('NOT_FOUND', `Nothing worth picking up within ${radius} blocks.${leftNote}`)
@@ -1625,6 +1631,38 @@ const ACTIONS = {
     }
   },
 
+  dropItems: {
+    description: 'Throw items out of your inventory onto the ground: to make room, or get rid of junk. "junk" = rotten flesh, seeds, dirt, gravel and the like. ' +
+      'Tools, armor and valuables are only dropped when named exactly. To give something to a player, use giveItem instead.',
+    params: { itemNames: 'string, e.g. "rotten_flesh, dirt" or "junk"', keep: 'number, optional: how many of each to keep (default 0)' },
+    async run (ctx, args) {
+      const { bot } = ctx
+      const wanted = argString(args, 'itemNames').toLowerCase().split(/\s*,\s*/).map(normalizeName).filter(Boolean)
+      const keep = Math.floor(argNumber(args, 'keep', { min: 0, max: 2304, def: 0 }))
+      const junk = wanted.includes('junk')
+      const matches = (n) => wanted.includes(n) || (junk && JUNK.test(n)) || wanted.some((w) => w.length > 3 && !VALUABLE.test(n) && n.includes(w))
+      const dropped = {}
+      for (const item of bot.inventory.items()) {
+        if (!matches(item.name)) continue
+        const have = bot.inventory.items().filter((i) => i.name === item.name).reduce((a, i) => a + i.count, 0)
+        const n = Math.min(item.count, have - keep)
+        if (n <= 0) continue
+        try {
+          await bot.toss(item.type, null, n)
+        } catch (err) {
+          if (err.code === 'ABORTED') throw err
+          ctx.log.debug(`dropping ${item.name}: ${err.message}`) // some servers answer late; count what actually left
+        }
+        await sleep(150)
+        const now = bot.inventory.items().filter((i) => i.name === item.name).reduce((a, i) => a + i.count, 0)
+        if (now < have) dropped[item.name] = (dropped[item.name] || 0) + (have - now)
+      }
+      const list = Object.entries(dropped).map(([k, v]) => `${v} ${k}`).join(', ')
+      if (!list) throw new ActionError('NOT_FOUND', `Nothing like "${wanted.join(', ')}" to drop (keeping ${keep}).`)
+      return `Dropped ${list}.`
+    }
+  },
+
   obtainItem: {
     description: 'Get any item by doing the whole chain yourself, step by step, without stopping to think: gathers wood, makes the tools it needs, ' +
       'mines with the right pickaxe, crafts, smelts (furnace and fuel included) and hunts animals. The best way to get tools, armor, food or materials. ' +
@@ -1822,6 +1860,7 @@ async function performGesture (bot, gesture, signal) {
 
 /** One-line hints for the compact prompt (small GPUs read every token of the prompt, every decision). */
 const SHORT = {
+  dropItems: 'throw items on the ground ("junk" = rotten flesh, seeds, dirt...); to give, use giveItem',
   obtainItem: 'GET ANY ITEM: does the whole chain itself (wood, tools, mining, crafting, smelting, hunting) - the best way to get things',
   moveToBlock: 'walk/climb/swim to a coordinate from the state',
   moveToPlayer: 'walk to a player',
