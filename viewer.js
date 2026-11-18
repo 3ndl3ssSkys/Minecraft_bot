@@ -203,6 +203,19 @@ class BotViewer {
     app.get('/view/', viewIndex)
     app.get('/view/index.html', viewIndex)
     app.get('/view/addon.js', (req, res) => res.sendFile(path.join(__dirname, 'web', 'view-addon.js')))
+    // What the view needs to look like the game, 10 times a second: time, weather, light, held item, swings, digging.
+    app.get('/view/env', (req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive' })
+      let last = ''
+      const send = () => {
+        const e = safe(() => this.env())
+        const text = e && JSON.stringify(e)
+        if (text && text !== last) { last = text; res.write(`data: ${text}\n\n`) }
+      }
+      send()
+      const timer = setInterval(send, 100)
+      req.on('close', () => clearInterval(timer))
+    })
     app.get('/icons', (req, res) => {
       const icons = this.icons()
       const out = {}
@@ -279,6 +292,68 @@ class BotViewer {
     const out = { key: forge.pki.privateKeyToPem(keys.privateKey), cert: forge.pki.certificateToPem(cert) }
     try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(out)) } catch { /* use it this time anyway */ }
     return out
+  }
+
+  /**
+   * The scene around the camera for the 3D view (web/view-addon.js): sky and weather, the light where its eyes are,
+   * what it holds, arm swings and the block it's breaking, so the view can draw them the way the game does.
+   */
+  env () {
+    const bot = this.agent.bot
+    if (!bot?.entity) return null
+    this.hookSwings(bot)
+    const p = bot.entity.position
+    const eye = bot.blockAt(p.offset(0, 1.62, 0))
+    const feet = bot.blockAt(p)
+    const head = safe(() => bot.inventory.slots[bot.getEquipmentDestSlot('head')]?.name) || ''
+    const biome = feet?.biome
+    // By name: unknown biomes read as temperature 0, which would make it snow everywhere.
+    const snowy = Boolean(biome?.name && (/snow|frozen|ice|grove|jagged|frosted/.test(biome.name) || biome.precipitation === 'snow'))
+    const v = bot.entity.velocity || { x: 0, z: 0 }
+    const dig = this.digging && bot.targetDigBlock ? this.digging : null
+    return {
+      ver: this.textureVersion(),
+      time: bot.time?.timeOfDay ?? 6000,
+      day: bot.time?.day ?? 0,
+      cycle: bot.time?.doDaylightCycle !== false,
+      dim: String(bot.game?.dimension || 'overworld').replace('minecraft:', '').replace(/^the_/, ''),
+      rain: Boolean(bot.isRaining),
+      thunder: (bot.thunderState ?? 0) > 0,
+      snowy,
+      // 0..1: how bright it is where its eyes are (sky light by time of day, or torches and the like)
+      sky: eye?.skyLight ?? 15,
+      block: eye?.light ?? 0,
+      eyeIn: /water|bubble_column/.test(eye?.name || '') ? 'water' : /lava/.test(eye?.name || '') ? 'lava' : /powder_snow/.test(eye?.name || '') ? 'snow' : null,
+      sneak: Boolean(bot.getControlState?.('sneak')),
+      sprint: Boolean(bot.getControlState?.('sprint')),
+      ground: Boolean(bot.entity.onGround),
+      speed: Math.round(Math.hypot(v.x, v.z) * 1000) / 1000,
+      held: bot.heldItem?.name || null,
+      slot: bot.quickBarSlot,
+      swing: this.swings || 0,
+      hurt: this.agent.lastHurtAt || 0,
+      health: Math.round(bot.health ?? 20),
+      dead: Boolean(this.agent.dead),
+      pumpkin: head === 'carved_pumpkin',
+      viewDistance: this.cfg.viewDistance,
+      dig: dig ? { x: dig.pos.x, y: dig.pos.y, z: dig.pos.z, progress: Math.min(1, (Date.now() - dig.at) / Math.max(50, dig.ms)) } : null
+    }
+  }
+
+  /** Count arm swings and remember the block being dug (for the view's hand and crack animations). */
+  hookSwings (bot) {
+    if (bot.__viewHooked) return
+    bot.__viewHooked = true
+    const swing = bot.swingArm?.bind(bot)
+    if (swing) bot.swingArm = (...a) => { this.swings = (this.swings || 0) + 1; return swing(...a) }
+    const dig = bot.dig?.bind(bot)
+    if (dig) {
+      bot.dig = (block, ...a) => {
+        this.digging = { pos: block.position.clone(), at: Date.now(), ms: safe(() => bot.digTime(block)) || 1000 }
+        const done = () => { if (this.digging?.pos?.equals(block.position)) this.digging = null }
+        return dig(block, ...a).finally(done)
+      }
+    }
   }
 
   /** Which prismarine-viewer texture set to use (the nearest version it has). */

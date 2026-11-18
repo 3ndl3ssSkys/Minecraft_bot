@@ -142,7 +142,9 @@
       <button id="bPoint" title="Click something in the view to show it to the bot (P)">Point</button>
       <button id="bCircle" title="Draw a circle around things to show them to the bot (C)">Circle</button>
       <label title="Field of view (Minecraft's Normal is 70)">FOV <input type="range" id="fov" min="30" max="110" step="1"> <span id="fovv"></span></label>
-      <button id="bSmooth" title="Smooth out the camera's turning">Smooth</button>
+      <button id="bSmooth" title="Smooth out the camera's movement and turning">Smooth</button>
+      <button id="bFx" title="Sky, sun and moon, clouds, fog, weather, light, the hand and the rest, like the game">Sky &amp; hand</button>
+      <button id="bBob" title="View bobbing while walking (as in the game's settings)">Bobbing</button>
       <button id="bVoice" title="Talk to it out loud (hands-free: say its name). /voice is a lighter page for a phone or second screen.">Voice</button>
       <button id="bPanel" title="Hide or show the side panel">Panel</button>
     </div>
@@ -564,7 +566,13 @@ let smooth = store.get('smooth', true)
 $('fov').value = fov
 $('fovv').textContent = fov
 $('bSmooth').classList.toggle('on', smooth)
-const tellView = () => { try { $('view').contentWindow.postMessage({ type: 'botView', fov, smooth }, location.origin) } catch {} }
+let fx = store.get('fx', true)
+let bobbing = store.get('bobbing', true)
+$('bFx').classList.toggle('on', fx)
+$('bBob').classList.toggle('on', bobbing)
+const tellView = () => { try { $('view').contentWindow.postMessage({ type: 'botView', fov, smooth, fx, bobbing }, location.origin) } catch {} }
+$('bFx').addEventListener('click', () => { fx = !fx; store.set('fx', fx); $('bFx').classList.toggle('on', fx); tellView() })
+$('bBob').addEventListener('click', () => { bobbing = !bobbing; store.set('bobbing', bobbing); $('bBob').classList.toggle('on', bobbing); tellView() })
 $('fov').addEventListener('input', () => { fov = Number($('fov').value); $('fovv').textContent = fov; store.set('fov', fov); tellView() })
 $('bSmooth').addEventListener('click', () => { smooth = !smooth; store.set('smooth', smooth); $('bSmooth').classList.toggle('on', smooth); tellView() })
 $('view').addEventListener('load', tellView)
@@ -680,7 +688,7 @@ function render (s) {
   S = s
   renderF3(s)
   if (!s.online) { $('invbox').innerHTML = '<div class="off">The bot isn\'t in a world right now.</div>'; invKey = ''; $('hudbar').innerHTML = ''; hudKey = ''; return }
-  if (s.botId !== botId) { botId = s.botId; $('view').src = `/view/${q}${q ? '&' : '?'}fov=${fov}&smooth=${smooth ? 1 : 0}` } // (re)joined: reload the view
+  if (s.botId !== botId) { botId = s.botId; $('view').src = `/view/${q}${q ? '&' : '?'}fov=${fov}&smooth=${smooth ? 1 : 0}&fx=${fx ? 1 : 0}&bob=${bobbing ? 1 : 0}` } // (re)joined: reload the view
   renderHud(s)
   if (tab === 'inv') renderInv(s)
   $('around').textContent = [s.layout, s.players.length ? `players: ${s.players.join(', ')}` : 'no other players online'].filter(Boolean).join(' · ')

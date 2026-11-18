@@ -636,7 +636,18 @@ At `0` it's purely its own call. At `1` it does whatever it physically can. Hard
 ## Watch it in a browser (`viewer`, off by default)
 
 Start it with `npm run viewer` (or `npm start -- --viewer`), or type `!viewer on` in game. Then open **http://localhost:3007**. The page fits the window (no scrolling):
-- **Its view:** first person, live, at Minecraft's normal field of view (70; a slider changes it). The camera eases between head positions so turns don't jerk (the **Smooth** button). Worlds newer than 1.21.4, like 26.1, are translated block by block so they still render.
+- **Its view:** first person, live, at Minecraft's normal field of view (70; a slider changes it).
+  - **Smooth:** the camera glides between the positions and head turns the bot reports, instead of jumping in steps (the **Smooth** button).
+  - **Like the game** (the **Sky & hand** button), all from Minecraft's own textures:
+    - the sky by time of day, with sunrise and sunset colours;
+    - the sun, the moon in its current phase, stars, drifting clouds;
+    - fog at the edge of the view, rain or snow when it's outside;
+    - darker nights and caves; blue fog under water, orange in lava, red in the Nether;
+    - Steve's arm or the item or block it holds, with the swing and the equip dip;
+    - cracks on the block it's breaking;
+    - the vignette, the pumpkin blur, the camera tilting when it's hit, and "You died!".
+  - **View bobbing** while walking, as in the game (the **Bobbing** button), and lower eyes when sneaking.
+  - Worlds newer than 1.21.4, like 26.1, are translated block by block so they still render.
 - **The game's HUD:** hearts, food, the XP bar and the hotbar with the selected slot, drawn with Minecraft's own textures. In the corner, like F3: coordinates, facing, dimension, game mode, day and time, what it's doing and its goal. You always see the coordinates; the page says when the bot itself can't.
 - **Chat like the game's:** the last few lines fade out over the view. **T** (or the Chat button) opens the whole history to scroll through, filtered by chat, thoughts or actions, with the message box:
   - **Talk to it:** a message from you as its owner.

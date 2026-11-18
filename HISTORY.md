@@ -707,6 +707,31 @@ It also had a stray line that reset the autopilot after nearly every action. Tha
 - Setup offers to download the chat model.
 - Docs fixed (README, START-HERE troubleshooting).
 
+## 31. A smooth viewport that looks like the game
+
+**Asked:** "the viewport jitters around and isn't smooth. Get as many Minecraft assets in there to feel natural."
+
+**Found:**
+- prismarine-viewer starts a new 50 ms tween to the bot's position on every update (up to 20 a second, unevenly). The tweens overlap and fight, so the camera moved in stop-go steps.
+- The turning was already smoothed, the position wasn't.
+- The scene was a flat light-blue background with no fog, sun, weather, hand or day and night.
+
+**Built (`web/view-addon.js`, fed by a new `/view/env` stream from `viewer.js`):**
+- **Smooth camera:** the viewer's tweens only set a target; the drawn camera eases toward it at render time (`updateMatrixWorld` override).
+  - Measured over 180 frames while walking: frames with no movement 10 → 0, step variation 105% → 41%.
+  - Plus the game's view bobbing, lower eyes when sneaking, the hurt tilt and the death fall.
+- **The world, from the textures prismarine-viewer ships:**
+  - sky dome coloured by time of day, sunrise and sunset glow on the horizon;
+  - sun and moon (correct phase, east to west), stars, a cloud layer at y 192 that drifts and fades out;
+  - fog at the view's edge (blue under water, orange in lava, red in the Nether, purple in the End);
+  - rain or snow when outside, light scaled by the sky and block light at the eyes, with a floor so nights stay readable.
+- **First person:** Steve's arm (skin UVs), or the held item or block, with the swing (constant while digging) and the equip dip. Cracks (destroy stages) on the block being dug. Vignette, underwater tint, pumpkin blur, "You died!".
+- **Panel:** **Sky & hand** and **Bobbing** buttons, remembered per browser.
+
+**Tested:** live on flying-squid with headless Chromium, with screenshots at dusk, noon, night, empty hand, a held log, a pickaxe and a sword. The panel still fits 1366×768 and a phone with no scrolling.
+
+**Not verified:** rain and snow and the under-water look (flying-squid has no weather or water here), cracks mid-dig on screen, and how it runs on the user's GPU.
+
 ## Where it stands now
 
 **Next for the user:**
