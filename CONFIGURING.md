@@ -218,6 +218,17 @@ You can also put the whole object inline: `"personality": { "name": "...", ... }
 - **`instructions`:** standing rules it always follows.
 - **In game:** `!mind like a speedrunner`, `!mind style explorer`, `!mind risk 0.2`, `!mind curious 0.9`, `!mind add always sleep at night`, `!mind clear`.
 
+**How player-like it moves and handles things** (all on by default, in `behavior`):
+
+```json
+"behavior": { "smoothTurning": true, "sprintJump": true, "menuTime": true, "nightShelter": true }
+```
+
+- **`smoothTurning`:** it turns its head over a few ticks instead of snapping, faster at higher skill.
+- **`sprintJump`:** at Complicated level and up it sprint-jumps along long straight paths; lower levels walk.
+- **`menuTime`:** crafting, furnaces, chests and armor take menu time, about 2 s for a beginner and a blink for a master.
+- **`nightShelter`:** at dusk it heads home to its bed, or digs in if it has none.
+
 ---
 
 ## Chat and reactions

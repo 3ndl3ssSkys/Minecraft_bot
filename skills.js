@@ -338,7 +338,58 @@ function install (ACTIONS, h, SHORT = {}) {
     }
   }
 
+  ACTIONS.pickUpBlock = {
+    description: 'Break a block you placed yourself (crafting table, furnace, bed...) and pick it up to take it with you. ' +
+      'Without x,y,z: the nearest one of blockType you put down.',
+    params: { blockType: 'string, optional, e.g. "crafting_table"', x: 'number, optional', y: 'number, optional', z: 'number, optional' },
+    async run (ctx, args) {
+      const { bot } = ctx
+      let pos = [args.x, args.y, args.z].every((n) => Number.isFinite(Number(n))) ? new Vec3(Number(args.x), Number(args.y), Number(args.z)).floored() : null
+      const want = args.blockType ? String(args.blockType).toLowerCase().replace(/\s+/g, '_') : null
+      if (!pos) {
+        const mine = (ctx.places?.placed || []).filter((p) => p.dim === ctx.dimension?.() && (!want || p.name === want))
+          .map((p) => new Vec3(p.x, p.y, p.z)).filter((p) => bot.blockAt(p) && bot.blockAt(p).name !== 'air')
+          .sort((a, b) => a.distanceTo(bot.entity.position) - b.distanceTo(bot.entity.position))
+        pos = mine[0] || null
+        if (!pos && want && bot.registry.blocksByName[want]) pos = bot.findBlock({ matching: bot.registry.blocksByName[want].id, maxDistance: 8 })?.position || null
+      }
+      if (!pos) throw new ActionError('NOT_FOUND', `No ${want ? want.replace(/_/g, ' ') : 'block'} of yours around to pick up.`)
+      const block = bot.blockAt(pos)
+      if (!block || block.boundingBox === 'empty' && !/_bed$|torch/.test(block.name)) { ctx.places?.forget(pos, ctx.dimension?.()); throw new ActionError('NOT_FOUND', 'It is not there any more.') }
+      const name = block.name
+      const before = bot.inventory.items().filter((i) => i.name === name || (/_bed$/.test(name) && i.name === name)).reduce((a, i) => a + i.count, 0)
+      if (bot.entity.position.distanceTo(pos.offset(0.5, 0.5, 0.5)) > 4) {
+        await gotoGoal(ctx, new goals.GoalNear(pos.x, pos.y, pos.z, 2), { timeoutMs: 20000, label: name })
+      }
+      await equipToolFor(ctx, block).catch(() => {})
+      await digWithAbort(ctx, bot.blockAt(pos))
+      ctx.places?.forget(pos, ctx.dimension?.())
+      if (h.collectNearbyDrops) await h.collectNearbyDrops(ctx, pos.offset(0.5, 0.5, 0.5), 5, 5000, (e) => { try { return e.getDroppedItem()?.name === name } catch { return true } }).catch(() => {})
+      const after = bot.inventory.items().filter((i) => i.name === name).reduce((a, i) => a + i.count, 0)
+      return after > before ? `Picked up your ${name.replace(/_/g, ' ')}.` : `Broke the ${name.replace(/_/g, ' ')}, but it didn't come back to you (wrong tool, or it's lying on the ground).`
+    }
+  }
+
+  ACTIONS.organizeHotbar = {
+    description: 'Tidy your hotbar the way you always keep it: sword, pickaxe, axe, shovel, blocks, torches, bucket, food.',
+    params: {},
+    async run (ctx) {
+      const { bot } = ctx
+      const moves = require('./habits').hotbarMoves(bot.inventory.slots)
+      if (!moves.length) return 'Hotbar is already tidy.'
+      let done = 0
+      for (const m of moves) {
+        throwIfAborted(ctx.signal)
+        try { await bot.moveSlotItem(m.from, m.to); done++ } catch { break }
+        await sleep(150 + Math.random() * 250) // dragging items around takes a moment
+      }
+      return `Tidied the hotbar (${done} moves).`
+    }
+  }
+
   Object.assign(SHORT, {
+    organizeHotbar: 'tidy the hotbar (sword, pickaxe, axe, shovel, blocks, torches, bucket, food)',
+    pickUpBlock: 'take back a block you placed (crafting table, furnace, bed) before leaving',
     shelter: 'get through the night: sleep in a bed, or dig in, cover up and wait for morning',
     pillarUp: 'jump-place blocks under yourself (escape mobs, reach up, get out of a hole)',
     climbOut: 'get out of a pit or hole (pillar up or dig stairs)',

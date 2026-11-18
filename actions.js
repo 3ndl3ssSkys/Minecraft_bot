@@ -163,20 +163,34 @@ function describeMissing (bot, itemDef, name) {
 /** Put a block from the inventory on the ground right next to us. */
 async function placeNearby (ctx, itemName) {
   const { bot } = ctx
-  const item = findInventoryItem(bot, itemName)
-  if (!item) throw new ActionError('MISSING_ITEM', `No "${itemName}" in inventory.`)
+  if (!findInventoryItem(bot, itemName)) throw new ActionError('MISSING_ITEM', `No "${itemName}" in inventory.`)
   const base = bot.entity.position.floored()
+  let tries = 0
+  let lastErr = null
+  // A placement the server doesn't confirm (lag, protection plugins, a spot it won't allow) is retried on another spot.
   for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1], [2, 0], [-2, 0], [0, 2], [0, -2]]) {
     for (const dy of [0, 1, -1]) {
       const p = base.offset(dx, dy, dz)
       const here = bot.blockAt(p); const below = bot.blockAt(p.offset(0, -1, 0)); const above = bot.blockAt(p.offset(0, 1, 0))
-      if (here && here.boundingBox === 'empty' && !/water|lava/.test(here.name) && below && below.boundingBox === 'block' && (!above || above.boundingBox === 'empty')) {
+      if (!(here && here.boundingBox === 'empty' && !/water|lava/.test(here.name) && below && below.boundingBox === 'block' && (!above || above.boundingBox === 'empty'))) continue
+      const item = findInventoryItem(bot, itemName)
+      if (!item) throw new ActionError('MISSING_ITEM', `No "${itemName}" in inventory.`)
+      try {
         await placeAt(ctx, p, item)
-        return p
+      } catch (err) {
+        if (err.code === 'ABORTED') throw err
+        lastErr = err
       }
+      for (let i = 0; i < 10; i++) { // the block update can arrive a few ticks later
+        if (bot.blockAt(p)?.name === item.name) return p
+        await sleep(100)
+      }
+      if (++tries >= 3) break
     }
+    if (tries >= 3) break
   }
-  throw new ActionError('NO_SPACE', 'There is no free spot next to you to place it.')
+  const left = inventorySummary(bot)[normalizeName(itemName)] || 0
+  throw new ActionError('PLACE_FAILED', `Couldn't put the ${itemName.replace(/_/g, ' ')} down here${lastErr ? ` (${lastErr.message})` : ''}. You still carry ${left}: don't make another. Move to open, flat ground (or somewhere you're allowed to build) and try again.`)
 }
 
 function resolveBlockIds (bot, rawName) {
@@ -544,6 +558,7 @@ async function placeAt (ctx, pos, item, { clearSoft = true } = {}) {
     if (sneak) bot.setControlState('sneak', false)
   }
   if (/^(chest|trapped_chest|barrel|\w*shulker_box)$/.test(item.name)) ctx.containers?.onPlaced(pos, item.name)
+  ctx.placed?.(pos, item.name)
 }
 
 /** Look inside a container and remember what's in it. */
@@ -836,6 +851,7 @@ const ACTIONS = {
       if (!dest) dest = ARMOR_SLOTS.find(([re]) => re.test(item.name))?.[1] || 'hand'
       const valid = ['hand', 'off-hand', 'head', 'torso', 'legs', 'feet']
       if (!valid.includes(dest)) throw new ActionError('INVALID_ARGS', `destination must be one of ${valid.join(', ')}.`)
+      if (dest !== 'hand') await ctx.uiPause?.('equip') // armor and the off-hand go through the inventory screen
       try {
         await bot.equip(item, dest)
       } catch (err) {
@@ -1115,9 +1131,8 @@ const ACTIONS = {
             if (!r) throw new ActionError('NEED_CRAFTING_TABLE', `${name} needs a crafting table and you don't have the wood for one (4 planks). Mine a log first.`)
             await bot.craft(r, 1, null)
           }
-          await placeNearby(ctx, 'crafting_table')
-          tableBlock = bot.findBlock({ matching: bot.registry.blocksByName.crafting_table.id, maxDistance: 8 })
-          if (!tableBlock) throw new ActionError('NEED_CRAFTING_TABLE', 'Placed a crafting table but cannot find it.')
+          const at = await placeNearby(ctx, 'crafting_table')
+          tableBlock = bot.blockAt(at)
           await craftIntermediates(ctx, itemDef, count)
           tableRecipes = bot.recipesFor(itemDef.id, null, 1, tableBlock)
           if (tableRecipes.length === 0) throw new ActionError('MISSING_MATERIALS', describeMissing(bot, itemDef, name))
@@ -1135,6 +1150,7 @@ const ACTIONS = {
       const perCraft = recipe.result?.count || 1
       let crafts = count
       while (crafts > 1 && bot.recipesFor(itemDef.id, null, crafts * perCraft, table).length === 0) crafts--
+      await ctx.uiPause?.('craft')
       try {
         await bot.craft(recipe, crafts, table)
       } catch (err) {
@@ -1201,6 +1217,7 @@ const ACTIONS = {
         signal.addEventListener('abort', onAbort, { once: true })
       })
       throwIfAborted(signal)
+      if (bed?.position) ctx.places?.onSlept(bed.position, ctx.dimension(), bot.time?.day) // where it wakes up now: home
       return bot.isSleeping ? 'Lying in bed, waiting for the others to sleep.' : 'Slept through the night.'
     }
   },
@@ -1219,6 +1236,7 @@ const ACTIONS = {
       await goNextTo(ctx, block, block.name)
 
       const furnace = await bot.openFurnace(block)
+      await ctx.uiPause?.('container')
       let collected = 0
       try {
         if (furnace.outputItem()) { collected += furnace.outputItem().count; await furnace.takeOutput() }
@@ -1270,6 +1288,7 @@ const ACTIONS = {
       })
       if (!toStore.length) throw new ActionError('NOTHING_TO_STORE', 'Nothing matching to store.')
       const container = await bot.openContainer(block)
+      await ctx.uiPause?.('container')
       const stored = {}
       try {
         for (const item of toStore) {
@@ -1301,6 +1320,7 @@ const ACTIONS = {
       if (!block) throw new ActionError('NO_CHEST', 'No chest or barrel within 32 blocks.')
       await goNextTo(ctx, block, block.name)
       const container = await bot.openContainer(block)
+      await ctx.uiPause?.('container')
       try {
         const items = container.containerItems()
         const before = {}
@@ -1948,8 +1968,8 @@ class ActionExecutor {
    * @param {object} [deps.memory]   Memory (recent chat, e.g. duel invitations)
    * @param {object} [deps.tasks]    TaskManager (fights the bot agreed to)
    */
-  constructor ({ bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes, parkour, recipes, startObtain, dropVerdict }) {
-    Object.assign(this, { bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes, parkour, recipes, startObtain, dropVerdict })
+  constructor ({ bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes, parkour, recipes, startObtain, dropVerdict, places }) {
+    Object.assign(this, { bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes, parkour, recipes, startObtain, dropVerdict, places })
     this.current = null // { name, args, startedAt, controller }
     this.pauseUntil = 0
     this.pauseListeners = new Set()
@@ -2042,6 +2062,18 @@ class ActionExecutor {
       dropVerdict: this.dropVerdict,
       parkour: this.parkour,
       recipes: this.recipes,
+      places: this.places,
+      dimension: () => String(this.bot.game?.dimension),
+      // Every block it puts down goes on its mental map (stations get picked back up when it leaves; builds stay).
+      placed: (pos, blockName, kind) => this.places?.onPlaced(pos, blockName, kind || (name === 'build' ? 'build' : 'placed'), String(this.bot.game?.dimension)),
+      // Time in a menu (crafting grid, furnace, chest, armor slots), by skill: a beginner hunts for the right slot,
+      // a practised player is in and out in a blink.
+      uiPause: (kind = 'craft') => {
+        const lvl = this.intel?.level?.('survival') ?? 3
+        const base = { craft: 1500, container: 1100, equip: 500 }[kind] ?? 800
+        const ms = Math.max(60, base * Math.max(0.15, 1.15 - lvl / 7) * (0.6 + Math.random() * 0.8))
+        return this.config.behavior.menuTime === false ? Promise.resolve() : abortableSleep(ms, controller.signal)
+      },
       isPaused: () => this.paused,
       onPause: (fn) => { this.pauseListeners.add(fn); return () => this.pauseListeners.delete(fn) },
       signal: controller.signal

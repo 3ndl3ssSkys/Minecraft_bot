@@ -38,8 +38,13 @@ const { RecipeBook } = require('./recipes')
 const { nextAcquireStep, foodTarget } = require('./acquire')
 const F3_FACT = 'f3 coordinates debug screen' // knownFacts key (knowledge.js)
 const { judgeDrop } = require('./pickup')
+const { Vec3 } = require('vec3')
+const commonsense = require('./commonsense')
+const { Places } = require('./places')
+const habits = require('./habits')
 const { BotViewer } = require('./viewer')
 const { installSmoothLook, turnSpeed } = require('./look')
+const { installMotion, adjustLook } = require('./motion')
 const { TaskManager, KINDS: TASK_KINDS, EFFORTS, RISKS } = require('./tasks')
 const combat = require('./combat')
 const knowledge = require('./knowledge')
@@ -267,6 +272,8 @@ const DEFAULT_CONFIG = {
     admins: [], // most !commands (owners can add more with !admin add). Their *requests* are judged like anyone's.
     commandPrefix: '!',
     startingGoal: '', // old name for goals.current (still works)
+    menuTime: true, // crafting, furnaces, chests and armor take time in the menu, longer for beginners
+    sprintJump: true, // experienced players (parkour level 3+) sprint-jump along long straight flat paths, like real players do
     smoothTurning: true, // turn the head over a few ticks like a person instead of snapping (aiming and fights stay instant)
     nightShelter: true, // at nightfall: bed if it has one, otherwise dig in (skilled, armed players keep playing)
     autopilot: true, // early-game basics (logs, wooden and stone pickaxe) by rules, not by asking the model: fast and reliable
@@ -915,6 +922,7 @@ class Perception {
     const hasAny = (re) => Object.keys(inv).some((n) => re.test(n))
     if (state.world.phase === 'night' || state.world.phase === 'dusk') h.push('It is dark: hostile mobs spawn. Consider shelter, torches or staying near light.')
     if (!hasAny(/_pickaxe$/)) h.push('You have no pickaxe.')
+    h.push(...commonsense.carryHints(inv, this.bot.inventory.items()))
     if (this.agent.recipes && !this.agent.recipes.knowsEverything) h.push(`Recipes: ${this.agent.recipes.describe()}. If craftItem says you don't know one, use experimentCrafting or askForHelp.`)
     const count = (re) => Object.entries(inv).filter(([n]) => re.test(n)).reduce((a, [, c]) => a + (Number(c) || 0), 0)
     const logsN = count(/_log$/)
@@ -927,6 +935,12 @@ class Perception {
     else if (mode === 'adventure') h.push('Adventure mode: you can\'t break or place blocks here. Explore, talk, trade, fight, use doors and buttons.')
     else if (mode === 'spectator') h.push('Spectator mode: you can only look around, follow players and talk.')
     if (this.bot.game?.hardcore) h.push('Hardcore: you have ONE life. Play it safe; avoid needless risks.')
+    const day = this.bot.time?.day
+    if (Number.isFinite(day)) {
+      this.agent.firstDay ??= day
+      const awake = day - (this.agent.places.sleptDay ?? this.agent.firstDay)
+      if (awake >= 3 && state.self.dimension === 'overworld') h.push(`You haven't slept for ${awake} nights: phantoms will swoop at you at night. Sleep in a bed tonight.`)
+    }
     if (state.self.food <= 6) h.push('You are hungry; eat or find food soon.')
     if (state.self.health <= 8) h.push('Your health is low; avoid fights and eat to regenerate.')
     if (state.inventory.freeSlots <= 2) h.push('Your inventory is almost full.')
@@ -974,6 +988,7 @@ class Perception {
       nearbyBlocks: this.nearbyBlocks(),
       surroundings: this.surroundings(),
       layout: this.layout(),
+      places: this.agent.places.forPrompt(e.position, String(bot.game?.dimension), (p) => this.agent.where(p)),
       pointedOut: this.agent.pointed && Date.now() - this.agent.pointed.at < 180000 ? this.agent.pointed.text : undefined,
       onlinePlayers: Object.keys(bot.players).filter((n) => n !== bot.username),
       status: {
@@ -1374,7 +1389,7 @@ function mindBlock (agent) {
 /** Filled-in decisions, so small models see the key order and that args are never empty. Several different ones (picked per bot name, so the prompt stays cacheable): a single "chop oak logs" example made small models copy it forever. */
 const DECISION_EXAMPLES = [
   { thought: 'I have a wooden pickaxe and stone is right here, so I stock up on cobblestone.', goal: 'get stone tools', subgoal: 'mine 8 cobblestone', goalStatus: 'working', action: { name: 'mineBlock', args: { blockType: 'cobblestone', count: 8 } }, next: [{ name: 'craftItem', args: { itemName: 'stone_pickaxe', count: 1 } }], taskUpdate: { status: 'none', note: '' }, emotion: 'focused', emotionIntensity: 5 },
-  { thought: 'Plenty of planks already, so I make a crafting table before anything else.', goal: 'set up a workbench', subgoal: 'craft a crafting table', goalStatus: 'working', action: { name: 'craftItem', args: { itemName: 'crafting_table', count: 1 } }, next: [{ name: 'craftItem', args: { itemName: 'wooden_pickaxe', count: 1 } }], taskUpdate: { status: 'none', note: '' }, emotion: 'calm', emotionIntensity: 4 },
+  { thought: 'I have coal and sticks, and caves are dark, so I make torches before going down.', goal: 'explore caves', subgoal: 'make torches', goalStatus: 'working', action: { name: 'craftItem', args: { itemName: 'torch', count: 4 } }, next: [{ name: 'explore', args: { distance: 32 } }], taskUpdate: { status: 'none', note: '' }, emotion: 'calm', emotionIntensity: 4 },
   { thought: 'Nothing useful around here, so I head somewhere new to find ore.', goal: 'find iron', subgoal: 'explore east', goalStatus: 'working', action: { name: 'explore', args: { direction: 'east', distance: 32 } }, next: [], taskUpdate: { status: 'none', note: '' }, emotion: 'curious', emotionIntensity: 5 },
   { thought: 'Iron ore is visible a few blocks away and I have a stone pickaxe.', goal: 'get iron tools', subgoal: 'mine iron ore', goalStatus: 'working', action: { name: 'mineBlock', args: { blockType: 'iron_ore', count: 3 } }, next: [], taskUpdate: { status: 'none', note: '' }, emotion: 'excited', emotionIntensity: 6 },
   { thought: 'I want an iron pickaxe; obtainItem handles the ore, the furnace and the crafting for me.', goal: 'get iron tools', subgoal: 'get an iron pickaxe', goalStatus: 'working', action: { name: 'obtainItem', args: { itemName: 'iron_pickaxe', count: 1 } }, next: [], taskUpdate: { status: 'none', note: '' }, emotion: 'determined', emotionIntensity: 6 },
@@ -2488,6 +2503,7 @@ class EventReactor {
       if (bot.entity) agent.ownDeath = { pos: bot.entity.position.clone(), at: Date.now() } // our things lie here for 5 minutes
       const cause = this.pendingDeathCause || 'unknown causes'
       const killer = this.pendingKiller
+      if (bot.entity && agent.executor?.current?.name !== 'respawn') agent.places.onDeath(bot.entity.position.clone(), String(bot.game?.dimension), killer ? `killed by ${killer}` : cause)
       learning.stats.deaths++
       learning.markDirty()
       agent.tasks.onDeath()
@@ -2964,7 +2980,7 @@ ${said ? `${name} just said: ${said}
         if (this.paused || !agent.bot?.entity || agent.dead || agent.bot.isSleeping) { await this.idle(1000); continue }
         if (agent.reflexes?.busy) { await this.idle(100); continue } // the body is busy saving itself
 
-        let decision = this.forced.shift() || this.reflex() || this.habitStep() || agent.tasks.nextForcedAction() || this.obtainStep() || this.nextPlanned() || this.autopilotStep()
+        let decision = this.forced.shift() || this.reflex() || this.resumeStep() || this.habitStep() || agent.tasks.nextForcedAction() || this.obtainStep() || this.nextPlanned() || this.autopilotStep()
         if (!decision) decision = await this.usePrethought()
         if (!decision) {
           // Throttle: never ask the LLM more often than minLlmIntervalMs.
@@ -2977,6 +2993,22 @@ ${said ? `${name} just said: ${said}
         }
 
         while (agent.reflexes?.busy && this.running) await this.idle(100) // a save in progress finishes first
+        // Common sense before acting: no fourth crafting table, no wooden pickaxe next to an iron one (commonsense.js).
+        const objection = decision.source === 'reflex' || decision.source === 'command' ? null : this.commonSense(decision)
+        if (objection) {
+          const { name, args } = decision.action
+          const result = { ok: Boolean(objection.soft), action: name, args, code: objection.code, message: objection.message, durationMs: 0 }
+          log.info(`✋ ${name}(${JSON.stringify(args)}) skipped [${objection.code}]: ${objection.message}`)
+          agent.memory.addAction(decision, result)
+          agent.tasks.onActionResult(name, args, result)
+          this.trackPlan(decision, result)
+          this.autopilot.onResult(decision, result)
+          this.onObtainResult(decision, result)
+          this.prethought = null
+          await this.idle(config.loop.postActionDelayMs)
+          continue
+        }
+        decision = this.takeThingsFirst(decision) // leaving for good: pick up the table and furnace it set down here
         const { name, args } = decision.action
         log.info(`▶ ${name}(${JSON.stringify(args)})${decision.source !== 'llm' ? ` [${decision.source}]` : ''}`)
         const stopWatching = name === 'attackTarget' ? this.watchFight(args, decision) : null
@@ -3040,6 +3072,107 @@ ${said ? `${name} just said: ${said}
     try { return await Promise.race([p.promise, interrupted]) } catch { return null } finally { this.interruptFn = null }
   }
 
+  /** One housekeeping chore, if one is due and it's calm (see habits.js). Each has its own cooldown. */
+  choreStep (tools) {
+    const agent = this.agent
+    const { bot, intelligence } = agent
+    if (agent.dangerLevel() !== 'none' || /creative|spectator/.test(bot.game?.gameMode || '')) return null
+    this.choreAt ||= {}
+    const now = Date.now()
+    const due = (k, ms) => now - (this.choreAt[k] || 0) > ms
+    const items = bot.inventory.items()
+    const slot = (dest) => safe(() => bot.inventory.slots[bot.getEquipmentDestSlot(dest)]?.name) || null
+    const equipped = { head: slot('head'), torso: slot('torso'), legs: slot('legs'), feet: slot('feet'), offHand: slot('off-hand') }
+    const table = bot.registry.blocksByName.crafting_table
+    const canCraft = (name) => { const it = bot.registry.itemsByName[name]; return Boolean(it && agent.recipes.knows(name) && safe(() => bot.recipesFor(it.id, null, 1, bot.findBlock({ matching: table.id, maxDistance: 32 }) || true).length)) }
+    const level = (d) => intelligence.level(d)
+    const candidates = [
+      ['armor', 20000, () => tools.includes('equipItem') && habits.armorStep(items, equipped)],
+      ['shield', 30000, () => tools.includes('equipItem') && habits.shieldStep(items, equipped, level('combat'))],
+      ['tool', 180000, () => tools.includes('craftItem') && habits.toolStep(items, canCraft, level('survival'))],
+      ['junk', 60000, () => tools.includes('dropItems') && habits.junkStep(items, bot.inventory.emptySlotCount())],
+      // Tidy players keep a fixed hotbar; beginners don't bother. Only when nothing else is going on.
+      ['hotbar', 600000, () => tools.includes('organizeHotbar') && level('survival') >= 3 && !agent.tasks.active() && !this.obtain && habits.hotbarMoves(bot.inventory.slots).length >= 2 && { name: 'organizeHotbar', args: {}, why: 'tidying my hotbar' }]
+    ]
+    // A chore that just failed (the server refused, materials gone) waits five minutes before the next try.
+    const failedLately = (step) => agent.memory.actions.slice(-12).some((a) => !a.ok && a.action === step.name && JSON.stringify(a.args) === JSON.stringify(step.args) && a.source === 'habit')
+    for (const [k, ms, fn] of candidates) {
+      if (!due(k, ms)) continue
+      const step = safe(fn)
+      if (!step) continue
+      if (failedLately(step)) { this.choreAt[k] = now + 300000 - ms; continue }
+      this.choreAt[k] = now
+      return { source: 'habit', thought: step.why, emotion: 'calm', emotionIntensity: 3, action: { name: step.name, args: step.args } }
+    }
+    return null
+  }
+
+  /** A decision put aside for a moment (to pick something up first, or a step that follows a death run). */
+  resumeStep () {
+    const r = this.resume
+    this.resume = null
+    if (!r || Date.now() - r.at > 60000) return null
+    return r.decision
+  }
+
+  /**
+   * About to walk off for good (explore, a far trip): the crafting table or furnace it set down here comes along first,
+   * like any player would, unless this is home or it forgot it was there (beginners do).
+   */
+  takeThingsFirst (decision) {
+    const agent = this.agent
+    const { bot, places, executor } = agent
+    if (!bot?.entity || ['reflex', 'command'].includes(decision.source) || agent.dangerLevel() !== 'none') return decision
+    if (!executor.availableTools().includes('pickUpBlock')) return decision
+    const here = bot.entity.position
+    if (!places.leaving(decision.action, here, { players: bot.players })) return decision
+    const bases = [agent.builder?.current?.origin, ...(agent.builder?.history || []).map((h) => h.origin)].filter(Boolean)
+    const cooking = (p) => Boolean(this.obtain?.smelt && Date.now() - this.obtain.smelt.at < 180000 && Math.hypot(p.x - here.x, p.z - here.z) < 16)
+    const dim = String(bot.game?.dimension)
+    const list = places.reclaimable(here, dim, { blockName: (p) => bot.blockAt(new Vec3(p.x, p.y, p.z))?.name, cooking, bases })
+    if (!list.length) return decision
+    const p = list[0]
+    p.triedAt = Date.now()
+    this.resume = { decision, at: Date.now() }
+    const nice = p.name.replace(/_/g, ' ')
+    return { source: 'habit', thought: `Not leaving my ${nice} behind.`, emotion: 'calm', emotionIntensity: 3, action: { name: 'pickUpBlock', args: { x: p.x, y: p.y, z: p.z } } }
+  }
+
+  /** What any player would object to before doing this (see commonsense.js), or null. */
+  commonSense (decision) {
+    const agent = this.agent
+    const { bot, tasks, goals, builder } = agent
+    if (!bot?.entity) return null
+    const s = agent.perception?.latest
+    const slot = (dest) => safe(() => bot.inventory.slots[bot.getEquipmentDestSlot(dest)]?.name) || null
+    const words = (t) => ` ${String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ')} `
+    // Wanted for real: a player's task, a goal someone else set, a build that is short of it, or what obtainItem is after.
+    // Its own goal text doesn't count: a model that wrote "craft a crafting table" would otherwise justify the loop.
+    const wants = (item) => {
+      const w = ` ${item.replace(/_/g, ' ')} `
+      const t = tasks.active()
+      if (t && (t.item === item || words(t.description).includes(w))) return true
+      if (this.obtain?.item === item) return true
+      const c = goals.current
+      if (c && c.source !== 'self' && words(c.text).includes(w)) return true
+      if (builder?.current) { const miss = safe(() => building.remaining(builder.current, bot).missing) || {}; if (miss[item]) return true }
+      return false
+    }
+    return commonsense.review(decision, {
+      inv: inventorySummary(bot),
+      items: bot.inventory.items(),
+      equipped: { hand: bot.heldItem?.name || null, offHand: slot('off-hand'), head: slot('head'), torso: slot('torso'), legs: slot('legs'), feet: slot('feet') },
+      recent: agent.memory.actions,
+      wants,
+      building: Boolean(builder?.current),
+      food: bot.food,
+      health: bot.health,
+      time: bot.time?.timeOfDay,
+      thundering: (bot.thunderState ?? 0) > 0,
+      nearBlocks: s?.nearbyBlocks
+    })
+  }
+
   /** Small habits between actions: light up dark tunnels, get out when walled in and stuck. */
   habitStep () {
     const agent = this.agent
@@ -3048,6 +3181,21 @@ ${said ? `${name} just said: ${said}
     if (!s || !bot.entity || agent.dangerLevel() === 'high') return null
     const now = Date.now()
     const tools = executor.availableTools()
+    // Just died, and the things are still lying there: run back for them (what every player does first).
+    const death = agent.places.freshDeath(String(bot.game?.dimension))
+    if (death && tools.includes('moveToBlock') && !this.deathRunAt) {
+      const far = Math.hypot(death.x - bot.entity.position.x, death.z - bot.entity.position.z)
+      death.recovered = true // one run per death
+      if (far <= 220 && far > 3 && !/killed by/.test(death.cause)) {
+        this.deathRunAt = now
+        this.resume = { decision: { source: 'habit', thought: 'Grabbing my stuff.', emotion: 'determined', emotionIntensity: 6, action: { name: 'collectDrops', args: { radius: 10 } } }, at: now + 240000 }
+        return { source: 'habit', thought: 'My things are still where I died. Going back for them, quick.', emotion: 'determined', emotionIntensity: 6, action: { name: 'moveToBlock', args: { x: Math.floor(death.x), y: Math.floor(death.y), z: Math.floor(death.z), range: 2 } } }
+      }
+    }
+    if (this.deathRunAt && now - this.deathRunAt > 300000) this.deathRunAt = 0
+    // Housekeeping (habits.js): armor on, shield in the off-hand, a new tool before the old one breaks, junk out, a tidy hotbar.
+    const chore = this.choreStep(tools)
+    if (chore) return chore
     // Torches underground when it's dark (like a player lighting a cave as they go).
     const light = bot.blockAt(bot.entity.position.floored().offset(0, 1, 0))?.light
     if (tools.includes('placeTorch') && /underground/.test(s.layout || '') && Number.isFinite(light) && light < 6 && now - (this.lastTorchAt || 0) > 15000 &&
@@ -3088,6 +3236,17 @@ ${said ? `${name} just said: ${said}
     // Nightfall: a bed if it has one; otherwise dig in, unless it's a skilled, armed player who'd rather keep going.
     const t = bot.time?.timeOfDay ?? 6000
     const night = t > 12900 && t < 23000
+    // Dusk and its bed is a walk away: head home to sleep, like a player who knows where they live.
+    const bedHome = agent.places.bed
+    const dusk = t > 11800 && t < 13500
+    if (dusk && bedHome && bedHome.dim === String(bot.game?.dimension) && this.homeRunDay !== bot.time.day && config.behavior.nightShelter !== false) {
+      const far = Math.hypot(bedHome.x - bot.entity.position.x, bedHome.z - bot.entity.position.z)
+      if (far > 20 && far < 160) {
+        this.homeRunDay = bot.time.day
+        this.resume = { decision: { source: 'auto', thought: 'Home. Bed.', emotion: 'calm', emotionIntensity: 3, action: { name: 'sleepInBed', args: {} } }, at: Date.now() + 120000 }
+        return { source: 'auto', thought: "It's getting dark. Heading home to my bed.", emotion: 'calm', emotionIntensity: 4, action: { name: 'moveToBlock', args: { x: bedHome.x, y: bedHome.y, z: bedHome.z, range: 2 } } }
+      }
+    }
     if (night && config.behavior.nightShelter !== false && this.shelterDay !== bot.time.day && /^outdoors/.test(agent.perception.latest.layout || '') && executor.availableTools().includes('shelter')) {
       const inv0 = agent.perception.latest.inventory.items
       const bed = Object.keys(inv0).some((n) => /_bed$/.test(n)) || bot.findBlock({ matching: (b) => bot.isABed(b), maxDistance: 24 })
@@ -3534,6 +3693,8 @@ class Agent {
       ? { records: Object.fromEntries(saved.containers.map((c) => [`${c.x},${c.y},${c.z}`, { ...c, lastSeen: c.seenAt, openers: {}, history: [] }])) }
       : saved.chests
     this.containers = new ContainerIntel(this, legacy)
+    // Its mental map: home, bed, deaths, and the blocks it put down (whether it remembers each depends on skill).
+    this.places = new Places(saved.places, () => Math.min(0.98, 0.35 + 0.1 * (this.intelligence?.level('survival') ?? 3)))
     this.knownFacts = new Set(saved.knownFacts || []) // facts above its level it has learned
     this.reflexes = new Reflexes(this, saved.reflexes)
     this.goals = new Goals(this, saved.goals)
@@ -3644,6 +3805,19 @@ class Agent {
     s.self.position = "unknown: you don't know how to show your coordinates (the F3 screen). Positions are relative to you: dx = east(+)/west(-), dz = south(+)/north(-), dy = up/down. Give actions dx, dy, dz instead of x, y, z."
     s.recentActions = state.recentActions // what it did, as it did it
     return s
+  }
+
+  /** "12 blocks north-east" (or the coordinates, when it knows F3), for places in its mental map. */
+  where (p) {
+    const me = this.bot?.entity?.position
+    if (!me) return ''
+    const d = Math.round(Math.hypot(p.x - me.x, p.z - me.z))
+    if (this.coordsKnown()) return `${Math.floor(p.x)} ${Math.floor(p.y)} ${Math.floor(p.z)} (${d} blocks away)`
+    if (d < 2) return 'right here'
+    const ns = p.z - me.z < -d * 0.38 ? 'north' : p.z - me.z > d * 0.38 ? 'south' : ''
+    const ew = p.x - me.x > d * 0.38 ? 'east' : p.x - me.x < -d * 0.38 ? 'west' : ''
+    const dy = Math.round(p.y - me.y)
+    return `${d} blocks ${[ns, ew].filter(Boolean).join('-')}${Math.abs(dy) >= 4 ? `, ${Math.abs(dy)} ${dy > 0 ? 'up' : 'down'}` : ''}`
   }
 
   /**
@@ -3815,6 +3989,7 @@ class Agent {
       reflexes: this.reflexes,
       startObtain: (item, count) => this.brain.startObtain(item, count),
       dropVerdict: (entity) => this.dropVerdict(entity),
+      places: this.places,
       notify: (type, data) => this.onActionEvent(type, data)
     })
     this.reactor = new EventReactor(this)
@@ -4001,8 +4176,12 @@ class Agent {
     installSmoothLook(bot, {
       enabled: () => config.behavior.smoothTurning !== false,
       speed: () => turnSpeed(safe(() => this.intelligence.skill('parkour')) ?? 0.5),
-      skip: () => Boolean(bot.pathfinder?.isMoving?.() || this.reflexes?.busy || /attack|parkour/.test(this.executor?.current?.name || ''))
+      skip: () => Boolean(bot.pathfinder?.isMoving?.() || this.reflexes?.busy || /attack|parkour/.test(this.executor?.current?.name || '')),
+      // Anyone who knows endermen never looks one in the eyes (unless it's fighting one anyway).
+      adjust: (yaw, pitch) => this.executor?.current?.name !== 'attackTarget' && this.intelligence.knowledgeTier() >= 1 ? adjustLook(bot, yaw, pitch) : [yaw, pitch]
     })
+    // Experienced players sprint-jump along straight flat stretches; beginners walk (motion.js).
+    installMotion(bot, { canSprintJump: () => config.behavior.sprintJump !== false && this.intelligence.level('parkour') >= 3 && this.intelligence.can('sprint', 'survival') })
 
     const pf = config.behavior.pathfinding
     const movements = new Movements(bot)

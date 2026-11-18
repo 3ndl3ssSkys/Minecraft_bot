@@ -9,13 +9,14 @@
  *
  * Left instant on purpose: `force` looks (aiming a block placement, a pearl, a water bucket: reflexes and skills
  * pass force = true), anything while `skip()` says so (walking a path, fighting, a reflex), and small corrections.
+ * `adjust(yaw, pitch)` can change where it looks first (motion.js: not into an enderman's eyes).
  */
 
 const TAU = Math.PI * 2
 const wrap = (a) => ((a + Math.PI) % TAU + TAU) % TAU - Math.PI
 const MIN_STEP = 4 * Math.PI / 180 // the last few degrees take no longer than a tick
 
-function installSmoothLook (bot, { speed = () => 40, enabled = () => true, skip = () => false } = {}) {
+function installSmoothLook (bot, { speed = () => 40, enabled = () => true, skip = () => false, adjust = null } = {}) {
   if (bot._smoothLook) return bot._smoothLook
   const raw = bot.look
   let job = null
@@ -46,6 +47,7 @@ function installSmoothLook (bot, { speed = () => 40, enabled = () => true, skip 
 
   bot.look = function (yaw, pitch, force) {
     finish() // a new look replaces the one under way (as Mineflayer does)
+    if (adjust) { try { [yaw, pitch] = adjust(yaw, pitch) } catch { /* keep it */ } } // e.g. never into an enderman's eyes
     if (!bot.entity || force || !enabled() || safe(skip)) return raw.call(bot, yaw, pitch, force)
     const left = Math.max(Math.abs(wrap(yaw - bot.entity.yaw)), Math.abs(pitch - bot.entity.pitch))
     if (left <= Math.max(MIN_STEP, speed() * Math.PI / 180)) return raw.call(bot, yaw, pitch, force)

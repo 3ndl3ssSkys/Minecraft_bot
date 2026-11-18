@@ -387,6 +387,45 @@ It also had a stray line that reset the autopilot after nearly every action. Tha
 
 **Not verified yet:** smooth turning against a real server (others watching it turn); the view addon on other browsers than Chromium.
 
+## 22. "It keeps crafting crafting tables": common sense, picking things back up, all-round player behaviour
+
+**The user said:** in the bot's output it kept trying to craft a crafting table while it had 3. It should pick up useful blocks it placed if it isn't coming back. "Please make sure it's smart… think about everything a hyper-realistic Minecraft player bot could ever need… act, play and move like a Minecraft player", by level.
+
+**Likely cause of the table loop:**
+- `craftItem` for a pickaxe places the carried table. If that placement isn't confirmed (a real server: lag, protection, a bad spot), it threw "placed a crafting table but cannot find it".
+- The model read "crafting table" in the error and crafted another one.
+- One of the decision examples was also literally "craft a crafting table", and small models copy examples.
+
+**Done:**
+- **The table loop itself:**
+  - `placeNearby` now waits for the block update and tries up to 3 spots.
+  - Its error says "You still carry N: don't make another".
+  - The crafting-table example was replaced with a torches one.
+- **`commonsense.js`:** a check before every non-reflex, non-owner-command action. It stops: "one is enough" items, tool downgrades and duplicates (unless nearly broken), armor no better than what it has, a third try of the same failure, crafting the same thing over and over, over-gathering, eating when full, sleeping in daytime, a second station next to the first, and dropping valuables.
+  - A skipped action is recorded as a failed result with the reason, so the model learns from it.
+  - "Wanted" means a player's task, a goal someone else set, a build that's short of it, or the current `obtainItem`. Its own goal text doesn't count, or a self-written "craft a crafting table" goal would justify the loop.
+- **`places.js` (saved):** placed blocks, home (its bed or a build site), bed, the day it last slept (a phantom warning after 3 nights), and deaths. These go in the prompt as `places`.
+  - `Brain.takeThingsFirst`: before explore, a far `moveToBlock`, or following someone far away, it picks up remembered stations within 24 blocks that aren't at home or still cooking. The original decision waits in `this.resume`.
+  - Whether it remembers each block is rolled when it's placed: 0.35 + 0.1 × survival level.
+  - New action `pickUpBlock`.
+- **`habits.js`** (`Brain.choreStep`, each chore with a cooldown, and 5 min after a failure): armor, shield, replacing a tool about to break, junk when full, hotbar layout (new action `organizeHotbar`).
+  - Also: a run back to the death spot (`moveToBlock`, then `collectDrops`), and heading home to its bed at dusk.
+- **`motion.js`:**
+  - Sprint-jumping on straight, flat path stretches at parkour level 3+. In the air it removes the path nodes it has passed; the pathfinder shares its path array, so it would otherwise turn back for them.
+  - `adjustLook` (through `look.js`): never into an enderman's eyes (knowledge tier 1+, not while fighting one).
+- **Menu time by level** (`ctx.uiPause`): crafting, furnace, chests, armor.
+
+**Verified:**
+- Unit tests: commonsense, places, habits, motion.
+- On flying-squid 1.16.5:
+  - the table was placed and remembered;
+  - a third table was refused with the message;
+  - exploring first picked the table back up (it came back to the inventory);
+  - sprint-jumping: 30 blocks in 5.0–5.3 s with 82–87% in the air and no backtracking. Before the fix it took 11 s and turned back.
+- The whole loop ran with the mock without errors. Armor equipping fails on flying-squid only (its inventory transactions are broken), so failed chores now back off.
+
+**Not verified yet:** a real server (craft-table placement on Paper, pickup, armor equip, hotbar moves, death runs); real-model behaviour with the new hints.
+
 ## Where it stands now
 
 **Next for the user:**

@@ -276,6 +276,38 @@ You can also pin a version with `"server": { "version": "26.1" }`. If you're kic
 
 **Reflexes** run without the LLM: fight-or-flight against attacking players, keeping away from armed enemies, fighting back against mobs, fleeing creepers, and eating when hungry.
 
+### Common sense, habits and a mental map
+
+A small model forgets what it carries and repeats itself, so some things are checked in code before any action runs (`commonsense.js`). It won't:
+- craft or fetch a second crafting table, furnace, bed, shield or other "one is enough" item (unless a player's task or a goal someone set asks for one);
+- craft a tool it already has at least as good (a wooden pickaxe next to an iron one), unless the old one is nearly broken;
+- craft armor no better than what it has;
+- try the same failing action a third time;
+- craft the same thing over and over;
+- gather wood, stone or dirt when it already carries far more than it needs;
+- eat on a full stomach, sleep in the daytime, or place a second furnace right next to the first;
+- throw away valuables on its own.
+
+The model is told why ("you already carry 3 crafting tables, and one is all anyone needs…"), and the prompt lists its stations and best tools.
+
+**Habits** it does without asking the model (`habits.js`):
+- puts on better armor and a shield;
+- makes a new pickaxe, sword or axe before the old one breaks (Simple level and up; beginners let tools break);
+- tosses junk when its pockets are full;
+- keeps a tidy hotbar (sword, pickaxe, axe, shovel, blocks, torches, bucket, food; Advanced and up);
+- lights dark tunnels;
+- climbs out when stuck;
+- heads home to its bed at dusk;
+- runs back for its things after dying (not after lava or the void).
+
+**Mental map** (`places.js`, saved): home, its bed, where it died, and the blocks it placed. When it's about to leave an area (exploring, a long walk), it first goes back for the crafting table, furnace or bed it set down there, unless that's home or a furnace is still cooking. Whether it remembers each block depends on skill: a Beginner often forgets its crafting table, a Master never does. `pickUpBlock` does the same on request.
+
+**Moving and handling items like a player of its level:**
+- Experienced players (parkour level 3+) sprint-jump along straight, flat stretches; beginners just walk (`behavior.sprintJump`).
+- It never looks an enderman in the eyes once it knows about them.
+- Crafting, furnaces, chests and putting on armor take menu time: about 2 s for a beginner, a fraction of a second for a master (`behavior.menuTime`).
+- It turns its head smoothly (`behavior.smoothTurning`).
+
 ## Intelligence (`intelligence`)
 
 Set `intelligence.level` (or use `!iq <level>`). Every level is better than the one below, but the gains shrink as you go up. The skill curve is concave: a step from Hardcore to Master changes far less than one from Beginning to Simple.

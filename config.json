@@ -157,6 +157,8 @@
     "admins": [],
     "commandPrefix": "!",
     "startingGoal": "",
+    "menuTime": true,
+    "sprintJump": true,
     "smoothTurning": true,
     "nightShelter": true,
     "autopilot": true,
