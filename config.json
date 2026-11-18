@@ -94,6 +94,7 @@
     "conversationWindowSec": 45,
     "replyDelayMs": [1000, 2500],
     "typingCharsPerSecond": 9,
+    "publicChat": "auto",
     "stopToType": true,
     "danger": { "maxChars": 24, "postponeChance": 0.6 },
     "maxMessageLength": 200,
@@ -246,6 +247,10 @@
     "lock": null,
     "lockIntensity": 6
   },
+  "network": {
+    "public": "auto",
+    "acceptInvites": true
+  },
   "etiquette": {
     "enabled": true,
     "serverType": "auto",
@@ -324,7 +329,24 @@
     "password": "",
     "firstPerson": true,
     "viewDistance": 4,
-    "fov": 70
+    "fov": 70,
+    "https": false
+  },
+  "voice": {
+    "enabled": true,
+    "stt": "browser",
+    "sttUrl": "",
+    "sttModel": "whisper-1",
+    "tts": "browser",
+    "ttsUrl": "",
+    "ttsModel": "tts-1",
+    "ttsVoice": "alloy",
+    "browserVoice": "",
+    "rate": 1,
+    "language": "en-US",
+    "wakeWords": [],
+    "requireWakeWord": true,
+    "conversationSeconds": 30
   },
   "perception": {
     "coordinates": "auto",

@@ -1968,8 +1968,8 @@ class ActionExecutor {
    * @param {object} [deps.memory]   Memory (recent chat, e.g. duel invitations)
    * @param {object} [deps.tasks]    TaskManager (fights the bot agreed to)
    */
-  constructor ({ bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes, parkour, recipes, startObtain, dropVerdict, places }) {
-    Object.assign(this, { bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes, parkour, recipes, startObtain, dropVerdict, places })
+  constructor ({ bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes, parkour, recipes, startObtain, dropVerdict, places, network, voice, planExplanation, highlight }) {
+    Object.assign(this, { bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes, parkour, recipes, startObtain, dropVerdict, places, network, voice, planExplanation, highlight })
     this.current = null // { name, args, startedAt, controller }
     this.memoryBag = {} // things actions remember between runs (the last circuit it inspected)
     this.pauseUntil = 0
@@ -2007,6 +2007,9 @@ class ActionExecutor {
       if (mode === 'spectator' && !SPECTATOR_OK.has(name)) return false
       if (enabledActions?.length && !enabledActions.includes(name)) return false
       if (disabledActions?.includes(name)) return false
+      // Lobby tools only where they make sense: menus when one is open or on a network, commands on networks.
+      if ((name === 'readMenu' || name === 'clickMenu') && !this.network?.window) return false
+      if ((name === 'useHotbarItem' || name === 'serverCommand') && !safe(() => this.network?.isNetwork())) return false
       if (ACTIONS[name].minKnowledge && (this.intel?.level?.('knowledge') ?? 0) < ACTIONS[name].minKnowledge) return false // redstone know-how is for experienced players
       if (name === 'chatMessage' && !this.chat.allows('tool')) return false
       if ((name === 'experimentCrafting' || name === 'askForHelp') && this.recipes?.knowsEverything) return false // it already knows every recipe
@@ -2066,6 +2069,11 @@ class ActionExecutor {
       recipes: this.recipes,
       places: this.places,
       executorMemory: this.memoryBag,
+      network: this.network,
+      voice: this.voice,
+      planExplanation: this.planExplanation,
+      highlight: this.highlight,
+      tools: () => this.availableTools(),
       dimension: () => String(this.bot.game?.dimension),
       // Every block it puts down goes on its mental map (stations get picked back up when it leaves; builds stay).
       placed: (pos, blockName, kind) => this.places?.onPlaced(pos, blockName, kind || (name === 'build' ? 'build' : 'placed'), String(this.bot.game?.dimension)),
@@ -2125,6 +2133,8 @@ class ActionExecutor {
 require('./skills').install(ACTIONS, {
   argNumber, argString, ActionError, sleep, gotoGoal, goals, placeAt, digWithAbort, equipToolFor, findInventoryItem, throwIfAborted, collectNearbyDrops
 }, SHORT)
+require('./explain').install(ACTIONS, { argString, ActionError, sleep }, SHORT)
+require('./network').install(ACTIONS, { argNumber, argString, ActionError, sleep, gotoGoal, goals }, SHORT)
 require('./tech').install(ACTIONS, { argNumber, argString, ActionError, sleep, gotoGoal, goals, placeAt, digWithAbort, findInventoryItem, throwIfAborted }, SHORT)
 
 module.exports = {

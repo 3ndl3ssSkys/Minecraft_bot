@@ -483,6 +483,53 @@ It also had a stray line that reset the autopilot after nearly every action. Tha
 - Contained-mob detection on real farms.
 - WASD walking on real terrain.
 
+## 24. Public servers like The Hive; talking to it by voice
+
+**The user asked:**
+- If the bot joined them on a public server like The Hive, could it navigate the server, use menus, join them and play?
+- Could a TTS model let them talk to it while playing and hear it answer, since it shouldn't text in public chat?
+- Could it explain things by voice in time with showing them in game?
+- "Continue and finish everything."
+
+**Research:**
+- The Hive is Bedrock-only; its Java server closed on 15 April 2021.
+- ViaBedrock lists Bedrock form GUIs among its features, but says it's very early and not for regular use.
+- There's no Node client for Simple Voice Chat (only `mineflayer-plasmovoice` for PlasmoVoice). So voice goes through the browser page, not in-game voice chat.
+
+**Done:**
+- **`network.js`:**
+  - Reading the network (`state.server`): sidebar lines (team prefixes via `displayName`), boss bars, the last title/subtitle and action bar, named hotbar items, the open menu, and commands from `bot.tabComplete('/')`.
+  - Network detection by score: sidebar, named items, a store or discord link in the tab list, 30+ players, adventure mode.
+  - Menus: `describeWindow` (skips unnamed glass panes) and `findSlot` (fuzzy match).
+  - Commands: `allowed` = SAFE_COMMAND, or offered by the server and not DANGEROUS.
+  - Owner invites are auto-accepted from system messages only, not lines in the owner's own chat format. It uses the clickEvent `run_command` or the command named in the text (owner name appended only when it follows), then `/tpaccept`, `/party accept <owner>` or `/friend accept <owner>`.
+  - Actions `useHotbarItem`, `readMenu`, `clickMenu`, `serverCommand`, `joinOwner`. Menus show only when one is open; lobby tools only on networks.
+  - `chat.publicChat: 'auto'`: no public chat on networks.
+- **`voice.js`:**
+  - Pages check in every 5 s (`/voice/hello`).
+  - `say()` queues lines; the page plays them (speechSynthesis, or audio from `voice.ttsUrl`) and posts `/voice/done`; if it doesn't, a time estimate takes over.
+  - `heard()`: wake words (its name, the personality name, nicknames, `voice.wakeWords`), a 30 s conversation window, push-to-talk always counts. "Show me / explain / how do I" queues `explainAndShow`; anything else goes to `responder.onMessage(owner, text, { whisper: true, voice: true })`.
+  - `transcribe()` posts multipart to `voice.sttUrl`.
+  - `ChatManager.deliver` speaks owner-directed lines (and would-be public lines) when a page is active.
+- **Viewer:**
+  - `viewer.https`: a self-signed cert (node-forge, an optional dependency) cached as `viewer-cert.json` next to the save, with the PC's IPs in the SAN.
+  - Routes `/voice`, `/voice-client.js`, `/voice/settings|hello|heard|done|listen|audio/:id`.
+  - A Voice button in the panel.
+- **`web/voice-client.js`:**
+  - Hands-free browser recognition (continuous, restarts on end, paused while speaking so it doesn't hear itself).
+  - Whisper mode: a simple level-based voice detector with MediaRecorder.
+  - Push-to-talk (button or V); voice picker.
+- **`explain.js`:** `explainAndShow`. `Agent.planExplanation` (LLM: 2–6 steps of say/action/look, demo-safe actions only) → each step speaks while doing, looks and highlights, then waits for both. Typed owner messages with "show me…" also trigger it.
+
+**Verified:**
+- Unit tests: network (menu reading, slot finding, safe and dangerous commands, invites from the owner vs strangers vs the owner's own chat, network vs plain server); voice (wake words, conversation window, push-to-talk, show-me routing, queued speech waiting for the page, the TTS and STT request formats against a stub server, cleaning planned steps).
+- Live on flying-squid + Chromium over https:
+  - the page had a secure context and its status said it was listening;
+  - "pass me the iron" was ignored and "hey Viewer, how are you doing?" was answered out loud ("hey!");
+  - a two-step walkthrough spoke step 1, waited for its action (a slow torch placement on flying-squid), then spoke step 2.
+
+**Not verified:** real speech recognition (headless Chromium has none) and Whisper/Kokoro servers; a real network (menus, invites, `/play`); the Bedrock route on The Hive; real-model walkthrough plans.
+
 ## Where it stands now
 
 **Next for the user:**

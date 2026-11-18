@@ -230,6 +230,21 @@ You can also put the whole object inline: `"personality": { "name": "...", ... }
 - **`nightShelter`:** at dusk it heads home to its bed, or digs in if it has none.
 - **`humanKeys`:** walk paths with WASD like a person (the camera leads, W+A/D around corners). Off = exact bot steering.
 
+**Voice** (`voice`; the page is `/voice` on the viewer):
+
+```json
+"voice": { "stt": "browser", "tts": "browser", "browserVoice": "", "rate": 1, "wakeWords": [], "requireWakeWord": true, "conversationSeconds": 30 }
+```
+
+- **`stt` / `tts`:** `browser` (no install), or `server` with `sttUrl` (Whisper, OpenAI-compatible) and `ttsUrl` (Kokoro or Piper, OpenAI-compatible), plus `ttsVoice`.
+- **`browserVoice`:** part of a voice's name ("Guy", "Aria"). The page also has a picker.
+- **`wakeWords`:** extra names it answers to (its name and nicknames always work). `requireWakeWord: false` answers everything you say.
+
+**Public servers** (`network`, `chat.publicChat`):
+- **`network.public`:** `auto` (detects minigame networks) / `true` / `false`.
+- **`network.acceptInvites`:** follow its owners' party, friend and teleport invites by itself.
+- **`chat.publicChat`:** `auto` = no public chat on networks; `true`/`false` to force it.
+
 **Server manners** (`etiquette`):
 
 ```json

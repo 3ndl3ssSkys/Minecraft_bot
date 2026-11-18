@@ -596,6 +596,33 @@ Start it with `npm run viewer` (or `npm start -- --viewer`), or type `!viewer on
 
 It only listens on your PC. To watch from another device, set `viewer.host` to `"0.0.0.0"` **and** a `viewer.password`, then open `http://<pc>:3007/?key=<password>`. `viewer.viewDistance` (chunks, default 4) controls how much the browser draws.
 
+## Talking to it out loud (`voice`)
+
+Start it with `npm run viewer` and open **`/voice`** (e.g. http://localhost:3007/voice) on the PC you play on, or on a phone with earbuds. Press Start and leave it open.
+- **Hands-free:** say its name ("hey Wanderer, come here"). For 30 seconds after that, or after it speaks, follow-ups need no name, like a conversation. Push-to-talk works on the page itself (the button, or V).
+- **Its answers are spoken** on that page, never typed in game chat. Its replies to its owner go to voice whenever a voice page is open.
+- **"Show me how…", "explain…", "how do I…":** it explains in a few spoken steps and does each one in the game as it says it (`explainAndShow`). It looks at what it's talking about and outlines it in the viewer, and the next line only starts when the step is done.
+- **Engines:**
+  - Speech recognition defaults to the browser's own (Chrome or Edge). That sends your audio to Google or Microsoft. For fully local recognition, run a Whisper server and set `voice.stt: "server"` and `voice.sttUrl` (any OpenAI-compatible `/v1/audio/transcriptions`, such as faster-whisper-server or whisper.cpp's server).
+  - Speech uses the PC's voices, or a TTS server with `voice.tts: "server"` and `voice.ttsUrl` (OpenAI-compatible `/v1/audio/speech`, such as Kokoro-FastAPI, or openedai-speech with Piper).
+- **From another PC:** browsers only allow the microphone on https or on the same PC. Set `viewer.host` to `"0.0.0.0"`, a `viewer.password`, and `viewer.https: true`, then open `https://<bot-pc>:3007/voice?key=<password>`. Click through the certificate warning once (it's the bot's own certificate).
+- **In-game voice chat** (Simple Voice Chat, PlasmoVoice) isn't supported: there's no Node client for Simple Voice Chat, and public servers rarely have it.
+
+## Public servers and minigame networks (`network`)
+
+- **What it notices:** when it's on a minigame network (sidebar scoreboard, named hotbar items like "Game Selector", a store link in the tab list, lots of players).
+- **What it reads:** the sidebar, boss bars, titles, the action bar, the named hotbar items and any open menu, plus the commands the server offers (tab completion). All of this goes into its view of the game (`state.server`).
+- **Actions:**
+  - `useHotbarItem` (open the game selector), `readMenu`, `clickMenu` ("Bed Wars", "Solo", or a slot);
+  - `serverCommand`: player commands only (/play, /hub, /party, /friend, /tpa...). Never admin ones.
+  - `joinOwner`: walk to you if you're here, or ask you to invite it.
+- **Following you:** party, friend and teleport invites **from its owners** are accepted by themselves: it uses the clickable [ACCEPT] in the message or the command it names. So invite it to your party and it follows you into your game.
+- **Quiet in public:** on a network it doesn't talk in public chat (`chat.publicChat: "auto"`). It talks to you privately, or out loud on the voice page.
+- **Limits:**
+  - **Accounts:** public servers check accounts, so the bot needs its own Microsoft account with Minecraft (an offline account can't join), and many networks forbid bots, which can get its account banned.
+  - **Bedrock networks:** The Hive is Bedrock-only and would go through the Bedrock route. That route can't break blocks or use inventories, and its menu support is early.
+  - **Minigames:** the model is slow for fast PvP minigames; its reflexes fight, but it won't play like a skilled player.
+
 ## Game modes and coordinates
 
 **Game modes:** it reads the game mode and plays accordingly.

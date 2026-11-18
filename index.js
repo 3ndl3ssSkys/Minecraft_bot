@@ -44,6 +44,8 @@ const { Places } = require('./places')
 const habits = require('./habits')
 const { Etiquette } = require('./etiquette')
 const mechanics = require('./mechanics')
+const { Network } = require('./network')
+const { Voice, SHOW_ME } = require('./voice')
 const { BotViewer } = require('./viewer')
 const { installHumanInput } = require('./look')
 const { installMotion, adjustLook } = require('./motion')
@@ -210,6 +212,7 @@ const DEFAULT_CONFIG = {
     conversationWindowSec: 45, // after we talk to someone, their follow-ups count as addressed
     replyDelayMs: [1000, 2500], // human "reading" delay; also batches rapid messages
     typingCharsPerSecond: 9, // simulated typing speed; 0 = instant
+    publicChat: 'auto', // talk in public chat? auto = not on public networks (it talks to its owner privately or by voice there) | true | false
     stopToType: true, // stand still while typing, like a player with the chat box open
     danger: {
       maxChars: 24, // in a fight / low health, replies are cut to a few words
@@ -355,6 +358,11 @@ const DEFAULT_CONFIG = {
     lock: null, // force one emotion label (set with !emotion lock <label>)
     lockIntensity: 6
   },
+  // Public server networks (network.js): lobbies, menus, parties, joining its owner.
+  network: {
+    public: 'auto', // auto (detect a minigame network from the scoreboard, named hotbar items, tab list) | true | false
+    acceptInvites: true // accept party / friend / teleport invites from its owners by itself
+  },
   // Being a decent member of a server (etiquette.js): rules people set, and leaving farms, pens, pets and towns alone.
   etiquette: {
     enabled: true,
@@ -404,7 +412,25 @@ const DEFAULT_CONFIG = {
     password: '', // then open http://<this-pc>:3007/?key=<password>
     firstPerson: true,
     viewDistance: 4, // chunks around it to show (more = heavier for the browser)
-    fov: 70 // field of view in the browser, in degrees (Minecraft's "Normal" is 70); the page has a slider too
+    fov: 70, // field of view in the browser, in degrees (Minecraft's "Normal" is 70); the page has a slider too
+    https: false // serve https (self-signed) so other PCs on your network can use the microphone (voice page)
+  },
+  // Talking with it out loud on the viewer's voice page (voice.js): http(s)://<bot pc>:3007/voice
+  voice: {
+    enabled: true,
+    stt: 'browser', // speech to text: 'browser' (Chrome/Edge built-in; Google/Microsoft do the recognising) | 'server' (sttUrl)
+    sttUrl: '', // a local Whisper server, OpenAI-compatible, e.g. http://localhost:8000/v1/audio/transcriptions
+    sttModel: 'whisper-1',
+    tts: 'browser', // text to speech: 'browser' (the PC's own voices) | 'server' (ttsUrl)
+    ttsUrl: '', // OpenAI-compatible, e.g. Kokoro-FastAPI http://localhost:8880/v1/audio/speech
+    ttsModel: 'tts-1',
+    ttsVoice: 'alloy', // the server's voice name (Kokoro: af_bella, am_michael...)
+    browserVoice: '', // part of a browser voice's name, e.g. "Guy" or "Aria"; '' = the page's choice
+    rate: 1, // speaking speed
+    language: 'en-US',
+    wakeWords: [], // extra names it answers to hands-free (its name and nicknames always work)
+    requireWakeWord: true, // hands-free: only answer when you say its name (or mid-conversation)
+    conversationSeconds: 30 // after it speaks or hears its name, follow-ups need no name for this long
   },
   perception: {
     // Its own coordinates: 'auto' = only if it knows the F3 screen (Simple and up, or once someone tells it),
@@ -1013,6 +1039,7 @@ class Perception {
       layout: this.layout(),
       places: this.agent.places.forPrompt(e.position, String(bot.game?.dimension), (p) => this.agent.where(p)),
       contraptions: this.contraptions(),
+      server: safe(() => this.agent.network.context()),
       rules: this.agent.etiquette.forPrompt(e.position, String(bot.game?.dimension)),
       pointedOut: this.agent.pointed && Date.now() - this.agent.pointed.at < 180000 ? this.agent.pointed.text : undefined,
       onlinePlayers: Object.keys(bot.players).filter((n) => n !== bot.username),
@@ -1587,6 +1614,14 @@ class ChatManager {
     return (CHAT_PERMISSIONS[mode] || []).includes(category)
   }
 
+  /** Public chat allowed here? (chat.publicChat: auto = not on public server networks) */
+  publicAllowed () {
+    const v = this.cfg.publicChat
+    if (v === true || v === 'true') return true
+    if (v === false || v === 'false') return false
+    return !safe(() => this.agent.network?.isNetwork())
+  }
+
   /** Queue a message. Resolves to the text actually sent, or null if it was blocked. */
   send (text, category = 'tool', opts = {}) {
     const job = this.queue.then(() => this.deliver(text, category, opts))
@@ -1663,6 +1698,25 @@ class ChatManager {
       else await sleep(ms)
     }
     if (!bot.entity) return null // disconnected while "typing"
+
+    // Voice first: when its owner listens on the voice page, what it says to them is spoken, not typed.
+    const owners = (this.agent.config.behavior.owners || []).map((o) => o.toLowerCase())
+    const toOwner = whisperTo && owners.includes(String(whisperTo).toLowerCase())
+    const voice = this.agent.voice
+    if (voice?.active() && (toOwner || (!whisperTo && !this.publicAllowed()))) {
+      voice.say(msg).catch(() => {})
+      this.lastSentAt = Date.now()
+      this.recentSelf.push({ text: msg.toLowerCase(), at: this.lastSentAt })
+      if (this.recentSelf.length > 10) this.recentSelf.shift()
+      memory.addChat(bot.username, msg, { self: true, whisper: true })
+      log.chat(`(said aloud${whisperTo ? ` to ${whisperTo}` : ''}) <${bot.username}> ${msg}  [${category}]`)
+      return msg
+    }
+    // On a public network it doesn't chat in public: privately to whoever it answers, or not at all.
+    if (!whisperTo && !this.publicAllowed() && category !== 'system') {
+      log.debug(`kept quiet in public chat: ${msg}`)
+      return null
+    }
 
     try {
       if (whisperTo) bot.whisper(whisperTo, msg)
@@ -1809,6 +1863,14 @@ class ChatResponder {
 
     // Players can teach it things ("you need an iron pickaxe for diamonds").
     if (!this.agent.social.isHostile(username)) this.agent.learnFacts(message, username, 0.35)
+
+    // Its owner asks "show me how...": explain it step by step while doing it (explain.js).
+    const isOwnerHere = this.agent.social.role(username) === 'owner'
+    if (isOwnerHere && SHOW_ME.test(message) && this.isAddressed(username, message, whisper) && this.agent.executor?.availableTools().includes('explainAndShow')) {
+      this.agent.brain.queueAction({ name: 'explainAndShow', args: { topic: message } }, `${username} asked me to explain: ${message}`)
+      this.agent.executor.abort('explaining something', { quiet: true })
+      return
+    }
 
     if (!this.agent.chat.allows('reply')) return
     const addressed = this.isAddressed(username, message, whisper)
@@ -3774,11 +3836,13 @@ class Agent {
     this.containers = new ContainerIntel(this, legacy)
     // Its mental map: home, bed, deaths, and the blocks it put down (whether it remembers each depends on skill).
     this.etiquette = new Etiquette(this, saved.etiquette)
+    this.network = new Network(this)
     this.places = new Places(saved.places, () => Math.min(0.98, 0.35 + 0.1 * (this.intelligence?.level('survival') ?? 3)))
     this.knownFacts = new Set(saved.knownFacts || []) // facts above its level it has learned
     this.reflexes = new Reflexes(this, saved.reflexes)
     this.goals = new Goals(this, saved.goals)
     this.viewer = new BotViewer(this)
+    this.voice = new Voice(this)
     this.memory.goals = this.goals
     this.learnedItems = new Set(saved.learnedItems || []) // recipes it worked out itself
     this.builder = { current: saved.building?.current || null, history: saved.building?.history || [], owner: config.server.username }
@@ -3885,6 +3949,28 @@ class Agent {
     s.self.position = "unknown: you don't know how to show your coordinates (the F3 screen). Positions are relative to you: dx = east(+)/west(-), dz = south(+)/north(-), dy = up/down. Give actions dx, dy, dz instead of x, y, z."
     s.recentActions = state.recentActions // what it did, as it did it
     return s
+  }
+
+  /**
+   * Plan a spoken walkthrough: a few short steps, each with a line to say and, if it helps, an action to show it or a
+   * spot to look at (explain.js runs them in time).
+   */
+  async planExplanation (topic, tools) {
+    const s = this.perception?.snapshot()
+    const near = s ? Object.entries(s.nearbyBlocks || {}).slice(0, 14).map(([n, b]) => `${n}${b.nearest ? ` at ${b.nearest.x} ${b.nearest.y} ${b.nearest.z}` : ''}`) : []
+    const facts = knowledge.relevantFacts(topic, 3, this.knowledgeOpts())
+    const sys = `${personaBlock(this.personality, this.bot.username)}
+
+Your friend asked you something in Minecraft and you're going to explain it out loud while showing it in the game, like a friend walking them through it.
+Plan 2 to 6 short steps. Each step: "say" = one or two short spoken sentences, in your own voice, no emojis; "action" = something you do in the game right then to show it (or null), using ONLY these: ${tools.join(', ')} with real arguments; "look" = a block position to look at while you say it (or null).
+Use what you actually have and what is really around you; if you can't show a step, just say it. Respond with ONLY JSON: {"steps": [{"say": "...", "action": {"name": "...", "args": {...}} or null, "look": {"x": 0, "y": 0, "z": 0} or null}]}`
+    const user = `They asked: "${topic}"
+Your inventory: ${s ? Object.entries(s.inventory.items).map(([n, c]) => `${c} ${n}`).join(', ') || 'nothing' : '?'}
+Around you: ${near.join('; ') || 'nothing notable'}
+${s?.contraptions?.length ? `Contraptions here: ${s.contraptions.join(' | ')}
+` : ''}${facts.length ? `What you know: ${facts.join(' ')}
+` : ''}You are at ${s ? `${Math.floor(s.self.position.x)} ${Math.floor(s.self.position.y)} ${Math.floor(s.self.position.z)}` : '?'}.`
+    return this.llm.chat([{ role: 'system', content: sys }, { role: 'user', content: user }], { priority: PRIORITY.reply, label: 'explain' }).catch(() => null)
   }
 
   /** "12 blocks north-east" (or the coordinates, when it knows F3), for places in its mental map. */
@@ -4070,6 +4156,10 @@ class Agent {
       startObtain: (item, count) => this.brain.startObtain(item, count),
       dropVerdict: (entity) => this.dropVerdict(entity),
       places: this.places,
+      network: this.network,
+      voice: this.voice,
+      planExplanation: (topic, tools) => this.planExplanation(topic, tools),
+      highlight: (pos) => this.viewer?.server && this.viewer.highlight({ blocks: [{ pos, name: '' }], entities: [] }),
       notify: (type, data) => this.onActionEvent(type, data)
     })
     this.reactor = new EventReactor(this)
@@ -4077,6 +4167,7 @@ class Agent {
     this.brain = new Brain(this)
     this.smalltalk = new SmallTalk(this)
     this.reactor.attach(bot)
+    this.network.attach(bot)
     this.senses.attach(bot)
     this.attachServerHelpers(bot)
 

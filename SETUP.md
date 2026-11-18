@@ -422,6 +422,23 @@ In the terminal you can type `!status` (or any `!command`) to control it, or typ
 | `!emotion` / `!emotion lock happy` | feelings |
 | `!help` | everything |
 
+### Talking to it out loud
+
+1. Start it with the viewer: `npm run viewer`.
+2. On the bot's PC, open http://localhost:3007/voice, press **Start**, allow the microphone.
+3. Say its name and talk ("hey Wanderer, come here", "Wanderer, show me how to make a furnace"). It answers out loud on that page.
+
+**From the PC you play on** (the microphone needs https there). In `config.local.json`:
+```json
+"viewer": { "host": "0.0.0.0", "password": "pick-something", "https": true }
+```
+Restart the bot, then on your gaming PC open `https://<bot-pc-ip>:3007/voice?key=pick-something`. The browser warns about the certificate the first time: **Advanced → Continue**. It's the bot's own. Keep the tab open while you play; Chrome or Edge work best.
+
+**Optional, fully local speech** (nothing leaves your PCs):
+- **Recognition:** run a Whisper server, then set `"voice": { "stt": "server", "sttUrl": "http://localhost:8000/v1/audio/transcriptions" }`.
+- **Speaking:** run Kokoro-FastAPI, then set `"tts": "server", "ttsUrl": "http://localhost:8880/v1/audio/speech", "ttsVoice": "af_bella"`.
+- **Graphics card:** both can run on the CPU, which leaves the graphics card to Ollama.
+
 ---
 
 ## 11. Keep it running

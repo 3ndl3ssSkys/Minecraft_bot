@@ -169,6 +169,7 @@ MIND [curious 5/10] Nobody's around. I'll punch a tree to get started.
 | Make it faster (smaller models, a fast chat model) | README → "Which model, and making it fast" |
 | Set its goals, feelings, personality | [CONFIGURING.md](CONFIGURING.md) |
 | Watch what it sees, its inventory and coordinates, change its feelings and goals, point things out to it, and talk to it from a browser | `npm run viewer` instead of `npm start`, then open http://localhost:3007 (README → "Watch it in a browser") |
+| Talk to it out loud while you play (it answers by voice, and explains things while showing them) | `npm run viewer`, then open http://localhost:3007/voice (SETUP.md → "Talking to it out loud" for using it from your gaming PC) |
 | Join a friend's server | [SETUP.md](SETUP.md) step 2 (which route fits) and step 6 |
 | Keep it running all the time | SETUP.md step 11 (`scripts\start-bot.bat` restarts it if it crashes) |
 | Get updates | `git pull`, then `npm install` (your `config.local.json` is never touched) |

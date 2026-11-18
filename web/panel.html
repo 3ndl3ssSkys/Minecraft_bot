@@ -143,6 +143,7 @@
       <button id="bCircle" title="Draw a circle around things to show them to the bot (C)">Circle</button>
       <label title="Field of view (Minecraft's Normal is 70)">FOV <input type="range" id="fov" min="30" max="110" step="1"> <span id="fovv"></span></label>
       <button id="bSmooth" title="Smooth out the camera's turning">Smooth</button>
+      <button id="bVoice" title="Talk to it out loud (hands-free: say its name). /voice is a lighter page for a phone or second screen.">Voice</button>
       <button id="bPanel" title="Hide or show the side panel">Panel</button>
     </div>
     <div class="hudbar" id="hudbar"></div>
@@ -240,6 +241,7 @@
   </div>
 </div>
 <div class="tip" id="tip"></div>
+<script src="/voice-client.js"></script>
 
 <script>
 'use strict'
@@ -686,7 +688,15 @@ function render (s) {
   if (tab === 'plans') renderPlans(s.plans)
 }
 function refresh () { fetch(`/state${q}`).then((r) => r.json()).then(render).catch(() => {}) }
+// voice: hands-free talking through this page (the same as /voice)
+const voice = new BotVoice({ q, log: (kind, text) => { if (kind === 'info') addLine({ at: Date.now(), kind: 'info', text }) }, state: (s, text) => { $('bVoice').classList.toggle('on', s === 'on' || s === 'talking'); if (s === 'blocked') note(text) } })
+$('bVoice').addEventListener('click', async () => {
+  if (voice.mode !== 'off') { voice.stop(); return }
+  if (window.speechSynthesis) window.speechSynthesis.speak(new SpeechSynthesisUtterance(''))
+  await voice.start('hands-free')
+})
 const events = new EventSource(`/events${q}`)
+events.addEventListener('speak', (e) => voice.speak(JSON.parse(e.data)))
 events.addEventListener('state', (e) => render(JSON.parse(e.data)))
 events.addEventListener('line', (e) => addLine(JSON.parse(e.data)))
 events.addEventListener('feed', (e) => JSON.parse(e.data).forEach(addLine))

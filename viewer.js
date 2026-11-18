@@ -14,6 +14,7 @@
 const fs = require('fs')
 const path = require('path')
 const http = require('http')
+const https = require('https')
 const { Vec3 } = require('vec3')
 const { resolvePointing, describePointing } = require('./pointing')
 
@@ -170,13 +171,33 @@ class BotViewer {
     }
     const bindHost = host !== '127.0.0.1' && host !== 'localhost' && !password ? '127.0.0.1' : host
     const app = pv.express()
-    const server = http.createServer(app)
+    const tls = this.cfg.https ? this.certificate() : null
+    const server = tls ? https.createServer(tls, app) : http.createServer(app)
     const io = pv.socketIo(server, { path: '/view/socket.io' })
     const allowed = (req) => !password || req.query?.key === password || req.headers['x-key'] === password
 
     app.use((req, res, next) => (allowed(req) || req.path.startsWith('/view/')) ? next() : res.status(401).send('Wrong or missing key (add ?key=your-password to the address).'))
     app.use(pv.express.json())
     app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'web', 'panel.html')))
+    // Voice (voice.js): a small page to talk with it, and the routes the page uses.
+    const voice = agent.voice
+    app.get('/voice', (req, res) => res.sendFile(path.join(__dirname, 'web', 'voice.html')))
+    app.get('/voice-client.js', (req, res) => res.type('js').sendFile(path.join(__dirname, 'web', 'voice-client.js')))
+    app.get('/voice/settings', (req, res) => res.json({ ...voice.settings(), secureHint: !tls && bindHost !== '127.0.0.1' }))
+    app.post('/voice/hello', (req, res) => { voice.hello(req.body?.id, req.body?.mode); res.json({ ok: true }) })
+    app.post('/voice/heard', (req, res) => res.json(voice.heard(req.body?.text, { ptt: Boolean(req.body?.ptt) })))
+    app.post('/voice/done', (req, res) => { voice.spoken(String(req.body?.id || '')); res.json({ ok: true }) })
+    app.post('/voice/listen', pv.express.raw({ type: () => true, limit: '10mb' }), async (req, res) => {
+      try {
+        const text = await voice.transcribe(req.body, req.headers['content-type'] || 'audio/webm')
+        res.json({ text, ...(text ? voice.heard(text, { ptt: req.query.ptt === '1' }) : { ok: false, why: 'nothing heard' }) })
+      } catch (err) { res.json({ ok: false, why: `speech-to-text failed: ${err.message}` }) }
+    })
+    app.get('/voice/audio/:id', (req, res) => {
+      const a = voice.audio.get(req.params.id)
+      if (!a) return res.status(404).end()
+      res.type(a.type).send(a.buf)
+    })
     // The 3D view: prismarine-viewer's page, with our script loaded first (field of view, smooth turning, the camera for pointing).
     const viewIndex = (req, res) => res.type('html').send('<!doctype html><html><head><meta charset="utf-8"><title>view</title><style>html{overflow:hidden}html,body{height:100%;margin:0;padding:0;background:#000}canvas{height:100%;width:100%;display:block}</style></head><body><script src="addon.js"></script><script src="index.js"></script></body></html>')
     app.get('/view/', viewIndex)
@@ -211,11 +232,11 @@ class BotViewer {
     io.use((socket, next) => (!password || socket.handshake.query?.key === password || socket.handshake.headers.referer?.includes(`key=${password}`)) ? next() : next(new Error('unauthorized')))
     io.on('connection', (socket) => this.onViewer(socket, pv))
 
-    server.listen(port, bindHost, () => agent.log.info(`Viewer: http://${bindHost === '0.0.0.0' ? 'localhost' : bindHost}:${port}${password ? '/?key=…' : ''} (the bot's view, inventory, coordinates and chat)`))
+    server.listen(port, bindHost, () => agent.log.info(`Viewer: ${tls ? 'https' : 'http'}://${bindHost === '0.0.0.0' ? 'localhost' : bindHost}:${port}${password ? '/?key=…' : ''} (the bot's view, inventory, coordinates and chat)`))
     server.on('error', (err) => agent.log.warn(`Viewer could not start on port ${port}: ${err.message}`))
     this.server = server
     this.io = io
-    this.url = `http://${bindHost}:${port}`
+    this.url = `${tls ? 'https' : 'http'}://${bindHost}:${port}`
     this.tapLog()
     this.timer = setInterval(() => this.broadcast('state', this.status()), 1000)
     this.timer.unref?.()
@@ -229,6 +250,35 @@ class BotViewer {
     this.io?.close()
     this.server?.close()
     this.server = null
+  }
+
+  /**
+   * A self-signed certificate for https (browsers only allow the microphone on https or localhost). Made once and
+   * kept next to the save file; the browser warns about it the first time ("Advanced → continue").
+   */
+  certificate () {
+    const file = path.join(path.dirname(path.resolve(__dirname, this.agent.config.learning.file)), 'viewer-cert.json')
+    try { const c = JSON.parse(fs.readFileSync(file, 'utf8')); if (c.key && c.cert) return c } catch { /* make one */ }
+    let forge
+    try { forge = require('node-forge') } catch {
+      this.agent.log.warn('viewer.https needs node-forge: run "npm install" in the bot folder. Using http.')
+      return null
+    }
+    const keys = forge.pki.rsa.generateKeyPair(2048)
+    const cert = forge.pki.createCertificate()
+    cert.publicKey = keys.publicKey
+    cert.serialNumber = String(Date.now())
+    cert.validity.notBefore = new Date()
+    cert.validity.notAfter = new Date(Date.now() + 5 * 365 * 86400000)
+    const attrs = [{ name: 'commonName', value: 'minecraft-bot' }]
+    cert.setSubject(attrs)
+    cert.setIssuer(attrs)
+    const ips = Object.values(require('os').networkInterfaces()).flat().filter((i) => i && i.family === 'IPv4').map((i) => ({ type: 7, ip: i.address }))
+    cert.setExtensions([{ name: 'subjectAltName', altNames: [{ type: 2, value: 'localhost' }, ...ips] }])
+    cert.sign(keys.privateKey, forge.md.sha256.create())
+    const out = { key: forge.pki.privateKeyToPem(keys.privateKey), cert: forge.pki.certificateToPem(cert) }
+    try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(out)) } catch { /* use it this time anyway */ }
+    return out
   }
 
   /** Which prismarine-viewer texture set to use (the nearest version it has). */

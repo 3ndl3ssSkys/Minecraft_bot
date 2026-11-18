@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Talk to the bot</title>
+<style>
+  :root { --bg: #101114; --panel: #1b1d22; --line: #33373f; --text: #e8e8e8; --dim: #9aa0aa; --accent: #6cc070; --you: #7fb2ff; --bot: #e8c547; --warn: #e0b050; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, sans-serif; }
+  .wrap { max-width: 640px; margin: 0 auto; height: 100%; display: flex; flex-direction: column; padding: 16px; gap: 12px; }
+  h1 { font-size: 18px; margin: 0; }
+  .muted { color: var(--dim); font-size: 13px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  select, button { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; }
+  button { cursor: pointer; }
+  #status { padding: 10px 12px; border-radius: 8px; background: var(--panel); border: 1px solid var(--line); }
+  #status.blocked { border-color: var(--warn); color: var(--warn); }
+  #status.on { border-color: var(--accent); }
+  #ptt { width: 100%; padding: 28px; font-size: 20px; border-radius: 14px; user-select: none; touch-action: none; }
+  #ptt.held { background: #2f4a32; border-color: var(--accent); }
+  #log { flex: 1; overflow-y: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; min-height: 0; }
+  #log div { margin: 3px 0; white-space: pre-wrap; word-break: break-word; }
+  .you { color: var(--you); } .bot { color: var(--bot); } .info { color: var(--dim); font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Talk to <span id="name">the bot</span></h1>
+  <div class="muted">Leave this page open while you play. Hands-free: say its name and talk. It answers out loud here, never in game chat. "Show me how…" makes it explain while it does it.</div>
+  <div class="row">
+    <select id="mode" title="How you talk">
+      <option value="hands-free">Hands-free (say its name)</option>
+      <option value="push-to-talk">Push to talk</option>
+    </select>
+    <select id="voice" title="Its voice (browser voices)"><option value="">Default voice</option></select>
+    <button id="toggle">Start</button>
+  </div>
+  <div id="status">Press Start and allow the microphone.</div>
+  <button id="ptt" disabled>Hold to talk (or V)</button>
+  <div id="log"></div>
+</div>
+<script src="/voice-client.js"></script>
+<script>
+  'use strict'
+  const key = new URLSearchParams(location.search).get('key') || ''
+  const q = key ? `?key=${encodeURIComponent(key)}` : ''
+  const $ = (id) => document.getElementById(id)
+  const store = { get (k, d) { try { return localStorage.getItem('botvoice.' + k) ?? d } catch { return d } }, set (k, v) { try { localStorage.setItem('botvoice.' + k, v) } catch {} } }
+  function log (kind, text) {
+    const d = document.createElement('div')
+    d.className = kind
+    d.textContent = (kind === 'you' ? 'You: ' : kind === 'bot' ? 'Bot: ' : '') + text
+    $('log').appendChild(d)
+    $('log').scrollTop = $('log').scrollHeight
+  }
+  function state (s, text) { $('status').className = s; $('status').textContent = text; $('ptt').disabled = s === 'off' || s === 'blocked' }
+  const voice = new BotVoice({ q, log, state })
+  $('mode').value = store.get('mode', 'hands-free')
+  fetch(`/voice/settings${q}`).then((r) => r.json()).then((s) => { $('name').textContent = s.name }).catch(() => {})
+  const fillVoices = () => {
+    const sel = $('voice')
+    const keep = store.get('voice', '')
+    sel.innerHTML = '<option value="">Default voice</option>' + voice.voices.map((v) => `<option>${v.name.replace(/</g, '')}</option>`).join('')
+    sel.value = keep
+  }
+  setTimeout(fillVoices, 300)
+  if (window.speechSynthesis) window.speechSynthesis.addEventListener?.('voiceschanged', fillVoices)
+  $('voice').addEventListener('change', () => store.set('voice', $('voice').value))
+  $('mode').addEventListener('change', async () => { store.set('mode', $('mode').value); if (voice.mode !== 'off') { voice.stop(); await voice.start($('mode').value) } })
+  $('toggle').addEventListener('click', async () => {
+    if (voice.mode !== 'off') { voice.stop(); $('toggle').textContent = 'Start'; return }
+    // A first word on a click unlocks audio playback in the browser.
+    if (window.speechSynthesis) window.speechSynthesis.speak(new SpeechSynthesisUtterance(''))
+    if (await voice.start($('mode').value)) $('toggle').textContent = 'Stop'
+  })
+  const down = (e) => { e.preventDefault(); $('ptt').classList.add('held'); voice.pttDown() }
+  const up = (e) => { e.preventDefault(); $('ptt').classList.remove('held'); voice.pttUp() }
+  $('ptt').addEventListener('pointerdown', down)
+  $('ptt').addEventListener('pointerup', up)
+  $('ptt').addEventListener('pointerleave', (e) => { if ($('ptt').classList.contains('held')) up(e) })
+  document.addEventListener('keydown', (e) => { if ((e.key === 'v' || e.key === 'V') && !e.repeat) down(e) })
+  document.addEventListener('keyup', (e) => { if (e.key === 'v' || e.key === 'V') up(e) })
+  const events = new EventSource(`/events${q}`)
+  events.addEventListener('speak', (e) => voice.speak(JSON.parse(e.data)))
+</script>
+</body>
+</html>
