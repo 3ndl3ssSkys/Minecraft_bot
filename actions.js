@@ -1982,8 +1982,8 @@ class ActionExecutor {
    * @param {object} [deps.memory]   Memory (recent chat, e.g. duel invitations)
    * @param {object} [deps.tasks]    TaskManager (fights the bot agreed to)
    */
-  constructor ({ bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes, parkour, recipes, startObtain, dropVerdict, places, network, voice, planExplanation, highlight }) {
-    Object.assign(this, { bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes, parkour, recipes, startObtain, dropVerdict, places, network, voice, planExplanation, highlight })
+  constructor ({ bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes, parkour, recipes, startObtain, dropVerdict, places, network, voice, planExplanation, highlight, research }) {
+    Object.assign(this, { bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes, parkour, recipes, startObtain, dropVerdict, places, network, voice, planExplanation, highlight, research })
     this.current = null // { name, args, startedAt, controller }
     this.memoryBag = {} // things actions remember between runs (the last circuit it inspected)
     this.pauseUntil = 0
@@ -2025,6 +2025,7 @@ class ActionExecutor {
       if ((name === 'readMenu' || name === 'clickMenu') && !this.network?.window) return false
       if ((name === 'useHotbarItem' || name === 'serverCommand') && !safe(() => this.network?.isNetwork())) return false
       if (name === 'navigateMenus' && !this.network?.window && !safe(() => this.network?.isNetwork() || this.network?.hotbarItems().length)) return false
+      if (ACTIONS[name].minBaseLevel && !this.research?.allowed()) return false // only the best players read up online
       if (ACTIONS[name].minKnowledge && (this.intel?.level?.('knowledge') ?? 0) < ACTIONS[name].minKnowledge) return false // redstone know-how is for experienced players
       if (name === 'chatMessage' && !this.chat.allows('tool')) return false
       if ((name === 'experimentCrafting' || name === 'askForHelp') && this.recipes?.knowsEverything) return false // it already knows every recipe
@@ -2087,6 +2088,7 @@ class ActionExecutor {
       network: this.network,
       voice: this.voice,
       planExplanation: this.planExplanation,
+      research: this.research,
       highlight: this.highlight,
       tools: () => this.availableTools(),
       dimension: () => String(this.bot.game?.dimension),
@@ -2148,6 +2150,7 @@ class ActionExecutor {
 require('./skills').install(ACTIONS, {
   argNumber, argString, ActionError, sleep, gotoGoal, goals, placeAt, digWithAbort, equipToolFor, findInventoryItem, throwIfAborted, collectNearbyDrops
 }, SHORT)
+require('./research').install(ACTIONS, { argString, ActionError }, SHORT)
 require('./explain').install(ACTIONS, { argString, ActionError, sleep }, SHORT)
 require('./network').install(ACTIONS, { argNumber, argString, ActionError, sleep, gotoGoal, goals }, SHORT)
 require('./tech').install(ACTIONS, { argNumber, argString, ActionError, sleep, gotoGoal, goals, placeAt, digWithAbort, findInventoryItem, throwIfAborted }, SHORT)

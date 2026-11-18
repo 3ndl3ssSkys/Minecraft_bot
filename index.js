@@ -47,6 +47,7 @@ const mechanics = require('./mechanics')
 const { Network } = require('./network')
 const { Voice, SHOW_ME } = require('./voice')
 const { VoiceChat } = require('./svc')
+const { Research } = require('./research')
 const { BotViewer } = require('./viewer')
 const { installHumanInput } = require('./look')
 const { installMotion, adjustLook } = require('./motion')
@@ -363,7 +364,8 @@ const DEFAULT_CONFIG = {
   network: {
     public: 'auto', // auto (detect a minigame network from the scoreboard, named hotbar items, tab list) | true | false
     acceptInvites: true, // accept party / friend / teleport invites from its owners by itself
-    inviteVia: 'auto' // auto (Java: the clickable or named command, menus if that fails; Bedrock: menus) | chat | menu
+    inviteVia: 'auto', // auto (Java: the clickable or named command, menus if that fails; Bedrock: menus) | chat | menu
+    pvpGames: true // in PvP minigames (duels, SkyWars, Bed Wars...) fight the other side by itself once the game is on
   },
   // Being a decent member of a server (etiquette.js): rules people set, and leaving farms, pens, pets and towns alone.
   etiquette: {
@@ -417,6 +419,16 @@ const DEFAULT_CONFIG = {
     viewDistance: 4, // chunks around it to show (more = heavier for the browser)
     fov: 70, // field of view in the browser, in degrees (Minecraft's "Normal" is 70); the page has a slider too
     https: false // serve https (self-signed) so other PCs on your network can use the microphone (voice page)
+  },
+  // Looking things up online (research.js): minigames, designs, strategies. Only for Master and Impossible (configured level).
+  research: {
+    enabled: true,
+    minLevel: 6, // 6 = master, 7 = impossible
+    autoMinigames: true, // read up on a server's minigame the first time it plays it
+    maxPages: 3,
+    searxngUrl: '', // your own SearXNG instead of DuckDuckGo (e.g. http://localhost:8888)
+    braveKey: '', // or a Brave Search API key
+    timeoutMs: 12000
   },
   // Simple Voice Chat (svc.js): on servers with the proximity voice mod/plugin it talks and listens like a player with a
   // microphone. Speaking needs voice.tts "server" (Kokoro), hearing needs voice.stt "server" (Whisper).
@@ -3790,6 +3802,8 @@ ${said ? `${name} just said: ${said}
       Object.keys(state.nearbyBlocks).join(' '), state.nearbyEntities.map((e) => e.name).join(' '), state.world.phase, state.self.dimension,
       state.senses.heard.join(' ')
     ].filter(Boolean).join(' '), 4, agent.knowledgeOpts())
+    // What it read up on online (research.js) that fits what's going on.
+    knowhow.push(...agent.research.relevant([memory.goal, state.status.task?.what, state.server?.sidebar, state.server?.pvpGame, Object.keys(state.nearbyBlocks).join(' '), state.contraptions?.join(' ')].filter(Boolean).join(' '), 3))
 
     const remembered = agent.longMemory?.forPrompt([memory.goal, state.status.task?.what, state.nearbyEntities.map((e) => e.name).join(' '), Object.keys(state.nearbyBlocks).join(' ')].filter(Boolean).join(' '), 3) || []
     const nudges = []
@@ -3880,6 +3894,7 @@ class Agent {
     this.containers = new ContainerIntel(this, legacy)
     // Its mental map: home, bed, deaths, and the blocks it put down (whether it remembers each depends on skill).
     this.etiquette = new Etiquette(this, saved.etiquette)
+    this.research = new Research(this, saved.research) // reading up online (Master and Impossible only)
     this.network = new Network(this)
     this.places = new Places(saved.places, () => Math.min(0.98, 0.35 + 0.1 * (this.intelligence?.level('survival') ?? 3)))
     this.knownFacts = new Set(saved.knownFacts || []) // facts above its level it has learned
@@ -4017,6 +4032,19 @@ ${s?.contraptions?.length ? `Contraptions here: ${s.contraptions.join(' | ')}
 ` : ''}${facts.length ? `What you know: ${facts.join(' ')}
 ` : ''}You are at ${s ? `${Math.floor(s.self.position.x)} ${Math.floor(s.self.position.y)} ${Math.floor(s.self.position.z)}` : '?'}.`
     return this.llm.chat([{ role: 'system', content: sys }, { role: 'user', content: user }], { priority: PRIORITY.reply, label: 'explain' }).catch(() => null)
+  }
+
+  /** A minigame it hasn't played before on this network: read up on it in the background (Master and Impossible). */
+  researchGame () {
+    const r = this.research
+    if (!r.allowed() || r.cfg.autoMinigames === false || !this.network.isNetwork() || this.network.inLobby()) return
+    const name = this.network.pvpGame()?.name || this.network.sidebar()?.title
+    if (!name || name.length < 3 || /lobby|hub/i.test(name)) return
+    const topic = `${name} on ${String(this.config.server.host || '').replace(/^(play|mc|join)\./i, '')}`
+    this.researched ||= new Set()
+    if (this.researched.has(topic) || r.find(topic)) return
+    this.researched.add(topic)
+    r.research(topic, { kind: 'game' }).catch((err) => this.log.debug?.(`research failed: ${err.message}`))
   }
 
   /** "12 blocks north-east" (or the coordinates, when it knows F3), for places in its mental map. */
@@ -4204,6 +4232,7 @@ ${s?.contraptions?.length ? `Contraptions here: ${s.contraptions.join(' | ')}
       places: this.places,
       network: this.network,
       voice: this.voice,
+      research: this.research,
       planExplanation: (topic, tools) => this.planExplanation(topic, tools),
       highlight: (pos) => this.viewer?.server && this.viewer.highlight({ blocks: [{ pos, name: '' }], entities: [] }),
       notify: (type, data) => this.onActionEvent(type, data)
@@ -4437,6 +4466,7 @@ ${s?.contraptions?.length ? `Contraptions here: ${s.contraptions.join(' | ')}
       if (!bot.entity || this.dead) return
       try {
         const state = this.perception.snapshot()
+        if (Date.now() - (this.gameResearchAt || 0) > 20000) { this.gameResearchAt = Date.now(); safe(() => this.researchGame()) }
         if (Date.now() - (this.signRulesAt || 0) > 10000) { this.signRulesAt = Date.now(); safe(() => this.etiquette.readSigns(bot.entity.position)) } // "no griefing" signs become rules
         this.reactor.observe(state)
         this.social.observe(state)

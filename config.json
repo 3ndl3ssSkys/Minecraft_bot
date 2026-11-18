@@ -250,7 +250,8 @@
   "network": {
     "public": "auto",
     "acceptInvites": true,
-    "inviteVia": "auto"
+    "inviteVia": "auto",
+    "pvpGames": true
   },
   "etiquette": {
     "enabled": true,
@@ -333,6 +334,15 @@
     "viewDistance": 4,
     "fov": 70,
     "https": false
+  },
+  "research": {
+    "enabled": true,
+    "minLevel": 6,
+    "autoMinigames": true,
+    "maxPages": 3,
+    "searxngUrl": "",
+    "braveKey": "",
+    "timeoutMs": 12000
   },
   "svc": {
     "enabled": "auto",

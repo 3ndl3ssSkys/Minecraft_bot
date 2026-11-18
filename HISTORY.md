@@ -556,6 +556,36 @@ It also had a stray line that reset the autopilot after nearly every action. Tha
 
 **Not verified:** a real Whisper model; The Hive itself (the Bedrock route through ViaBedrock, whether its form menus arrive as windows); real Java network menus.
 
+## 26. Simple Voice Chat; PvP with the owner; online research
+
+**The user asked:**
+- Servers they play use Simple Voice Chat; the bot should talk in it.
+- It should play PvP with them on Java servers for fun, with other minigames a bonus. It would have to learn them, or research online how they work on that server.
+- Internet access for researching good builds, redstone designs and strategies, only for extremely high-level bots.
+
+**Done:**
+- **`svc.js`:** the protocol from henkelmax/simple-voice-chat (branch 1.21.5 on raw.githubusercontent; `voicechat_compatibility_version=21`).
+  - **Handshake over plugin channels:** request_secret(int version) → secret (16-byte key, connection UUID, port, player UUID, codec byte, MTU, distance, keep-alive, groups, host string, recording flag); client_state(muted, disabled).
+  - **UDP:** every packet is `0xFF`, then the connection UUID (client→server only), then a varint-length payload encrypted with AES-128-GCM (12-byte IV first, 16-byte tag last) whose first byte is the packet id.
+  - **Packet ids:** 1 Mic (opus byteArray, long seq, bool whisper), 2 PlayerSound (channel, sender, data, seq, float distance, flags), 3 Group, 4 Location (plus 3 doubles), 5 Authenticate, 6 AuthAck(16-byte nonce), 7 Ping, 8 KeepAlive, 9 ConnectionCheck(nonce), 10 CheckAck.
+  - **Codec:** Opus via `opusscript` (an optional dependency; WebAssembly, so no build tools on Windows).
+  - **Routing:** `Voice.route` sends speech to voice chat when a player spoke to it there (30 s) or its owner is within voice distance (`svc.preferForOwner`); otherwise the voice page, otherwise typed chat. `ChatManager.deliver` and `explainAndShow` use it.
+  - **Hearing:** utterances go to Whisper, then to `responder.onMessage` only when named or mid-conversation. Common Whisper noise on silence is dropped.
+- **PvP:**
+  - Its owner's spar requests are accepted 95% of the time.
+  - `attackTarget` takes `game` and `until`. Outside arenas, sparring stops at `pvp.sparStopHealth` (`combat.fight` checks its own health and the target's metadata health: index 9 on 1.17+, 8 before), with outcomes `spar_won`/`spar_lost` and a "gg".
+  - `Network.pvpGame()`: PvP game words in the sidebar, boss bars or title; survival mode; not lobby or countdown. `Network.teammate()`: same team object/name or name colour.
+  - `Brain.gameStep` (right after reflexes) attacks the nearest visible non-teammate. `assertMayFightPlayer(…, game)` and `etiquette.check` allow it inside a game.
+- **`research.js`:** described in the file table.
+
+**Verified:**
+- Unit tests:
+  - svc: byte formats and crypto. Against a fake UDP voice server written from the mod's source: the handshake with the nonce, keep-alive echo, 1.00 s of a player's speech assembled as 16 kHz WAV, 0.5 s of speech sent as 25 Opus frames in about 600 ms with sequence numbers and the end packet.
+  - pvp: game vs lobby vs countdown vs plain server; teammates.
+  - research: a stub search page (ads, redirects), wiki, page text, the notes coming back in a Bed Wars context, no repeat lookups, the level gate.
+
+**Not verified:** a real Simple Voice Chat server; real minigames; real web search (DuckDuckGo may rate-limit; use SearXNG if so).
+
 ## Where it stands now
 
 **Next for the user:**

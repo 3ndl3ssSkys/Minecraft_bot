@@ -337,6 +337,7 @@ class Learning {
       chests: a.containers?.toJSON(),
       places: a.places?.toJSON(),
       etiquette: a.etiquette?.toJSON(),
+      research: a.research?.toJSON(),
       reflexes: a.reflexes?.toJSON(),
       goals: a.goals?.toJSON(),
       knownFacts: a.knownFacts ? [...a.knownFacts] : undefined,

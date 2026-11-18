@@ -610,6 +610,17 @@ Start it with `npm run viewer` and open **`/voice`** (e.g. http://localhost:3007
 - **From another PC:** browsers only allow the microphone on https or on the same PC. Set `viewer.host` to `"0.0.0.0"`, a `viewer.password`, and `viewer.https: true`, then open `https://<bot-pc>:3007/voice?key=<password>`. Click through the certificate warning once (it's the bot's own certificate).
 - **In-game voice chat** (Simple Voice Chat, PlasmoVoice) isn't supported: there's no Node client for Simple Voice Chat, and public servers rarely have it.
 
+## In-game voice chat (Simple Voice Chat, `svc`)
+
+On servers with the Simple Voice Chat mod or plugin, the bot joins voice chat by itself and talks and listens like a player with a microphone.
+- **Speaking:** its words are spoken through Kokoro (the local voice server) and sent as proximity voice. People near it hear it in game.
+- **Hearing:** what players say near it goes through Whisper. It answers when someone says its name, or keeps talking with whoever is already talking with it, in voice. People talking to each other are left alone.
+- **You:** when you're close enough to hear it in game, it talks to you there instead of in chat or on the voice page (`svc.preferForOwner`).
+- **"Show me how…" by voice** works here too: it explains in voice chat while doing it.
+- **Needs:** the voice server (`npm run voice-server`), with `voice.stt` and `voice.tts` set to `"server"`. Nothing to install on the Minecraft server beyond the mod it already has.
+- **How:** it implements the mod's own protocol (version 21, the 2.6/2.7 releases): the secret over the Minecraft connection, then encrypted UDP with Opus audio. If a server runs a newer release that refuses it, raise `svc.compatibilityVersion`.
+- **Tested** against a fake voice server written from the mod's source code. Not yet on a real server.
+
 ## Public servers and minigame networks (`network`)
 
 - **What it notices:** when it's on a minigame network (sidebar scoreboard, named hotbar items like "Game Selector", a store link in the tab list, lots of players).
@@ -631,6 +642,28 @@ Start it with `npm run viewer` and open **`/voice`** (e.g. http://localhost:3007
   - **Accounts:** public servers check accounts, so the bot needs its own Microsoft account with Minecraft (an offline account can't join), and many networks forbid bots, which can get its account banned.
   - **Bedrock networks:** The Hive is Bedrock-only and would go through the Bedrock route. That route can't break blocks or use inventories, and its menu support is early.
   - **Minigames:** the model is slow for fast PvP minigames; its reflexes fight, but it won't play like a skilled player.
+
+## PvP for fun
+
+- **Friendly spars:** "1v1 me", "let's pvp". It always takes its owner up on it (others depending on how it likes them).
+  - On a normal server it fights for real (its combat skills, by level) but stops when either side drops to 3 hearts, says "gg", and nobody loses their stuff.
+  - "to the death" (or an arena) fights it out. `pvp.sparStopHealth` sets where it stops.
+- **PvP minigames:** duels, SkyWars, Bed Wars, The Bridge, sumo, FFA, UHC, Treasure Wars... It recognises them from the scoreboard, boss bars and titles, but not in the lobby or while waiting in the cage.
+  - Once the game is on, it goes after the nearest enemy it can see, including you if you're on the other side.
+  - It never attacks a teammate (read from the scoreboard teams and name colours).
+  - Server PvP rules don't stop it inside the game.
+  - The model still decides the rest: objectives, loot, bridging, beds. Master and Impossible bots also read up on the minigame (below).
+
+## Reading up online (`research`, Master and Impossible only)
+
+The best bots look things up like a dedicated player reading the wiki and guides:
+- **Lookups:** how a server's minigame works, good redstone designs, building ideas, strategies.
+- **Sources:** DuckDuckGo (no key needed; or your own SearXNG with `research.searxngUrl`, or Brave Search with `research.braveKey`) and the Minecraft Wiki's API.
+- **What it keeps:** it reads the top pages and keeps a few short practical notes, with sources. They're saved, and the ones that fit what it's doing go into its decisions from then on.
+- **How:** the `research` action, plus the first time it plays a minigame on a network it reads up on it by itself (`research.autoMinigames`).
+- **Queries** only contain the topic (and a public server's address for its minigames), never anything about you.
+- **Only for Master and Impossible**, by configured level (`research.minLevel`); `research.enabled: false` turns it off.
+- **Limit:** a redstone design or a build it reads about becomes notes for the model. Building it in code still only works for the designs it knows (see Redstone).
 
 ## Game modes and coordinates
 

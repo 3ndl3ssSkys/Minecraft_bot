@@ -246,6 +246,17 @@ You can also put the whole object inline: `"personality": { "name": "...", ... }
 - **`network.inviteVia`:** `auto` (Java: the clickable or named command, menus if that fails; Bedrock: menus), `chat`, or `menu`.
 - **`chat.publicChat`:** `auto` = no public chat on networks; `true`/`false` to force it.
 
+**In-game voice chat** (`svc`, Simple Voice Chat):
+- **`enabled`:** `auto` (join when the server has the mod) / `true` / `false`.
+- **`preferForOwner`:** talk to you in voice chat when you're in earshot.
+- **`answerOthers`:** answer other players who talk to it by name.
+- **`compatibilityVersion`:** 21 (mod 2.6/2.7); raise it for a newer release that refuses it.
+- **Needs** `voice.stt`/`voice.tts` `"server"` (`npm run voice-server`).
+
+**PvP** (`pvp.sparStopHealth`): where a friendly spar outside an arena stops (6 = 3 hearts). `network.pvpGames: false` stops it fighting by itself in PvP minigames.
+
+**Research** (`research`): `enabled`, `minLevel` (6 = master, 7 = impossible), `autoMinigames`, `maxPages`, `searxngUrl`, `braveKey`.
+
 **Server manners** (`etiquette`):
 
 ```json
