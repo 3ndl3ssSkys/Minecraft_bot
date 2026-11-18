@@ -59,9 +59,7 @@ function install (ACTIONS, h, SHORT = {}) {
       const steps = cleanSteps(await ctx.planExplanation(topic, [...DEMO].filter((n) => allowed.includes(n))), allowed)
       if (!steps.length) throw new ActionError('NO_PLAN', `Couldn't work out how to explain "${topic}".`)
       const owner = (ctx.config.behavior.owners || [])[0]
-      const say = (line) => ctx.voice?.active()
-        ? ctx.voice.say(line)
-        : ctx.chat.send(line, 'reply', { whisperTo: owner && bot.players[owner] ? owner : undefined })
+      const say = async (line) => (await ctx.voice?.speakTo(owner, line)) ?? ctx.chat.send(line, 'reply', { whisperTo: owner && bot.players[owner] ? owner : undefined })
       let shown = 0
       const notes = []
       for (const [i, s] of steps.entries()) {

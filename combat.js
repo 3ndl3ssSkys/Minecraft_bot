@@ -274,6 +274,12 @@ async function consume (bot, item, signal) {
  * Fight `entity` with `style` (from learning.js). Returns
  * { outcome: 'win'|'fled'|'escaped'|'timeout', hitsLanded, hitsTaken, healthLost, durationMs, used }.
  */
+/** A player's health from its entity metadata (index 9 since 1.17, 8 before), or null when the server hides it. */
+function playerHealth (bot, e) {
+  const v = Number(e?.metadata?.[bot.registry?.version?.['>=']?.('1.17') ? 9 : 8])
+  return Number.isFinite(v) && v > 0 && v <= 40 ? v : null
+}
+
 async function fight (ctx, entity, style, maxSeconds) {
   const { bot, signal, log } = ctx
   const prof = ctx.intel?.combatProfile?.() || FULL_PROFILE
@@ -339,6 +345,11 @@ async function fight (ctx, entity, style, maxSeconds) {
         break
       }
       if (ctx.isPaused?.()) { stopMoving(); await abortableSleep(50, signal); continue } // typing
+      if (style.sparStop) { // a friendly spar: whoever gets low first, it's over
+        if (bot.health <= style.sparStop) { outcome = 'spar_lost'; break }
+        const th = playerHealth(bot, target)
+        if (th !== null && th <= style.sparStop) { outcome = 'spar_won'; break }
+      }
       if (bot.health <= style.retreatHealth && bot.health < startHealth && !kit.totem && !kit.gap && !kit.drink.healing && !kit.splash.healing) {
         outcome = 'fled'
         break

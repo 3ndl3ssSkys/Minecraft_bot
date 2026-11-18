@@ -46,6 +46,7 @@ const { Etiquette } = require('./etiquette')
 const mechanics = require('./mechanics')
 const { Network } = require('./network')
 const { Voice, SHOW_ME } = require('./voice')
+const { VoiceChat } = require('./svc')
 const { BotViewer } = require('./viewer')
 const { installHumanInput } = require('./look')
 const { installMotion, adjustLook } = require('./motion')
@@ -374,6 +375,7 @@ const DEFAULT_CONFIG = {
     mode: 'defensive', // 'never' | 'defensive' (fight players who attack it) | 'always'
     rethinkSeconds: 6, // during a fight with a player, ask the mind every N s whether to keep going (0 = never)
     allowSparring: true, // accept friendly duels when a player asks ("1v1 me")
+    sparStopHealth: 6, // a friendly spar outside an arena or minigame stops when either side drops to this (6 = 3 hearts)
     neverAttackOwners: true
   },
   // Long-term memory: what it keeps across sessions (in its save file). Independent of intelligence.learn,
@@ -415,6 +417,15 @@ const DEFAULT_CONFIG = {
     viewDistance: 4, // chunks around it to show (more = heavier for the browser)
     fov: 70, // field of view in the browser, in degrees (Minecraft's "Normal" is 70); the page has a slider too
     https: false // serve https (self-signed) so other PCs on your network can use the microphone (voice page)
+  },
+  // Simple Voice Chat (svc.js): on servers with the proximity voice mod/plugin it talks and listens like a player with a
+  // microphone. Speaking needs voice.tts "server" (Kokoro), hearing needs voice.stt "server" (Whisper).
+  svc: {
+    enabled: 'auto', // auto: join when the server has the mod | true: always ask | false: never
+    compatibilityVersion: 21, // the mod's protocol version (21 = mod 2.6/2.7); raise it if the server says yours is too old
+    preferForOwner: true, // talk to its owner in voice chat (instead of the voice page or chat) when they're close enough to hear
+    answerOthers: true, // answer other players who talk to it by name in voice chat
+    silenceMs: 700 // a pause this long ends what someone was saying
   },
   // Talking with it out loud on the viewer's voice page (voice.js): http(s)://<bot pc>:3007/voice
   voice: {
@@ -1700,10 +1711,22 @@ class ChatManager {
     }
     if (!bot.entity) return null // disconnected while "typing"
 
-    // Voice first: when its owner listens on the voice page, what it says to them is spoken, not typed.
+    // Voice first: in the game's voice chat when they talked to it there (or its owner is in earshot), on the voice
+    // page when its owner listens there; typed otherwise.
     const owners = (this.agent.config.behavior.owners || []).map((o) => o.toLowerCase())
     const toOwner = whisperTo && owners.includes(String(whisperTo).toLowerCase())
     const voice = this.agent.voice
+    const lastSpeaker = memory.chat.filter((c) => !c.self).at(-1)?.from
+    const route = voice?.route(whisperTo || lastSpeaker)
+    if (route === 'svc') {
+      voice.sayInGame(msg).catch((err) => log.warn(`Voice chat speech failed: ${err.message}`))
+      this.lastSentAt = Date.now()
+      this.recentSelf.push({ text: msg.toLowerCase(), at: this.lastSentAt })
+      if (this.recentSelf.length > 10) this.recentSelf.shift()
+      memory.addChat(bot.username, msg, { self: true })
+      log.chat(`(said in voice chat${whisperTo || lastSpeaker ? ` to ${whisperTo || lastSpeaker}` : ''}) <${bot.username}> ${msg}  [${category}]`)
+      return msg
+    }
     if (voice?.active() && (toOwner || (!whisperTo && !this.publicAllowed()))) {
       voice.say(msg).catch(() => {})
       this.lastSentAt = Date.now()
@@ -3111,7 +3134,7 @@ ${said ? `${name} just said: ${said}
         if (this.paused || !agent.bot?.entity || agent.dead || agent.bot.isSleeping) { await this.idle(1000); continue }
         if (agent.reflexes?.busy) { await this.idle(100); continue } // the body is busy saving itself
 
-        let decision = this.forced.shift() || this.reflex() || this.resumeStep() || this.habitStep() || agent.tasks.nextForcedAction() || this.obtainStep() || this.nextPlanned() || this.autopilotStep()
+        let decision = this.forced.shift() || this.reflex() || this.gameStep() || this.resumeStep() || this.habitStep() || agent.tasks.nextForcedAction() || this.obtainStep() || this.nextPlanned() || this.autopilotStep()
         if (!decision) decision = await this.usePrethought()
         if (!decision) {
           // Throttle: never ask the LLM more often than minLlmIntervalMs.
@@ -3238,6 +3261,25 @@ ${said ? `${name} just said: ${said}
     return null
   }
 
+  /**
+   * In a PvP minigame: go for the nearest enemy it can see (never a teammate), like any player once the cages open.
+   * The model still decides the rest (objectives, loot, bridging); this keeps it from standing around mid-fight.
+   */
+  gameStep () {
+    const agent = this.agent
+    const { bot, network, executor } = agent
+    const game = safe(() => network.pvpGame())
+    if (!game || executor.current?.name === 'attackTarget' || Date.now() - (this.lastGameStep || 0) < 800) return null
+    const me = bot.entity.position
+    const enemies = Object.values(bot.players).map((p) => p.entity).filter((e) => e && e !== bot.entity && e.isValid !== false &&
+      e.position.distanceTo(me) < 24 && !network.teammate(e.username) && safe(() => agent.senses.canSee(bot, e.position.offset(0, 1.6, 0))) !== false)
+      .sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me))
+    if (!enemies.length) return null
+    this.lastGameStep = Date.now()
+    const e = enemies[0]
+    return { source: 'game', thought: `${game.name}: going after ${e.username}.`, emotion: 'determined', emotionIntensity: 7, action: { name: 'attackTarget', args: { entityId: e.id, maxSeconds: 40, game: true } } }
+  }
+
   /** A decision put aside for a moment (to pick something up first, or a step that follows a death run). */
   resumeStep () {
     const r = this.resume
@@ -3297,7 +3339,8 @@ ${said ? `${name} just said: ${said}
       ownBlock: own,
       provokedBy: (e) => Date.now() - (agent.lastHurtAt || 0) < 8000 && e.position.distanceTo(bot.entity.position) < 6,
       mayTake: (p) => safe(() => agent.containers.mayTake(p).ok),
-      byOwner: decision.source === 'task' && agent.social.role(tasks.active()?.from || '') === 'owner'
+      byOwner: decision.source === 'task' && agent.social.role(tasks.active()?.from || '') === 'owner',
+      pvpGame: Boolean(safe(() => agent.network.pvpGame()))
     })
     if (manners) return manners
     return commonsense.review(decision, {
@@ -3844,6 +3887,8 @@ class Agent {
     this.goals = new Goals(this, saved.goals)
     this.viewer = new BotViewer(this)
     this.voice = new Voice(this)
+    this.svc = new VoiceChat(this) // Simple Voice Chat: talk and listen in the game's proximity voice
+    this.svc.on('utterance', (u) => this.voice.heardInGame(u).catch(() => {}))
     this.memory.goals = this.goals
     this.learnedItems = new Set(saved.learnedItems || []) // recipes it worked out itself
     this.builder = { current: saved.building?.current || null, history: saved.building?.history || [], owner: config.server.username }
@@ -4169,6 +4214,7 @@ ${s?.contraptions?.length ? `Contraptions here: ${s.contraptions.join(' | ')}
     this.smalltalk = new SmallTalk(this)
     this.reactor.attach(bot)
     this.network.attach(bot)
+    this.svc.attach(bot)
     this.senses.attach(bot)
     this.attachServerHelpers(bot)
 

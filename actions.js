@@ -398,10 +398,12 @@ async function equipBestWeapon (ctx) {
 }
 
 /** PvP permission rules (config.pvp + who the bot trusts). Throws NOT_ALLOWED. */
-function assertMayFightPlayer (ctx, name, sparring) {
+function assertMayFightPlayer (ctx, name, sparring, game = false) {
   const { config } = ctx
   const pvp = config.pvp
   const lower = String(name).toLowerCase()
+  // In a PvP minigame everyone outside its team is fair game, its owner included when they're on the other side.
+  if (game && safe(() => ctx.network?.pvpGame()) && !safe(() => ctx.network.teammate(name))) return
   if (config.behavior.protectedPlayers.some((p) => p.toLowerCase() === lower)) {
     throw new ActionError('NOT_ALLOWED', `${name} is protected; you won't attack them.`)
   }
@@ -869,7 +871,9 @@ const ACTIONS = {
       entityId: 'number',
       maxSeconds: 'number, optional (default 25)',
       style: 'optional: aggressive|balanced|cautious|hitAndRun|comboAxe|ranged|mace',
-      sparring: 'optional boolean — a friendly duel the player asked for'
+      sparring: 'optional boolean — a friendly duel the player asked for',
+      game: 'optional boolean — a PvP minigame opponent',
+      until: 'optional: "death" for a spar to the end (default: stop at 3 hearts outside arenas)'
     },
     async run (ctx, args) {
       const { bot, config } = ctx
@@ -881,7 +885,10 @@ const ACTIONS = {
       if (entity.name === 'item' || entity.type === 'projectile' || entity.type === 'orb') {
         throw new ActionError('INVALID_TARGET', `${entity.name} cannot be attacked.`)
       }
-      if (entity.type === 'player') assertMayFightPlayer(ctx, entity.username, Boolean(args?.sparring))
+      if (entity.type === 'player') assertMayFightPlayer(ctx, entity.username, Boolean(args?.sparring), Boolean(args?.game))
+      // A friendly spar outside an arena stops at 3 hearts, either way (nobody loses their stuff): gg.
+      const arena = Boolean(args?.game) || Boolean(safe(() => ctx.network?.pvpGame()))
+      const sparStop = entity.type === 'player' && args?.sparring && !arena && !/death|end|kill/i.test(String(args?.until || '')) ? (ctx.config.pvp.sparStopHealth ?? 6) : 0
       const label = entity.username || entity.displayName || entity.name
       if (bot.entity.position.distanceTo(entity.position) > 32) throw new ActionError('TOO_FAR', `${label} is too far away to chase.`)
 
@@ -906,7 +913,8 @@ const ACTIONS = {
           ctx.log.info(`Feeling confident against ${label} (boldness ${bold.toFixed(2)}).`)
         }
       }
-      ctx.log.info(`Fighting ${label} with style "${style.name}" (retreat at ${style.retreatHealth} hp) — kit: ${combat.describeKit(bot)}`)
+      if (sparStop) style.sparStop = sparStop
+      ctx.log.info(`Fighting ${label} with style "${style.name}" (retreat at ${style.retreatHealth} hp${sparStop ? `, friendly: stops at ${sparStop / 2} hearts` : ''}) — kit: ${combat.describeKit(bot)}`)
 
       let result
       try {
@@ -928,6 +936,12 @@ const ACTIONS = {
       const stats = `${result.hitsLanded} hits landed, ${result.hitsTaken} taken, style ${style.name}${usedList ? `, used ${usedList}` : ''}`
 
       switch (result.outcome) {
+        case 'spar_won':
+          ctx.chat?.send(pick(['gg', 'gg, good fight', 'gg! again?', 'ggs']), 'reaction').catch(() => {})
+          return `Won the friendly spar against ${label} (${stats}). Stopped before anyone died.`
+        case 'spar_lost':
+          ctx.chat?.send(pick(['gg you got me', 'gg, nice', 'ok ok gg', 'gg, rematch?']), 'reaction').catch(() => {})
+          return `Lost the friendly spar against ${label} (${stats}). Called it at low health.`
         case 'win':
           if (entity.type !== 'player') ctx.notify?.('killedMob', { mob: label })
           return `Defeated ${label} (${stats}).${broke}`

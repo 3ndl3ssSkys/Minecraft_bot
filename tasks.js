@@ -329,7 +329,8 @@ class TaskManager {
     if (name.toLowerCase() === from.toLowerCase()) {
       req.kind = 'attack'
       req.sparring = true
-      const chance = clamp(0.2 + 0.6 * clamp((requester.affinity - 25) / 50, 0, 1) + 0.2 * (p.violence ?? 0.35), 0, 1)
+      let chance = clamp(0.2 + 0.6 * clamp((requester.affinity - 25) / 50, 0, 1) + 0.2 * (p.violence ?? 0.35), 0, 1)
+      if (social.role(from) === 'owner') chance = Math.max(chance, 0.95) // its owner wants to play: sure
       return Math.random() < chance ? verdict('comply', chance, '') : verdict('refuse', chance, "you're not in the mood for a duel")
     }
     if (!config.judgment.requestedFights || config.pvp.mode === 'never') return verdict('refuse', 0, "you don't go around killing people")

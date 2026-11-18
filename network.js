@@ -124,6 +124,35 @@ class Network {
     return this.isNetwork() && (LOBBY_WORDS.test(`${sb?.title} ${sb?.lines.join(' ')}`) || named.some((n) => LOBBY_WORDS.test(n.name))) && this.bot.game?.gameMode === 'adventure'
   }
 
+  /**
+   * A PvP game under way (duels, SkyWars, Bed Wars, The Bridge, FFA, UHC...): { name } or null. Read from the sidebar,
+   * boss bars and titles; only once it's out of the lobby (in survival, with the game's scoreboard up).
+   */
+  pvpGame () {
+    const bot = this.bot
+    if (!bot?.entity || this.cfg.pvpGames === false) return null
+    const sb = this.sidebar()
+    const bars = Object.values(bot.bossBars || {}).map((b) => textOf(bot.registry, b.title)).join(' ')
+    const text = `${sb?.title || ''} ${(sb?.lines || []).join(' ')} ${bars} ${this.title && Date.now() - this.title.at < 60000 ? `${this.title.text} ${this.title.sub}` : ''}`
+    const m = text.match(/\b(duels?|sky ?wars|bed ?wars|the bridge|sumo|ffa|free for all|pvp|uhc|kit ?pvp|hunger games|survival games|egg ?wars|treasure wars|battle ?box|kills?\s*:)/i)
+    if (!m) return null
+    if (bot.game?.gameMode !== 'survival' || this.inLobby()) return null
+    if (/waiting|starting in|cages? open|pre-?game/i.test(text) && !/kills?\s*:\s*\d/i.test(text)) return null // still counting down
+    return { name: m[1].replace(/\s*:$/, '') }
+  }
+
+  /** Same team as the bot (scoreboard team, or the same name colour in team games)? */
+  teammate (name) {
+    const t = this.bot?.teamMap
+    if (!t) return false
+    const mine = t[this.bot.username]
+    const theirs = t[name]
+    if (!mine || !theirs) return false
+    if (mine === theirs || (mine.team && mine.team === theirs.team)) return true
+    const col = (x) => String(x?.color ?? '').toLowerCase()
+    return Boolean(col(mine) && col(mine) !== 'reset' && col(mine) !== 'white' && col(mine) === col(theirs))
+  }
+
   /** What the prompt sees about the server (only things worth knowing). */
   context () {
     const bot = this.bot
@@ -140,6 +169,8 @@ class Network {
     const named = this.hotbarItems()
     if (named.length) out.hotbar = named.map((n) => `${n.slot + 1}: ${n.name}`)
     if (this.window) out.openMenu = this.describeWindow()
+    const game = this.pvpGame()
+    if (game) out.pvpGame = `${game.name}: in a PvP game. Fight the other players (not your team), go for the objective, it's all fair here.`
     const recent = this.notices.filter((n) => Date.now() - n.at < 90000).slice(-6).map((n) => n.text)
     if (recent.length) out.notices = recent
     if (this.commands?.length) out.commands = this.commands.filter((c) => SAFE_COMMAND.test(`/${c}`)).slice(0, 25).map((c) => `/${c}`)

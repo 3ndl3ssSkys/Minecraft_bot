@@ -261,6 +261,7 @@
     "mode": "defensive",
     "rethinkSeconds": 6,
     "allowSparring": true,
+    "sparStopHealth": 6,
     "neverAttackOwners": true
   },
   "memory": {
@@ -332,6 +333,13 @@
     "viewDistance": 4,
     "fov": 70,
     "https": false
+  },
+  "svc": {
+    "enabled": "auto",
+    "compatibilityVersion": 21,
+    "preferForOwner": true,
+    "answerOthers": true,
+    "silenceMs": 700
   },
   "voice": {
     "enabled": true,

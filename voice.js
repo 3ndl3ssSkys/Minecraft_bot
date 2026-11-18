@@ -152,6 +152,88 @@ class Voice {
     return { ok: true, what: 'heard' }
   }
 
+  // --------------------------------------------------------------------------------------------------------------
+  // In-game voice chat (Simple Voice Chat, svc.js)
+  // --------------------------------------------------------------------------------------------------------------
+
+  /** Can it talk in the game's voice chat right now (connected, and a TTS server to make the audio)? */
+  inGame () { return Boolean(this.agent.svc?.connected() && this.cfg.tts === 'server' && this.cfg.ttsUrl) }
+
+  /** Where to say something to `name`: 'svc' (in-game voice), 'page' (the voice page), or null (type it). */
+  route (name) {
+    const lower = String(name || '').toLowerCase()
+    const owners = (this.agent.config.behavior.owners || []).map((o) => o.toLowerCase())
+    if (this.inGame()) {
+      if (lower && (this.svcTalk.get(lower) || 0) > Date.now()) return 'svc' // they spoke to it in voice chat
+      const svcCfg = this.agent.config.svc || {}
+      if (owners.includes(lower) && svcCfg.preferForOwner !== false) {
+        const e = this.agent.bot?.players?.[name]?.entity
+        const range = this.agent.svc.info?.distance || 48
+        if (e && e.position.distanceTo(this.agent.bot.entity.position) <= range) return 'svc' // close enough to hear it in game
+      }
+    }
+    if (owners.includes(lower) && this.active()) return 'page'
+    return null
+  }
+
+  get svcTalk () { this._svcTalk ||= new Map(); return this._svcTalk }
+
+  /** Say it to `name` the best way there is. Resolves to the text, or null if it has to be typed instead. */
+  async speakTo (name, text) {
+    const r = this.route(name)
+    if (r === 'page') return this.say(text)
+    if (r === 'svc') return this.sayInGame(text)
+    return null
+  }
+
+  /** Out loud in voice chat: Kokoro (or any TTS server) makes the audio, svc.js sends it as Opus. */
+  sayInGame (text) {
+    const job = (this.gameQueue || Promise.resolve()).then(async () => {
+      for (const part of sentences(text)) {
+        const res = await fetch(this.cfg.ttsUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...(this.cfg.ttsKey ? { Authorization: `Bearer ${this.cfg.ttsKey}` } : {}) },
+          body: JSON.stringify({ model: this.cfg.ttsModel || 'tts-1', input: part, voice: this.cfg.ttsVoice || 'af_bella', response_format: 'wav', speed: this.cfg.rate || 1 }),
+          signal: AbortSignal.timeout(20000)
+        })
+        if (!res.ok) throw new Error(`TTS HTTP ${res.status}`)
+        await this.agent.svc.play(Buffer.from(await res.arrayBuffer()))
+      }
+      this.agent.viewer?.push?.('chat', `(says in voice chat) ${text}`)
+      return text
+    })
+    this.gameQueue = job.catch(() => {})
+    return job
+  }
+
+  /** Someone talked in voice chat near it: turn it into text and answer if it was meant for it. */
+  async heardInGame (u) {
+    const agent = this.agent
+    if (!u.name || u.name === agent.bot?.username) return
+    if (!this.cfg.sttUrl || this.cfg.stt !== 'server') { if (!this.sttWarned) agent.log.info('Voice chat: hearing players needs a Whisper server (voice.stt "server").'); this.sttWarned = true; return }
+    let text = ''
+    try { text = await this.transcribe(u.wav, 'audio/wav') } catch (err) { agent.log.debug?.(`voice chat transcription failed: ${err.message}`); return }
+    text = text.trim()
+    if (!text || /^\W*$/.test(text) || /^(thank you|thanks for watching|you)\.?$/i.test(text)) return // Whisper's usual noise on silence
+    const lower = u.name.toLowerCase()
+    const owners = (agent.config.behavior.owners || []).map((o) => o.toLowerCase())
+    const named = this.wakeWords().some((w) => w.length >= 2 && text.toLowerCase().includes(w))
+    const talking = (this.svcTalk.get(lower) || 0) > Date.now()
+    const svcCfg = agent.config.svc || {}
+    agent.log.info(`VOICE CHAT ${u.name}: ${text}`)
+    agent.viewer?.push?.('chat', `(voice chat) ${u.name}: ${text}`)
+    agent.memory?.addChat?.(u.name, text, { whisper: false })
+    if (!named && !talking && !(owners.includes(lower) && this.cfg.requireWakeWord === false)) return // people talking to each other
+    if (!owners.includes(lower) && svcCfg.answerOthers === false) return
+    this.svcTalk.set(lower, Date.now() + (this.cfg.conversationSeconds ?? 30) * 1000)
+    if (owners.includes(lower) && SHOW_ME.test(text) && agent.executor?.availableTools().includes('explainAndShow')) {
+      agent.brain.queueAction({ name: 'explainAndShow', args: { topic: text } }, `${u.name} asked me to explain: ${text}`)
+      agent.executor.abort('explaining something', { quiet: true })
+      return
+    }
+    agent.responder.onMessage(u.name, text, { whisper: false, voice: true })
+  }
+
   /** Speech to text through a local Whisper server (OpenAI-compatible). */
   async transcribe (buf, type = 'audio/webm') {
     if (!this.cfg.sttUrl) throw new Error('voice.sttUrl is not set')

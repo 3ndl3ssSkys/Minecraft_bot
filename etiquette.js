@@ -301,6 +301,7 @@ class Etiquette {
    */
   check (decision, ctx) {
     if (decision.source === 'command' || ctx.byOwner) return null // its owner told it to, directly
+    if (decision.action?.name === 'attackTarget' && decision.action.args?.game && ctx.pvpGame) return null // fighting is the game
     const { name, args = {} } = decision.action || {}
     const acts = actsOf(name, args, ctx)
     if (!acts.length) return null
