@@ -782,6 +782,41 @@ It also had a stray line that reset the autopilot after nearly every action. Tha
 
 **Not verified:** the user's PC (whether the fallback kicks in, and real timings) and the viewport fixes in their browser.
 
+## 33. Mouse movement by level; a full guide to fine-tuning qwen3:1.7b
+
+**Asked:**
+- "Can it have good mouse movement like a keyboard player (on different levels)? Research that and implement it."
+- "Guide me on how we could fine-tune a small qwen3:1.7b on a free Colab GPU and get it to be actually good (at different levels) almost identical to a player."
+
+**Research used:**
+- Meyer's stochastic optimised-submovement model:
+  - primary endpoints scatter around the target with noise that grows with speed and distance;
+  - corrections can go either way;
+  - undershoot is more common downward and on small targets.
+- An FPS eye-tracking study (experienced vs non-FPS players): experts usually reach a target in one movement, others need extra corrections.
+- Catch-up saccades when pursuit falls behind.
+- Sensitivity surveys: pros mostly ~35–60 cm/360, arm aiming, a 180 needing a lift.
+- On 1.9+ combat, cooldown timing matters more than click speed (combat.js already times it by skill).
+
+**Built:**
+- `planFlick` rewritten as submovements:
+  - a reaction hold before turns over 40°;
+  - swipes with a lift;
+  - a noisy primary movement;
+  - 1–3 corrections by skill;
+  - an exact settle.
+- Tracking with a lag, catch-ups and wander; idle glances at players or mobs nearby.
+- `test/look.test.js` (measured: corrections 2.1 beginner vs 1.3 master; tracking error at 90°/s 22° vs 6°).
+- **Fine-tuning pipeline:**
+  - the code's own decisions recorded as examples with the prompt the model would have seen (`decisionMessages` split out of `decide`);
+  - levels recorded per example;
+  - `training-set`: levels report, `--max-code` (default half), `--level`, shuffle, 5% test file;
+  - `training/finetune_qwen3_colab.ipynb`;
+  - `npm run eval-model` (valid / same action / same target / seconds per decision);
+  - TRAINING.md has the step-by-step guide, with recording per level and distillation from a big model.
+
+**Not verified:** the notebook on Colab (written from Unsloth's current API; cells compile), real fine-tune quality, and the new aim on a real server.
+
 ## Where it stands now
 
 **Next for the user:**

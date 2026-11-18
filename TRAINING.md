@@ -53,14 +53,93 @@ Asked for: a model that decides very fast and understands Minecraft at its level
 
 **Make it small.** Fine-tune `qwen3:1.7b` for decisions: about twice as fast as the 4B at reading and writing, and the training makes up for most of the size. Keep the 4B as a fallback.
 
-**Recipe:**
-1. Record with the current model, or better, for a few hours with a big hosted model as the teacher (`llm.provider: "openai"`): `npm run set -- logging.trainingData true`. Every decision is saved with both the long and the short system prompt.
-2. `npm run training-set -- --short` writes `data/training/train-short.jsonl`: the good decisions, each with the short prompt.
-3. Fine-tune `Qwen3-1.7B` (or 4B) with LoRA in Unsloth's free Colab notebook on that file. Export to GGUF `q4_k_m`.
-4. `ollama create minecraft-bot -f Modelfile` (`FROM ./your-model.gguf`), then `npm run set -- llm.model minecraft-bot` and `npm run set -- llm.trained true`.
-5. Watch the `Thought for … s` lines, and compare its play with the old model's.
+## Step by step: a fine-tuned `qwen3:1.7b` that plays like a player, at each level
 
-**Levels:** one model serves every level. The level is in its prompt ("a beginner player") and in the code that runs its choices (skill, reaction times, what it knows). To make the model itself play more like a beginner or a master, record with bots of different levels and keep the level line in each example; the training then learns the difference.
+A fine-tune copies the examples it's given, so how good it gets depends almost entirely on what you record. Plan on two weekends: one to record, one evening to train and test.
+
+### 1. Record good examples (the part that matters)
+
+Turn recording on: `npm run set -- logging.trainingData true`. Every decision goes to `data/training/decisions.jsonl` (or the profile's folder) with:
+- the long prompt and the short one (`llm.trained`);
+- the bot's level, and whether it worked.
+
+The code's own good decisions are recorded too (the early-game routine, obtainItem's steps, finished searches).
+
+- **How many:** about 2,000 usable examples for a first try, 5,000–10,000 for a good one. A bot makes roughly one model decision every 5–15 s, so that's hours of play: leave it running.
+- **Variety:** the model only learns situations it has seen. Give it:
+  - day and night, caves, a village, mobs, a death or two;
+  - chat with you: requests, refusals, small talk;
+  - building, and a fight now and then.
+  
+  Move it around (`!goal` …) instead of letting it sit at spawn.
+- **Better than your current model (distillation):** for the best examples, let a big model decide while recording, then train the small one on its choices.
+  - Any OpenAI-compatible API works: `"llm": { "provider": "openai", "url": "…/v1/chat/completions", "model": "…", "apiKey": "…" }`.
+  - A few hours of play is a few million prompt tokens, so check the provider's prices or free tier first.
+  - The prompts contain your friends' chat: ask them, or record when you're alone.
+- **Levels:** run one bot per level you care about, each with its own save and name, for example:
+  - `node index.js --profile rookie` with `intelligence.level` beginning;
+  - `--profile pro` with master.
+  
+  Each example is tagged with its level, and the short prompt says it ("a beginner player"). So one model learns all levels and plays the one it's told. Record roughly the same amount at each level.
+
+### 2. Build the training file
+
+```
+npm run training-set -- --short
+```
+
+This writes `data/training/train-short.jsonl` and holds back 5% as `test-short.jsonl`. Along the way it:
+- keeps only decisions that worked;
+- drops repeats, plain waiting and broken answers;
+- shuffles the rest;
+- keeps code decisions to at most half (`--max-code 0.3` for less);
+- prints how many examples there are per level.
+
+`--level master` keeps one level only.
+
+Open the file and skim a few lines; delete anything you wouldn't want it to copy.
+
+### 3. Train on a free Colab GPU
+
+1. Open [training/finetune_qwen3_colab.ipynb](training/finetune_qwen3_colab.ipynb) in Google Colab: File → Upload notebook.
+2. Runtime → Change runtime type → **T4 GPU**.
+3. Run the cells top to bottom. They:
+   - install Unsloth;
+   - ask for the two files;
+   - load Qwen3-1.7B in 4-bit with LoRA adapters;
+   - train on the answers only, 1 epoch;
+   - test on the held-back decisions;
+   - export a `q4_k_m` GGUF (~1.1 GB) and download it.
+
+A few thousand examples take about 30–90 minutes. Free Colab sessions end after a few hours, so start with 1 epoch.
+
+**What good looks like at the test step:**
+- valid answers ~100%;
+- the same action as the recorded decision 60–80% (other good choices exist, so 100% isn't the goal).
+
+Below that:
+- record more, or more varied, examples;
+- train a 2nd epoch (`num_train_epochs=2`);
+- try `r=64`;
+- or start from `unsloth/Qwen3-4B` (slower in the game, smarter).
+
+### 4. Use it at home
+
+1. Next to the downloaded `.gguf`, make a file `Modelfile` with one line: `FROM ./<file>.gguf`.
+2. Run `ollama create minecraft-bot -f Modelfile`.
+3. Compare: `npm run eval-model -- minecraft-bot` against `npm run eval-model -- qwen3:4b-instruct` (same held-back decisions; it reports validity, same action, same target, seconds per decision).
+4. Switch: `npm run set -- llm.model minecraft-bot`, `npm run set -- llm.trained true`, `npm run set -- llm.fastModel ""`.
+5. Restart, play, watch the `Thought for … s` lines.
+
+To go back: `npm run set -- llm.model qwen3:4b-instruct` and `npm run set -- llm.trained false`.
+
+### 5. Make it better over time
+
+- Keep recording with the new model, and add your old examples.
+- Delete its bad decisions before the next run (anything it did that you didn't like); `training-set` already drops failed ones.
+- Retrain every few thousand new examples. Each round is a bit better, and it picks up your server's habits.
+
+**What it won't do:** it won't steer the body. Aiming, walking, mining, clutching and building block by block stay in code at every level, at 20 times a second. The model's job is the head: what to do next, whether a fight is worth it, what to build, what to say.
 
 ## Option 3 (what the bot does now): skills in code, model for choices
 

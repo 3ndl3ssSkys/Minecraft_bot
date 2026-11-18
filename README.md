@@ -353,6 +353,14 @@ How it looks around and walks is modelled on how people use a mouse and WASD:
 - **Instant:** reflex saves (clutches) stay instant: that's muscle memory.
 - **Settings:** `behavior.humanKeys` and `behavior.smoothTurning`.
 
+**Aiming by level** (the optimised-submovement model of aimed movements; FPS eye-tracking studies show experts land a target in one movement where others need corrections):
+- **Reaction:** a big turn to something new starts after a reaction, about 0.15 s for a master and 0.3 s for a beginner.
+- **Swipes:** a turn bigger than one hand sweep comes in swipes with a lift between. Good players use a low sensitivity (a 180 is two swipes), beginners a high one.
+- **Landing:** the first movement's landing error grows with its size and shrinks with skill. It's usually a little short, sometimes past.
+- **Corrections:** beginners need about two corrections, masters land in about one. The last tick always settles exactly, because mining and placing need it.
+- **Tracking in fights:** it follows where the target was a moment ago, about 220 ms behind for a beginner and 60 ms for a master. When it falls behind it catches up in one quick move, and the crosshair wanders a little. Measured at 90°/s: about 22° behind for a beginner, 6° for a master.
+- **Idle:** standing around, it glances at people and creatures nearby now and then, or along the horizon.
+
 ### Server manners and rules (`etiquette.js`, `etiquette`)
 
 - **Rules people give it:** "don't kill my cows", "stop mining here", "no pvp" and "always close the door" become standing rules. It also reads rules from signs ("no griefing", "keep out") and from server announcements.

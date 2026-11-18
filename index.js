@@ -3384,6 +3384,9 @@ ${said ? `${name} just said: ${said}
         const { name, args } = decision.action
         log.info(`▶ ${name}(${JSON.stringify(args)})${decision.source !== 'llm' ? ` [${decision.source}]` : ''}`)
         const stopWatching = name === 'attackTarget' ? this.watchFight(args, decision) : null
+        // Good decisions the code makes itself (the early-game routine, obtainItem's steps, a finished search) are
+        // examples for fine-tuning too: recorded with the prompt the model would have had (TRAINING.md).
+        const codeExample = config.logging.trainingData && ['auto', 'obtain', 'seek'].includes(decision.source) ? safe(() => this.decisionMessages({})) : null
         const running = agent.executor.execute(name, args)
         this.prethink(decision)
         const result = await running
@@ -3400,6 +3403,7 @@ ${said ? `${name} just said: ${said}
         this.onSeekResult(decision, result)
         if (!result.ok) this.prethought = null // it was planned assuming this worked
         if (config.logging.trainingData && decision.source === 'llm') this.recordTraining(decision, result)
+        if (codeExample && result.ok) this.recordCodeExample(codeExample, decision, result)
 
         this.backoff = config.loop.errorBackoffMs
         await this.idle(config.loop.postActionDelayMs)
@@ -3618,16 +3622,24 @@ ${said ? `${name} just said: ${said}
   }
 
   /** One line of training data: what the model saw, what it answered, and how that went (TRAINING.md). */
-  recordTraining (decision, result) {
-    const x = this.lastExchange
+  recordTraining (decision, result, given = null) {
+    const x = given || this.lastExchange
     if (!x) return
-    this.lastExchange = null
+    if (!given) this.lastExchange = null
     const file = path.join(path.dirname(path.resolve(__dirname, this.agent.config.learning.file)), 'training', 'decisions.jsonl')
-    const line = { at: new Date(x.at).toISOString(), model: this.agent.config.llm.model, messages: x.messages, short: x.short, answer: x.out, ok: result.ok, code: result.code || null, result: String(result.message || '').slice(0, 200) }
+    const line = { at: new Date(x.at).toISOString(), model: x.source ? 'code' : this.agent.config.llm.model, level: this.agent.config.intelligence.level, messages: x.messages, short: x.short, answer: x.out, ok: result.ok, code: result.code || null, result: String(result.message || '').slice(0, 200) }
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true })
       fs.appendFileSync(file, JSON.stringify(line) + '\n')
     } catch (err) { this.agent.log.debug(`training data not written: ${err.message}`) }
+  }
+
+  /** A decision the code made, written like the model's answer, with the prompt the model would have seen. */
+  recordCodeExample ({ messages }, decision, result) {
+    const agent = this.agent
+    const step = agent.goals?.current?.steps?.[agent.goals.current.now]?.text || ''
+    const answer = { thought: String(decision.thought || '').slice(0, 120), goal: agent.memory.goal || agent.goals?.current?.text || '', subgoal: step, goalStatus: 'working', action: decision.action, next: [] }
+    this.recordTraining(decision, result, { messages, out: answer, at: Date.now(), short: safe(() => buildTrainedPrompt(agent, agent.executor.describeTools('names'))), source: decision.source })
   }
 
   /** The early-game ladder by rules (see basics.js), only when nothing else needs the bot. */
@@ -4134,10 +4146,19 @@ ${said ? `${name} just said: ${said}
 
   async decide ({ upcoming } = {}) {
     const agent = this.agent
-    const { log, memory, executor, config, social, learning, emotions } = agent
+    const { log, executor, config, emotions } = agent
     agent.goals.maybePlan() // step back and plan in the background when it's time
+    const { messages, tools } = this.decisionMessages({ upcoming })
+    const out = await agent.llm.chat(messages, { schema: config.llm.decisionSchema ? decisionSchema(tools) : undefined, priority: PRIORITY.decision, label: 'decision', temperature: config.mind.decisionTemperature ?? undefined })
+    // The short system prompt a fine-tuned model would get instead (TRAINING.md): kept with each example.
+    this.lastExchange = { messages, out, at: Date.now(), short: safe(() => buildTrainedPrompt(agent, executor.describeTools('names'))) }
+    return this.finishDecision(out, tools)
+  }
 
-    // Requests we promised to do "later" become the goal once our own plans allow it.
+  /** The decision prompt as the model would get it right now (also used to record the code's own decisions). */
+  decisionMessages ({ upcoming } = {}) {
+    const agent = this.agent
+    const { memory, executor, config, social, learning } = agent
     const state = agent.perception.snapshot()
     const tools = executor.availableTools()
     const learned = [...learning.lessons.top(8), ...learning.combat.summary(4)]
@@ -4174,10 +4195,13 @@ ${said ? `${name} just said: ${said}
           `${nudges.join('\n')}\nChoose your next action.`
       }
     ]
-    const out = await agent.llm.chat(messages, { schema: config.llm.decisionSchema ? decisionSchema(tools) : undefined, priority: PRIORITY.decision, label: 'decision', temperature: config.mind.decisionTemperature ?? undefined })
-    // The short system prompt a fine-tuned model would get instead (TRAINING.md): kept with each example.
-    this.lastExchange = { messages, out, at: Date.now(), short: safe(() => buildTrainedPrompt(agent, executor.describeTools('names'))) }
+    return { messages, tools }
+  }
 
+  /** Turn the model's answer into a decision (and let goals, feelings and tasks hear about it). */
+  finishDecision (out, tools) {
+    const agent = this.agent
+    const { log, memory, config, emotions } = agent
     const decision = {
       source: 'llm',
       thought: String(out.thought || '').slice(0, 300),
@@ -4828,6 +4852,15 @@ ${s?.contraptions?.length ? `Contraptions here: ${s.contraptions.join(' | ')}
       skill: () => safe(() => this.intelligence.skill('parkour')) ?? 0.5,
       precise: () => Boolean(this.reflexes?.busy || this.executor?.current?.name === 'parkour'),
       combat: () => this.executor?.current?.name === 'attackTarget',
+      // Standing around (thinking, waiting): glance at people and things nearby now and then, as players do.
+      idle: () => { const c = this.executor?.current?.name; return (!c || c === 'wait') && !this.reflexes?.busy && !bot.pathfinder?.isMoving?.() },
+      glanceAt: () => {
+        const seen = (safe(() => this.senses.perceive(bot, 16)) || []).filter((p) => p.how !== 'memory' && p.entity?.position)
+        const player = seen.find((p) => p.entity.type === 'player')
+        if (player && Math.random() < 0.7) return player.entity
+        const mob = seen.find((p) => p.entity.type !== 'player' && p.entity.name !== 'item')
+        return mob && Math.random() < 0.4 ? mob.entity : null
+      },
       // Anyone who knows endermen never looks one in the eyes (unless it's fighting one anyway).
       adjust: (yaw, pitch) => this.executor?.current?.name !== 'attackTarget' && this.intelligence.knowledgeTier() >= 1 ? adjustLook(bot, yaw, pitch) : [yaw, pitch]
     })
