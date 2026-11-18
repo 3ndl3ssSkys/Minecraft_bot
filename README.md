@@ -496,16 +496,18 @@ At `0` it's purely its own call. At `1` it does whatever it physically can. Hard
 
 ## Watch it in a browser (`viewer`, off by default)
 
-Start it with `npm run viewer` (or `npm start -- --viewer`), or type `!viewer on` in game. Then open **http://localhost:3007**. The page shows:
-- **Its view:** what it sees, first person, live as it moves (prismarine-viewer). Worlds newer than 1.21.4, like 26.1, are translated block by block so they still render.
-- **Where it is:** coordinates, facing, dimension, game mode and day/night. You always see its coordinates, even when the bot itself doesn't know them.
-- **How it's doing:** health, food, what it's doing, its goal, how it feels, and what's around it.
-- **Its inventory:** the hotbar with the selected slot, armor and off-hand.
-- **A live feed:** chat, its thoughts and its actions.
-- **A message box** with three modes:
+Start it with `npm run viewer` (or `npm start -- --viewer`), or type `!viewer on` in game. Then open **http://localhost:3007**. The page fits the window (no scrolling):
+- **Its view:** first person, live, at Minecraft's normal field of view (70; a slider changes it). The camera eases between head positions so turns don't jerk (the **Smooth** button). Worlds newer than 1.21.4, like 26.1, are translated block by block so they still render.
+- **The game's HUD:** hearts, food, the XP bar and the hotbar with the selected slot, drawn with Minecraft's own textures. In the corner, like F3: coordinates, facing, dimension, game mode, day and time, what it's doing and its goal. You always see the coordinates; the page says when the bot itself can't.
+- **Chat like the game's:** the last few lines fade out over the view. **T** (or the Chat button) opens the whole history to scroll through, filtered by chat, thoughts or actions, with the message box:
   - **Talk to it:** a message from you as its owner.
-  - **!command:** any owner command.
+  - **!command:** any owner command (**/** opens it in this mode).
   - **Make it say:** it says your text in game chat.
+- **Side panel** (the **Panel** button hides it for a full-screen view):
+  - **Inventory:** Minecraft's inventory screen with item icons, armor, off-hand, the crafting grid, counts and durability bars; hover for names.
+  - **Feelings:** how it feels now and the six feelings underneath, its last thought, and buttons to set a feeling (with a strength, and a lock to keep it).
+  - **Goals & tasks:** the overall goal, long-term goals, the current goal and its steps, goals waiting for later, and players' tasks. Add, edit, finish, drop or reorder them; call off a task; or ask it to do something (it decides, like a person).
+- **Point things out:** **Point** (P) and click something in the view, or **Circle** (C) and draw around things, then add a note if you like ("mine these", "stay away from that"). It works out exactly which blocks and creatures you meant from its own copy of the world, outlines them in the view, remembers them for a few minutes, and gets your note as if you had said it while pointing.
 
 It only listens on your PC. To watch from another device, set `viewer.host` to `"0.0.0.0"` **and** a `viewer.password`, then open `http://<pc>:3007/?key=<password>`. `viewer.viewDistance` (chunks, default 4) controls how much the browser draws.
 
@@ -516,6 +518,8 @@ It only listens on your PC. To watch from another device, set `viewer.host` to `
 - **Adventure:** no breaking or placing blocks, and no digging while walking.
 - **Spectator:** it only looks, follows and talks.
 - **Hardcore:** it's told it has one life, and it never dies on purpose.
+
+**Turning:** it turns its head over a few ticks like a person (faster at higher skill), instead of snapping. Walking a path, fighting, reflexes and aimed placements stay instant. `behavior.smoothTurning: false` turns this off.
 
 **Coordinates (F3):** it only knows its own coordinates if it knows the F3 screen.
 - **Simple and up** know it from the start. **Beginners** learn it when someone tells them ("press f3 to see your coords").

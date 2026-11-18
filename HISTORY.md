@@ -369,6 +369,24 @@ It also had a stray line that reset the autopilot after nearly every action. Tha
 - the viewer against the user's real 26.1 server (the translation is tested only in the unit test);
 - creative and adventure play on a real server.
 
+## 21. A better viewer page: game-like HUD and inventory, controls, pointing
+
+**The user asked:** the field of view was too high and the page needed scrolling and was too small; the inventory should look like Minecraft's with icons; turning shouldn't be jittery; the chat shouldn't show everything but expand and scroll; from the page they want to see and change its emotion, its tasks and overall goal (add, change, delete), and to highlight or circle things on the screen to point them out to the bot ("or we could have an image detection model do that").
+
+**Done:**
+- **Layout:** the page is exactly one screen; each part scrolls inside itself; the side panel can be hidden. On narrow screens it stacks.
+- **View:** `web/view-addon.js` loads before prismarine-viewer's own script (our own `/view/` index). It catches `window.THREE` as it's set, patches `PerspectiveCamera.updateProjectionMatrix` (FOV 70, configurable `viewer.fov` and a slider) and takes over `camera.rotation.set` so the camera eases toward each new yaw/pitch every frame. `__botView.snapshot()` gives the camera as drawn, for pointing.
+- **HUD:** hearts, food, XP and hotbar from Minecraft's own sprites (prismarine-viewer ships 1.21.4 textures); F3-style text top-left.
+- **Inventory:** Minecraft's `inventory.png` with slots at the real positions. `iconResolver` in viewer.js picks `items/<name>.png`, or builds a little 3D block from the block model's faces (up/north/east; parent chain, `#refs`, full-size elements like grass_block, slabs at half height, grass/leaf tints); the page draws it on a canvas. Items newer than the textures (or special-rendered ones: beds, shields) show their name.
+- **Chat:** a few fading lines like the game (chat only); T opens the full history with a filter.
+- **Feelings / goals / tasks:** `POST /control` (viewer.js `handleControl`) acts as the first owner: set or lock a feeling, set the overall goal, add/edit/finish/drop long-term goals, set/finish/drop the current goal, edit steps, queue/unqueue goals, replan, cancel a task (`TaskManager.cancel`, new), or ask for something (goes through the normal request judgment).
+- **Pointing:** `pointing.js` casts rays from the camera through the click (or a grid inside the drawn outline) into the bot's own world (`bot.world.raycast`), and projects creatures onto the screen to see which are inside the circle. No image model is needed: the world data already says what every pixel shows, and a vision model would compete for the 6 GB card. `Agent.onPointedAt` keeps it in `state.pointedOut` for 3 minutes, adds a memory event, and a note arrives as the owner's words with "(pointing at …)". The view outlines what was meant for 20 s (prismarine-viewer `boxgrid` primitives). Coordinates only if it knows F3; otherwise "4 west, 3 north".
+- **Turning in game:** `look.js` wraps `bot.look`: big non-forced turns take a few ticks (25–70°/tick by parkour skill, easing in). Instant while the pathfinder is moving, in reflexes, attacks and parkour, and for `force` looks. `behavior.smoothTurning`.
+
+**Verified:** unit tests (`test/pointing.test.js`: camera math against Mineflayer's yaw/pitch, click on a block, click on a cow in front of a wall, circle a wall; icons; smooth turning). Live on flying-squid 1.21.4 with Chromium: page fits 1366×768 with no scrolling, the camera reports FOV 70, the inventory and hotbar render with icons, setting "angry" from the page changed its feelings, goals set from the page showed up in its goal tree, pointing and circling reached the bot.
+
+**Not verified yet:** smooth turning against a real server (others watching it turn); the view addon on other browsers than Chromium.
+
 ## Where it stands now
 
 **Next for the user:**

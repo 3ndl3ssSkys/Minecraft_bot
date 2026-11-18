@@ -39,6 +39,7 @@ const { nextAcquireStep, foodTarget } = require('./acquire')
 const F3_FACT = 'f3 coordinates debug screen' // knownFacts key (knowledge.js)
 const { judgeDrop } = require('./pickup')
 const { BotViewer } = require('./viewer')
+const { installSmoothLook, turnSpeed } = require('./look')
 const { TaskManager, KINDS: TASK_KINDS, EFFORTS, RISKS } = require('./tasks')
 const combat = require('./combat')
 const knowledge = require('./knowledge')
@@ -266,6 +267,7 @@ const DEFAULT_CONFIG = {
     admins: [], // most !commands (owners can add more with !admin add). Their *requests* are judged like anyone's.
     commandPrefix: '!',
     startingGoal: '', // old name for goals.current (still works)
+    smoothTurning: true, // turn the head over a few ticks like a person instead of snapping (aiming and fights stay instant)
     nightShelter: true, // at nightfall: bed if it has one, otherwise dig in (skilled, armed players keep playing)
     autopilot: true, // early-game basics (logs, wooden and stone pickaxe) by rules, not by asking the model: fast and reliable
     allowRespawnOnPurpose: true, // it may choose to die to respawn (stuck, trapped, lost) — never on hardcore worlds
@@ -385,7 +387,8 @@ const DEFAULT_CONFIG = {
     host: '127.0.0.1', // only this PC; to open it to your network set host "0.0.0.0" AND a password
     password: '', // then open http://<this-pc>:3007/?key=<password>
     firstPerson: true,
-    viewDistance: 4 // chunks around it to show (more = heavier for the browser)
+    viewDistance: 4, // chunks around it to show (more = heavier for the browser)
+    fov: 70 // field of view in the browser, in degrees (Minecraft's "Normal" is 70); the page has a slider too
   },
   perception: {
     // Its own coordinates: 'auto' = only if it knows the F3 screen (Simple and up, or once someone tells it),
@@ -971,6 +974,7 @@ class Perception {
       nearbyBlocks: this.nearbyBlocks(),
       surroundings: this.surroundings(),
       layout: this.layout(),
+      pointedOut: this.agent.pointed && Date.now() - this.agent.pointed.at < 180000 ? this.agent.pointed.text : undefined,
       onlinePlayers: Object.keys(bot.players).filter((n) => n !== bot.username),
       status: {
         currentAction: executor.current ? executor.current.name : null,
@@ -3642,6 +3646,19 @@ class Agent {
     return s
   }
 
+  /**
+   * Someone in the browser clicked or circled something on its screen (viewer.js → pointing.js). It remembers what
+   * was pointed out for a few minutes (state.pointedOut), and a note with it ("mine these") arrives as their words.
+   */
+  onPointedAt (who, desc, note) {
+    const text = `${who} pointed at ${desc}${note ? ` and said "${note}"` : ''}`
+    this.pointed = { text, at: Date.now() }
+    this.memory.addEvent('pointed', `${text}.`)
+    this.log.info(`POINT ${text}`)
+    if (note) this.responder.onMessage(who, `${note} (pointing at ${desc})`, { whisper: true })
+    else this.brain?.wake?.()
+  }
+
   /** Take or leave a dropped item entity? (see pickup.js) */
   dropVerdict (entity) {
     const bot = this.bot
@@ -3980,6 +3997,12 @@ class Agent {
     this.reconnectAttempts = 0
     log.info(`Spawned in ${bot.game.dimension} at ${bot.entity.position.floored()} (Minecraft ${bot.version}).`)
     if (config.viewer.enabled) this.viewer.start()
+    // Human head turning: big turns take a few ticks. Paths, fights and reflexes keep exact, instant looks.
+    installSmoothLook(bot, {
+      enabled: () => config.behavior.smoothTurning !== false,
+      speed: () => turnSpeed(safe(() => this.intelligence.skill('parkour')) ?? 0.5),
+      skip: () => Boolean(bot.pathfinder?.isMoving?.() || this.reflexes?.busy || /attack|parkour/.test(this.executor?.current?.name || ''))
+    })
 
     const pf = config.behavior.pathfinding
     const movements = new Movements(bot)

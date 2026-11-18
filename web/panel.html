@@ -5,113 +5,693 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bot viewer</title>
 <style>
-  :root { --bg: #14161a; --panel: #1d2026; --line: #2c3038; --text: #e6e6e6; --dim: #9aa0aa; --accent: #6cc070; --warn: #e0b050; --bad: #e06060; --you: #7fb2ff; }
+  :root {
+    --bg: #101114; --panel: #1b1d22; --panel2: #23262c; --line: #33373f; --text: #e8e8e8; --dim: #9aa0aa;
+    --accent: #6cc070; --warn: #e0b050; --bad: #e06060; --you: #7fb2ff; --mind: #c8a8ff; --gold: #fcfc54;
+    --mc-shadow: 2px 2px 0 #3f3f3f;
+  }
   * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif; }
-  .app { display: grid; grid-template-columns: 1fr 380px; height: 100vh; }
-  .view { position: relative; background: #000; }
-  .view iframe { border: 0; width: 100%; height: 100%; }
-  .hud { position: absolute; left: 10px; top: 10px; background: rgba(0,0,0,.55); padding: 6px 10px; border-radius: 6px; font: 13px/1.5 ui-monospace, monospace; pointer-events: none; }
-  .side { display: flex; flex-direction: column; border-left: 1px solid var(--line); background: var(--panel); min-width: 0; }
-  .card { padding: 10px 12px; border-bottom: 1px solid var(--line); }
-  .card h2 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--dim); }
-  .row { display: flex; justify-content: space-between; gap: 8px; }
-  .row span:first-child { color: var(--dim); }
-  .bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin: 2px 0 6px; }
-  .bar > div { height: 100%; }
-  .grid { display: grid; grid-template-columns: repeat(9, 1fr); gap: 3px; }
-  .slot { aspect-ratio: 1; background: #121418; border: 1px solid var(--line); border-radius: 3px; font-size: 9px; line-height: 1.1; padding: 2px; overflow: hidden; position: relative; color: var(--dim); }
-  .slot.sel { border-color: var(--accent); }
-  .slot b { position: absolute; right: 2px; bottom: 1px; color: var(--text); font-size: 10px; }
-  .feed { flex: 1; overflow-y: auto; padding: 8px 12px; font: 12px/1.45 ui-monospace, monospace; }
-  .feed div { white-space: pre-wrap; word-break: break-word; }
-  .k-chat { color: var(--text); } .k-mind { color: #c8a8ff; } .k-warn { color: var(--warn); } .k-info { color: var(--dim); } .k-you { color: var(--you); }
-  form { display: flex; gap: 6px; padding: 10px 12px; border-top: 1px solid var(--line); }
-  select, input, button { background: #121418; color: var(--text); border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; font: inherit; }
-  input { flex: 1; min-width: 0; }
-  button { cursor: pointer; }
-  .off { padding: 20px; color: var(--dim); }
-  @media (max-width: 800px) { .app { grid-template-columns: 1fr; grid-template-rows: 45vh 1fr; } .side { border-left: 0; } }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif; }
+  button, select, input, textarea { font: inherit; color: var(--text); background: #121418; border: 1px solid var(--line); border-radius: 4px; padding: 5px 8px; }
+  button { cursor: pointer; background: var(--panel2); }
+  button:hover { border-color: #565c66; }
+  button.on { background: #2f4a32; border-color: var(--accent); }
+  .pix { image-rendering: pixelated; image-rendering: crisp-edges; }
+
+  .app { display: grid; grid-template-columns: minmax(0, 1fr) 400px; height: 100vh; }
+  .app.nopanel { grid-template-columns: minmax(0, 1fr) 0; }
+  .app.nopanel .side { display: none; }
+
+  /* ---- the view ---- */
+  .view { position: relative; background: #000; overflow: hidden; min-width: 0; min-height: 0; }
+  .view iframe { position: absolute; inset: 0; border: 0; width: 100%; height: 100%; }
+  #draw { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .view.pointing #draw { pointer-events: auto; cursor: crosshair; }
+  .f3 { position: absolute; left: 8px; top: 8px; color: #fff; font: 13px/1.45 ui-monospace, Consolas, monospace; text-shadow: var(--mc-shadow); pointer-events: none; white-space: pre; }
+  .f3 .unk { color: var(--warn); }
+  .tools { position: absolute; right: 8px; top: 8px; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; max-width: 70%; }
+  .tools button, .tools label { background: rgba(20,22,26,.8); border: 1px solid #444a; border-radius: 4px; padding: 4px 8px; font-size: 13px; color: #fff; display: flex; align-items: center; gap: 6px; }
+  .tools input[type=range] { width: 90px; padding: 0; }
+  .crosshair { position: absolute; left: 50%; top: 50%; width: 18px; height: 18px; margin: -9px 0 0 -9px; pointer-events: none; opacity: .8; }
+
+  /* hotbar, hearts, food like the game */
+  .hudbar { position: absolute; left: 50%; bottom: 6px; transform: translateX(-50%) scale(var(--hs, 2)); transform-origin: 50% 100%; width: 182px; pointer-events: none; }
+  .hudbar .stats { display: flex; justify-content: space-between; height: 10px; margin-bottom: 1px; }
+  .hudbar .row9 { display: flex; gap: -1px; }
+  .hudbar .row9 > div { width: 8px; height: 9px; position: relative; }
+  .hudbar .row9 img { position: absolute; left: 0; top: 0; width: 9px; height: 9px; }
+  .hudbar .xp { position: relative; height: 5px; margin: 1px 0 1px; }
+  .hudbar .xp img { position: absolute; left: 0; top: 0; height: 5px; }
+  .hudbar .xp .lvl { position: absolute; left: 50%; top: -9px; transform: translateX(-50%); font: bold 8px/1 monospace; color: #80ff20; text-shadow: 1px 1px 0 #000; }
+  .hotbar { position: relative; width: 182px; height: 22px; }
+  .hotbar > img.bg { position: absolute; left: 0; top: 0; width: 182px; height: 22px; }
+  .hotbar > img.sel { position: absolute; top: -1px; width: 24px; height: 23px; }
+  .hotbar .hb { position: absolute; top: 3px; width: 16px; height: 16px; --s: 1; }
+
+  /* chat, like the game: a few fading lines; T opens the history */
+  .chat { position: absolute; left: 6px; bottom: calc(var(--hudh, 0px) + 10px); width: min(560px, calc(100% - 12px)); font: 13px/1.35 ui-monospace, Consolas, monospace; pointer-events: none; }
+  .chat .lines div { background: rgba(0,0,0,.45); color: #fff; padding: 1px 6px; text-shadow: 1px 1px 0 #000; white-space: pre-wrap; word-break: break-word; transition: opacity .6s; }
+  .chat .lines div.old { opacity: 0; }
+  .chat .toggle { pointer-events: auto; margin-top: 4px; background: rgba(0,0,0,.55); color: #ddd; border: 1px solid #555a; font-size: 12px; padding: 2px 8px; }
+  .chat.open { top: 132px; display: flex; flex-direction: column; pointer-events: auto; bottom: 6px; z-index: 2; }
+  .chat.open .lines { display: none; }
+  .chat .history { display: none; }
+  .chat.open .history { display: flex; flex-direction: column; flex: 1; min-height: 0; background: rgba(0,0,0,.6); border: 1px solid #555a; border-radius: 4px; }
+  .history .filters { display: flex; gap: 6px; padding: 6px; border-bottom: 1px solid #444a; align-items: center; }
+  .history .filters select, .history .filters button { font-size: 12px; padding: 2px 6px; }
+  .history .scroll { flex: 1; overflow-y: auto; padding: 4px 6px; min-height: 0; }
+  .history .scroll div { color: #fff; white-space: pre-wrap; word-break: break-word; text-shadow: 1px 1px 0 #000; }
+  .history form { display: flex; gap: 6px; padding: 6px; border-top: 1px solid #444a; }
+  .history form input { flex: 1; min-width: 0; }
+  .k-chat { color: #fff !important; } .k-mind { color: var(--mind) !important; } .k-warn { color: var(--warn) !important; } .k-info { color: #b8bec8 !important; } .k-you { color: var(--you) !important; }
+
+  .pointbar { position: absolute; left: 50%; top: 52px; transform: translateX(-50%); background: rgba(16,17,20,.92); border: 1px solid var(--gold); border-radius: 6px; padding: 8px 10px; display: none; gap: 6px; align-items: center; width: min(560px, calc(100% - 16px)); flex-wrap: wrap; }
+  .pointbar.show { display: flex; }
+  .pointbar .hint { width: 100%; color: var(--gold); font-size: 13px; }
+  .pointbar input { flex: 1; min-width: 120px; }
+
+  /* ---- the side panel ---- */
+  .side { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--panel); border-left: 1px solid var(--line); }
+  .tabs { display: flex; border-bottom: 1px solid var(--line); }
+  .tabs button { flex: 1; border: 0; border-radius: 0; background: transparent; padding: 10px 4px; color: var(--dim); border-bottom: 2px solid transparent; }
+  .tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
+  .pane { flex: 1; overflow-y: auto; padding: 12px; display: none; min-height: 0; }
+  .pane.active { display: block; }
+  h3 { margin: 14px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); font-weight: 600; }
+  h3:first-child { margin-top: 0; }
+  .muted { color: var(--dim); font-size: 12px; }
+  .row { display: flex; gap: 6px; align-items: center; margin: 4px 0; }
+  .row input, .row select { flex: 1; min-width: 0; }
+  .off { padding: 24px; color: var(--dim); text-align: center; }
+
+  /* Minecraft's inventory screen */
+  .inv { position: relative; width: calc(176px * var(--s)); height: calc(166px * var(--s)); margin: 0 auto; background-size: calc(256px * var(--s)) calc(256px * var(--s)); background-repeat: no-repeat; image-rendering: pixelated; }
+  .inv .slot { position: absolute; width: calc(16px * var(--s)); height: calc(16px * var(--s)); }
+  .inv .slot:hover::after { content: ''; position: absolute; inset: 0; background: rgba(255,255,255,.4); }
+  .inv .who { position: absolute; left: calc(26px * var(--s)); top: calc(8px * var(--s)); width: calc(49px * var(--s)); height: calc(70px * var(--s)); display: flex; align-items: center; justify-content: center; text-align: center; color: #fff; font: bold 12px/1.2 monospace; text-shadow: var(--mc-shadow); padding: 4px; word-break: break-all; }
+  .it { position: relative; width: 100%; height: 100%; }
+  .it canvas, .it img { width: 100%; height: 100%; display: block; image-rendering: pixelated; }
+  .it .n { position: absolute; right: -1px; bottom: -3px; color: #fff; font: bold calc(9px * var(--s, 2)) / 1 monospace; text-shadow: calc(1px * var(--s, 2)) calc(1px * var(--s, 2)) 0 #3f3f3f; }
+  .it .txt { position: absolute; inset: 0; font: 8px/1 monospace; color: #222; overflow: hidden; word-break: break-all; display: flex; align-items: center; justify-content: center; text-align: center; background: rgba(255,255,255,.35); }
+  .it .dur { position: absolute; left: 12%; right: 12%; bottom: 6%; height: 12%; background: #000; }
+  .it .dur > div { height: 50%; }
+  .tip { position: fixed; z-index: 10; pointer-events: none; background: rgba(16,0,16,.94); border: 2px solid #2a0a5e; outline: 1px solid #100010; color: #fff; padding: 4px 8px; font: 13px/1.4 monospace; text-shadow: var(--mc-shadow); display: none; }
+  .tip .sub { color: #aaa; }
+
+  /* feelings */
+  .feel-now { font-size: 22px; font-weight: 600; text-transform: capitalize; }
+  .bars .b { display: grid; grid-template-columns: 70px 1fr 34px; gap: 8px; align-items: center; font-size: 13px; margin: 3px 0; }
+  .bars .track { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
+  .bars .track > div { height: 100%; border-radius: 4px; }
+  .thought { background: var(--panel2); border-left: 3px solid var(--mind); padding: 6px 8px; font-style: italic; color: #ddd; border-radius: 0 4px 4px 0; }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; }
+  .chips button { padding: 3px 8px; font-size: 12px; text-transform: capitalize; }
+
+  /* goals and tasks */
+  .card { background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin: 6px 0; }
+  .item { display: flex; gap: 6px; align-items: flex-start; padding: 4px 0; border-bottom: 1px solid #2c3038; }
+  .item:last-child { border-bottom: 0; }
+  .item .t { flex: 1; min-width: 0; word-break: break-word; }
+  .item .src { color: var(--dim); font-size: 11px; }
+  .item button { padding: 1px 7px; font-size: 12px; }
+  .steps { margin: 6px 0 0; padding: 0; list-style: none; }
+  .steps li { font-size: 13px; padding: 1px 0; }
+  .steps li.done { color: var(--dim); text-decoration: line-through; }
+  .steps li.now { color: var(--gold); }
+  textarea { width: 100%; resize: vertical; min-height: 70px; }
+
+  @media (max-width: 760px) {
+    .app, .app.nopanel { grid-template-columns: 1fr; grid-template-rows: 58vh minmax(0, 1fr); }
+    .side { border-left: 0; border-top: 1px solid var(--line); }
+    .tools { max-width: 58%; gap: 4px; }
+    .tools button, .tools label { font-size: 12px; padding: 3px 6px; }
+    .tools input[type=range] { width: 60px; }
+    .f3 { font-size: 11px; }
+    .chat.open { top: 8px; }
+  }
 </style>
 </head>
 <body>
-<div class="app">
-  <div class="view">
+<div class="app" id="app">
+  <div class="view" id="viewbox">
     <iframe id="view" title="What the bot sees"></iframe>
-    <div class="hud" id="hud">connecting…</div>
+    <canvas id="draw"></canvas>
+    <svg class="crosshair" viewBox="0 0 18 18"><path d="M8 1h2v16H8zM1 8h16v2H1z" fill="#fff" opacity=".85"/></svg>
+    <div class="f3" id="f3">connecting…</div>
+    <div class="tools">
+      <button id="bPoint" title="Click something in the view to show it to the bot (P)">Point</button>
+      <button id="bCircle" title="Draw a circle around things to show them to the bot (C)">Circle</button>
+      <label title="Field of view (Minecraft's Normal is 70)">FOV <input type="range" id="fov" min="30" max="110" step="1"> <span id="fovv"></span></label>
+      <button id="bSmooth" title="Smooth out the camera's turning">Smooth</button>
+      <button id="bPanel" title="Hide or show the side panel">Panel</button>
+    </div>
+    <div class="hudbar" id="hudbar"></div>
+    <div class="pointbar" id="pointbar">
+      <div class="hint" id="pointhint"></div>
+      <input id="pointnote" placeholder="Tell it something about it (optional): mine these, stay away..." autocomplete="off">
+      <button id="pointsend">Show it</button>
+      <button id="pointcancel">Cancel</button>
+    </div>
+    <div class="chat" id="chat">
+      <div class="lines" id="lines"></div>
+      <div class="history">
+        <div class="filters">
+          <select id="filter" title="What to show">
+            <option value="all">Everything</option>
+            <option value="chat">Chat only</option>
+            <option value="mind">Thoughts</option>
+            <option value="info">Actions and log</option>
+          </select>
+          <span class="muted" style="flex:1"></span>
+          <button id="chatclose" title="Close (Esc)">Close</button>
+        </div>
+        <div class="scroll" id="history"></div>
+        <form id="send">
+          <select id="mode" title="What your message does">
+            <option value="talk">Talk to it</option>
+            <option value="command">!command</option>
+            <option value="say">Make it say</option>
+          </select>
+          <input id="text" autocomplete="off" placeholder="Say something to it…">
+          <button>Send</button>
+        </form>
+      </div>
+      <button class="toggle" id="chatopen" title="Open the chat (T)">Chat (T)</button>
+    </div>
   </div>
+
   <div class="side">
-    <div class="card" id="status"><div class="off">Waiting for the bot…</div></div>
-    <div class="card"><h2>Inventory</h2><div class="grid" id="inv"></div></div>
-    <div class="feed" id="feed"></div>
-    <form id="send">
-      <select id="mode" title="What your message does">
-        <option value="talk">Talk to it</option>
-        <option value="command">!command</option>
-        <option value="say">Make it say</option>
-      </select>
-      <input id="text" autocomplete="off" placeholder="Type here… (!help for commands)">
-      <button>Send</button>
-    </form>
+    <div class="tabs" id="tabs">
+      <button data-tab="inv">Inventory</button>
+      <button data-tab="mind">Feelings</button>
+      <button data-tab="plans">Goals &amp; tasks</button>
+    </div>
+    <div class="pane" id="pane-inv">
+      <div id="invbox"><div class="off">Waiting for the bot…</div></div>
+      <h3>Around it</h3>
+      <div id="around" class="muted"></div>
+    </div>
+    <div class="pane" id="pane-mind">
+      <div class="feel-now" id="feelnow">—</div>
+      <div class="muted" id="feeldesc"></div>
+      <h3>Inside</h3>
+      <div class="bars" id="bars"></div>
+      <h3>Last thought</h3>
+      <div class="thought" id="thought">—</div>
+      <h3>Change how it feels</h3>
+      <div class="chips" id="feelchips"></div>
+      <div class="row" style="margin-top:8px">
+        <span class="muted">Strength</span>
+        <input type="range" id="feelint" min="1" max="10" value="7"><span id="feelintv">7</span>
+      </div>
+      <div class="row">
+        <label class="muted"><input type="checkbox" id="feellock"> Keep it (lock) until I unlock</label>
+        <button id="feelunlock" style="display:none">Unlock</button>
+      </div>
+      <div class="muted">Without the lock, the feeling fades back to its personality over time, and what happens to it changes it, like a person.</div>
+    </div>
+    <div class="pane" id="pane-plans">
+      <h3>Overall goal</h3>
+      <div class="card" id="life"></div>
+      <div class="row"><input id="lifein" placeholder="Set its overall goal (empty = it picks its own)"><button id="lifeset">Set</button></div>
+
+      <h3>Long-term goals</h3>
+      <div class="card" id="longterm"></div>
+      <div class="row"><input id="longin" placeholder="Add a long-term goal"><button id="longadd">Add</button></div>
+
+      <h3>Doing now</h3>
+      <div class="card" id="current"></div>
+      <div class="row"><input id="curin" placeholder="Give it a new current goal"><button id="curset">Set</button></div>
+      <details>
+        <summary class="muted">Edit the steps</summary>
+        <textarea id="stepsin" placeholder="One step per line"></textarea>
+        <div class="row"><button id="stepsset">Save steps</button></div>
+      </details>
+
+      <h3>Waiting goals</h3>
+      <div class="card" id="backlog"></div>
+      <div class="row"><input id="queuein" placeholder="Add a goal for later"><select id="queuepri" title="Priority"><option>3</option><option selected>5</option><option>8</option></select><button id="queueadd">Add</button></div>
+
+      <h3>Tasks for players</h3>
+      <div class="card" id="tasks"></div>
+      <div class="row"><input id="taskin" placeholder="Ask it to do something (it decides, like a person)"><button id="taskadd">Ask</button></div>
+      <div class="row" style="margin-top:10px"><button id="replan" title="It rethinks its plans with the model">Rethink plans</button></div>
+    </div>
   </div>
 </div>
+<div class="tip" id="tip"></div>
+
 <script>
-  const key = new URLSearchParams(location.search).get('key') || ''
-  const q = key ? `?key=${encodeURIComponent(key)}` : ''
-  const $ = (id) => document.getElementById(id)
-  const esc = (s) => String(s ?? '').replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]))
-  const pretty = (n) => String(n || '').replace(/_/g, ' ')
-  let botId = null
+'use strict'
+const key = new URLSearchParams(location.search).get('key') || ''
+const q = key ? `?key=${encodeURIComponent(key)}` : ''
+const $ = (id) => document.getElementById(id)
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+const pretty = (n) => String(n || '').replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+const store = { get (k, d) { try { const v = localStorage.getItem('botview.' + k); return v === null ? d : JSON.parse(v) } catch { return d } }, set (k, v) { try { localStorage.setItem('botview.' + k, JSON.stringify(v)) } catch {} } }
+const post = (url, body) => fetch(url + q, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then((r) => r.json()).catch(() => ({ ok: false, error: 'not sent' }))
+let S = null // last state
+let botId = null
+let texBase = '/view/textures/1.21.4/'
 
-  function slot (it, sel) {
-    return `<div class="slot${sel ? ' sel' : ''}" title="${it ? esc(pretty(it.name)) + ' x' + it.count : 'empty'}">${it ? esc(pretty(it.name)) + (it.count > 1 ? `<b>${it.count}</b>` : '') : ''}</div>`
+// ------------------------------------------------------------------ icons
+const icons = {} // name -> spec | null
+const iconWait = new Set()
+const imgs = {}
+const drawn = {} // name -> data URL
+function img (src) {
+  if (!imgs[src]) { imgs[src] = new Promise((res) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => res(null); i.src = src }) }
+  return imgs[src]
+}
+let iconTimer = null
+function needIcons (names) {
+  const missing = names.filter((n) => n && !(n in icons) && !iconWait.has(n))
+  if (!missing.length) return
+  missing.forEach((n) => iconWait.add(n))
+  clearTimeout(iconTimer)
+  iconTimer = setTimeout(async () => {
+    const list = [...iconWait]
+    const r = await fetch(`/icons${q}${q ? '&' : '?'}names=${list.join(',')}`).then((x) => x.json()).catch(() => null)
+    if (!r) return
+    texBase = r.base
+    for (const n of list) { icons[n] = r.icons[n] ?? null; iconWait.delete(n) }
+    await Promise.all(list.map(drawIcon))
+    if (S) { renderInv(S); renderHud(S) }
+  }, 30)
+}
+function tintFace (ctx, color) {
+  if (!color) return
+  ctx.globalCompositeOperation = 'multiply'; ctx.fillStyle = color; ctx.fillRect(0, 0, 16, 16)
+  ctx.globalCompositeOperation = 'source-over'
+}
+async function drawIcon (name) {
+  const spec = icons[name]
+  if (!spec) return
+  const c = document.createElement('canvas')
+  c.width = c.height = 32
+  const ctx = c.getContext('2d')
+  ctx.imageSmoothingEnabled = false
+  if (spec.flat) {
+    const im = await img(texBase + spec.flat)
+    if (!im) return
+    ctx.drawImage(im, 0, 0, im.width, im.width, 0, 0, 32, 32)
+    if (spec.tint) { ctx.globalCompositeOperation = 'multiply'; ctx.fillStyle = spec.tint; ctx.fillRect(0, 0, 32, 32); ctx.globalCompositeOperation = 'destination-in'; ctx.drawImage(im, 0, 0, im.width, im.width, 0, 0, 32, 32); ctx.globalCompositeOperation = 'source-over' }
+  } else if (spec.cube) {
+    const [up, left, right] = await Promise.all([img(texBase + spec.cube.up), img(texBase + spec.cube.left), img(texBase + spec.cube.right)])
+    const half = Boolean(spec.half)
+    const sideH = half ? 7 : 14
+    const top = half ? 7 : 0
+    // corners of the little isometric block (32 px icon)
+    const L = [3, 9 + top]; const T = [16, 2 + top]; const C = [16, 16 + top]; const R = [29, 9 + top]
+    const face = (im, o, u, v, shade, tint, srcHalf) => {
+      if (!im) return
+      const s = im.width
+      ctx.save()
+      ctx.setTransform(u[0] / 16, u[1] / 16, v[0] / 16, v[1] / 16, o[0], o[1])
+      ctx.beginPath(); ctx.rect(0, 0, 16, 16); ctx.clip()
+      ctx.drawImage(im, 0, srcHalf ? s / 2 : 0, s, srcHalf ? s / 2 : s, 0, 0, 16, 16)
+      if (tint) { ctx.globalCompositeOperation = 'multiply'; ctx.fillStyle = tint; ctx.fillRect(0, 0, 16, 16); ctx.globalCompositeOperation = 'destination-in'; ctx.drawImage(im, 0, srcHalf ? s / 2 : 0, s, srcHalf ? s / 2 : s, 0, 0, 16, 16) }
+      if (shade) { ctx.globalCompositeOperation = 'source-atop'; ctx.fillStyle = `rgba(0,0,0,${shade})`; ctx.fillRect(0, 0, 16, 16) }
+      ctx.restore()
+    }
+    face(up, L, [T[0] - L[0], T[1] - L[1]], [C[0] - L[0], C[1] - L[1]], 0, spec.tint)
+    face(left, L, [C[0] - L[0], C[1] - L[1]], [0, sideH], 0.22, spec.tintSides, half)
+    face(right, C, [R[0] - C[0], R[1] - C[1]], [0, sideH], 0.42, spec.tintSides, half)
   }
+  drawn[name] = c.toDataURL()
+}
+function itemHtml (it) {
+  if (!it) return ''
+  needIcons([it.name])
+  const pic = drawn[it.name] ? `<img class="pix" src="${drawn[it.name]}" alt="">` : `<div class="txt">${esc(pretty(it.name).slice(0, 14))}</div>`
+  const dur = it.dur != null && it.dur < 1 ? `<div class="dur"><div style="width:${Math.round(it.dur * 100)}%;background:hsl(${Math.round(it.dur * 120)},100%,50%)"></div></div>` : ''
+  return `<div class="it" data-name="${esc(it.name)}" data-count="${it.count}">${pic}${dur}${it.count > 1 ? `<span class="n">${it.count}</span>` : ''}</div>`
+}
 
-  function render (s) {
-    if (!s.online) { $('status').innerHTML = '<div class="off">The bot isn\'t in a world right now.</div>'; $('hud').textContent = 'offline'; return }
-    if (s.botId !== botId) { botId = s.botId; $('view').src = `/view/${q}` } // (re)joined: reload the view
-    const day = s.time != null ? (s.time < 12500 || s.time > 23300 ? 'day' : 'night') : ''
-    $('hud').innerHTML = `XYZ ${s.position.x} / ${s.position.y} / ${s.position.z} · facing ${s.facing}<br>${esc(s.dimension)} · ${esc(s.gameMode)}${s.hardcore ? ' (hardcore)' : ''} · ${day}`
-    const bar = (v, max, color) => `<div class="bar"><div style="width:${Math.max(0, Math.min(100, v / max * 100))}%;background:${color}"></div></div>`
-    $('status').innerHTML = `<h2>${esc(s.name)}</h2>
-      <div class="row"><span>Health</span><span>${s.health}/20</span></div>${bar(s.health, 20, 'var(--bad)')}
-      <div class="row"><span>Food</span><span>${s.food}/20</span></div>${bar(s.food, 20, 'var(--warn)')}
-      <div class="row"><span>Doing</span><span>${esc(s.action || 'thinking')}</span></div>
-      <div class="row"><span>Goal</span><span>${esc(s.goal || '—')}</span></div>
-      <div class="row"><span>Feeling</span><span>${esc(s.feeling || '—')}</span></div>
-      <div class="row"><span>Around it</span><span>${esc(s.layout || '—')}</span></div>
-      <div class="row"><span>Knows its coordinates (F3)</span><span>${s.knowsCoords ? 'yes' : 'no'}</span></div>
-      <div class="row"><span>Players</span><span>${esc(s.players.join(', ') || 'nobody')}</span></div>`
-    $('inv').innerHTML = s.armor.map((a) => slot(a)).join('') + slot(s.offhand) + '<div></div><div></div><div></div><div></div>' +
-      s.main.map((it) => slot(it)).join('') + s.hotbar.map((it, i) => slot(it, i === s.selected)).join('')
+// ------------------------------------------------------------------ tooltips
+document.addEventListener('mousemove', (e) => {
+  const t = e.target.closest?.('.it')
+  const tip = $('tip')
+  if (!t) { tip.style.display = 'none'; return }
+  tip.innerHTML = `${esc(pretty(t.dataset.name))}${t.dataset.count > 1 ? ` <span class="sub">x${t.dataset.count}</span>` : ''}<br><span class="sub">minecraft:${esc(t.dataset.name)}</span>`
+  tip.style.display = 'block'
+  tip.style.left = Math.min(innerWidth - tip.offsetWidth - 6, e.clientX + 14) + 'px'
+  tip.style.top = Math.max(4, e.clientY - 30) + 'px'
+})
+
+// ------------------------------------------------------------------ inventory screen
+// Slot positions on Minecraft's inventory texture (176 x 166).
+const SLOTS = []
+for (let i = 0; i < 4; i++) SLOTS.push(['armor', i, 8, 8 + i * 18])
+SLOTS.push(['offhand', 0, 77, 62])
+for (let i = 0; i < 4; i++) SLOTS.push(['craft', i, 98 + (i % 2) * 18, 18 + Math.floor(i / 2) * 18])
+SLOTS.push(['craftResult', 0, 154, 28])
+for (let i = 0; i < 27; i++) SLOTS.push(['main', i, 8 + (i % 9) * 18, 84 + Math.floor(i / 9) * 18])
+for (let i = 0; i < 9; i++) SLOTS.push(['hotbar', i, 8 + i * 18, 142])
+function invScale () {
+  const w = $('pane-inv').clientWidth - 24
+  return Math.max(1, Math.min(3, Math.floor((w / 176) * 4) / 4))
+}
+let invKey = ''
+function renderInv (s) {
+  const k = JSON.stringify([s.armor, s.offhand, s.craft, s.craftResult, s.main, s.hotbar, s.name, invScale(), Object.keys(drawn).length])
+  if (k === invKey) return
+  invKey = k
+  const scale = invScale()
+  const get = (kind, i) => kind === 'offhand' ? s.offhand : kind === 'craftResult' ? s.craftResult : (s[kind] || [])[i]
+  $('invbox').innerHTML = `<div class="inv" style="--s:${scale};background-image:url('${texBase}gui/container/inventory.png')">
+    <div class="who">${esc(s.name)}</div>
+    ${SLOTS.map(([kind, i, x, y]) => `<div class="slot" style="left:calc(${x}px * var(--s));top:calc(${y}px * var(--s))">${itemHtml(get(kind, i))}</div>`).join('')}
+  </div>`
+}
+
+// ------------------------------------------------------------------ hearts, food, xp, hotbar
+let hudKey = ''
+function hudScale () {
+  const w = $('viewbox').clientWidth
+  return w > 900 ? 2 : w > 520 ? 1.5 : 1
+}
+function renderHud (s) {
+  const k = JSON.stringify([s.health, s.food, s.xp, s.xpProgress, s.hotbar, s.selected, hudScale(), Object.keys(drawn).length, s.gameMode, s.hardcore])
+  if (k === hudKey) return
+  hudKey = k
+  const box = $('hudbar')
+  box.style.setProperty('--hs', hudScale())
+  // the chat sits above the hotbar, like in the game
+  $('viewbox').style.setProperty('--hudh', s.online && !/spectator/.test(s.gameMode || '') ? `${Math.round((/creative/.test(s.gameMode || '') ? 24 : 42) * hudScale())}px` : '0px')
+  if (!s.online || /creative|spectator/.test(s.gameMode || '')) {
+    box.innerHTML = s.online && s.gameMode === 'creative' ? hotbarHtml(s) : ''
+    return
   }
+  const H = texBase + 'gui/sprites/hud/'
+  const hc = s.hardcore ? 'hardcore_' : ''
+  let hearts = ''
+  for (let i = 0; i < 10; i++) {
+    const v = s.health - i * 2
+    const fill = v >= 2 ? `heart/${hc}full.png` : v === 1 ? `heart/${hc}half.png` : ''
+    hearts += `<div><img class="pix" src="${H}heart/container.png">${fill ? `<img class="pix" src="${H}${fill}">` : ''}</div>`
+  }
+  let food = ''
+  for (let i = 0; i < 10; i++) {
+    const v = s.food - i * 2
+    const fill = v >= 2 ? 'food_full.png' : v === 1 ? 'food_half.png' : ''
+    food += `<div><img class="pix" src="${H}food_empty.png">${fill ? `<img class="pix" src="${H}${fill}">` : ''}</div>`
+  }
+  box.innerHTML = `<div class="stats"><div class="row9">${hearts}</div><div class="row9" style="flex-direction:row-reverse">${food}</div></div>
+    <div class="xp"><img class="pix" src="${H}experience_bar_background.png" style="width:182px"><div style="position:absolute;left:0;top:0;width:${Math.round((s.xpProgress || 0) * 182)}px;height:5px;overflow:hidden"><img class="pix" src="${H}experience_bar_progress.png" style="width:182px"></div>${s.xp ? `<span class="lvl">${s.xp}</span>` : ''}</div>
+    ${hotbarHtml(s)}`
+}
+function hotbarHtml (s) {
+  const H = texBase + 'gui/sprites/hud/'
+  return `<div class="hotbar"><img class="bg pix" src="${H}hotbar.png">
+    <img class="sel pix" src="${H}hotbar_selection.png" style="left:${-1 + s.selected * 20}px">
+    ${s.hotbar.map((it, i) => it ? `<div class="hb" style="left:${3 + i * 20}px">${itemHtml(it)}</div>` : '').join('')}</div>`
+}
 
-  function addLine (l) {
+// ------------------------------------------------------------------ F3 text
+function clock (t) {
+  if (t == null) return ''
+  const m = Math.floor(((t + 6000) % 24000) / 1000 * 60)
+  return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`
+}
+function renderF3 (s) {
+  if (!s.online) { $('f3').textContent = 'The bot is not in a world right now.'; return }
+  const night = s.time != null && s.time >= 12500 && s.time <= 23300
+  $('f3').innerHTML = esc(`XYZ: ${s.position.x} / ${s.position.y} / ${s.position.z}\nFacing: ${s.facing}\n${s.dimension} · ${s.gameMode}${s.hardcore ? ' (hardcore)' : ''}\nDay ${s.day ?? '?'} · ${clock(s.time)} ${night ? '(night)' : ''}\nDoing: ${s.action || 'thinking'}\nGoal: ${s.goal || '—'}`) +
+    (s.knowsCoords ? '' : `\n<span class="unk">${esc("It doesn't know F3, so it can't see these numbers")}</span>`)
+}
+
+// ------------------------------------------------------------------ feelings
+const CORE_COLORS = { joy: '#e8c547', anger: '#e05555', fear: '#a77bdc', sadness: '#5b8fd9', boredom: '#8a8f99', surprise: '#4fc1b0' }
+let chipsKey = ''
+function renderMind (m) {
+  if (!m) return
+  $('feelnow').textContent = `${m.label} ${m.intensity}/10${m.locked ? ' (locked)' : ''}`
+  $('feeldesc').textContent = m.describe || ''
+  $('bars').innerHTML = Object.entries(m.core).map(([k, v]) => `<div class="b"><span style="text-transform:capitalize">${k}</span><div class="track"><div style="width:${v}%;background:${CORE_COLORS[k] || '#999'}"></div></div><span class="muted">${v}</span></div>`).join('')
+  $('thought').textContent = m.thought ? m.thought.replace(/^MIND\s*/, '') : '—'
+  $('feelunlock').style.display = m.locked ? '' : 'none'
+  const k = m.labels.join() + m.label
+  if (k !== chipsKey) {
+    chipsKey = k
+    $('feelchips').innerHTML = m.labels.map((l) => `<button data-feel="${esc(l)}" class="${l === m.label ? 'on' : ''}">${esc(l)}</button>`).join('')
+  }
+}
+$('feelint').addEventListener('input', () => { $('feelintv').textContent = $('feelint').value })
+$('feelchips').addEventListener('click', async (e) => {
+  const l = e.target.dataset?.feel
+  if (!l) return
+  const r = await post('/control', { type: 'emotion', label: l, intensity: Number($('feelint').value), lock: $('feellock').checked })
+  if (!r.ok) note(r.error)
+  refresh()
+})
+$('feelunlock').addEventListener('click', async () => { await post('/control', { type: 'emotion', unlock: true }); refresh() })
+
+// ------------------------------------------------------------------ goals and tasks
+const who = (src) => !src || src === 'self' ? 'its own idea' : src === 'config' ? 'from the settings' : `set by ${src}`
+let plansKey = ''
+function renderPlans (p) {
+  if (!p) return
+  const k = JSON.stringify(p)
+  if (k === plansKey || document.activeElement?.closest?.('.card')) return
+  plansKey = k
+  $('life').innerHTML = p.life ? `<div class="item"><div class="t">${esc(p.life.text)}<div class="src">${who(p.life.source)}</div></div><button data-op="life" data-text="" title="Clear">✕</button></div>` : '<span class="muted">None: it lives as it likes.</span>'
+  $('longterm').innerHTML = p.longTerm.length ? p.longTerm.map((g) => `<div class="item"><div class="t">${esc(g.text)}<div class="src">${who(g.source)}</div></div><button data-op="editLong" data-id="${g.id}" title="Edit">✎</button><button data-op="doneLong" data-id="${g.id}" title="Done">✓</button><button data-op="dropLong" data-id="${g.id}" title="Drop">✕</button></div>`).join('') : '<span class="muted">None yet.</span>'
+  const c = p.current
+  $('current').innerHTML = c ? `<div class="item"><div class="t"><b>${esc(c.text)}</b><div class="src">${who(c.source)}${c.detour ? ` · detour first: ${esc(c.detour)}` : ''}</div>
+      ${c.steps.length ? `<ul class="steps">${c.steps.map((s) => `<li class="${s.done ? 'done' : s.now ? 'now' : ''}">${s.done ? '☑' : s.now ? '▶' : '☐'} ${esc(s.text)}</li>`).join('')}</ul>` : ''}</div>
+      <button data-op="doneCurrent" title="Mark it done">✓</button><button data-op="dropCurrent" title="Give it up">✕</button></div>` : '<span class="muted">Nothing: it will pick something.</span>'
+  if (document.activeElement !== $('stepsin')) $('stepsin').value = c ? c.steps.map((s) => s.text).join('\n') : ''
+  $('backlog').innerHTML = p.backlog.length ? p.backlog.map((g) => `<div class="item"><div class="t">${esc(g.text)}<div class="src">priority ${g.priority} · ${who(g.source)}</div></div><button data-op="unqueue" data-text="${esc(g.text)}" title="Remove">✕</button></div>`).join('') : '<span class="muted">Nothing waiting.</span>'
+  $('tasks').innerHTML = p.tasks.length ? p.tasks.map((t) => `<div class="item"><div class="t">${esc(t.description)}<div class="src">for ${esc(t.from)} · ${t.status}${t.progress ? ` · ${t.progress}` : ''}</div></div><button data-task="${t.id}" title="Call it off">✕</button></div>`).join('') : '<span class="muted">Nobody asked it for anything.</span>'
+}
+async function goal (op, extra = {}) {
+  const r = await post('/control', { type: 'goal', op, ...extra })
+  if (!r.ok) note(r.error)
+  plansKey = ''
+  refresh()
+  return r
+}
+document.querySelector('#pane-plans').addEventListener('click', async (e) => {
+  const b = e.target.closest('button')
+  if (!b) return
+  if (b.dataset.task) { const r = await post('/control', { type: 'task', op: 'cancel', id: Number(b.dataset.task) }); if (!r.ok) note(r.error); plansKey = ''; return refresh() }
+  const op = b.dataset.op
+  if (!op) return
+  if (op === 'editLong') {
+    const g = S?.plans?.longTerm.find((x) => x.id === Number(b.dataset.id))
+    const text = prompt('Change this goal to:', g?.text || '')
+    if (text) goal('editLong', { id: Number(b.dataset.id), text })
+    return
+  }
+  if (op === 'dropCurrent' && !confirm('Make it give up its current goal?')) return
+  goal(op, { id: b.dataset.id ? Number(b.dataset.id) : undefined, text: b.dataset.text })
+})
+const bind = (btn, input, fn) => {
+  $(btn).addEventListener('click', () => { const v = $(input).value.trim(); if (!v && input !== 'lifein') return; fn(v); $(input).value = '' })
+  $(input).addEventListener('keydown', (e) => { if (e.key === 'Enter') $(btn).click() })
+}
+bind('lifeset', 'lifein', (v) => goal('life', { text: v }))
+bind('longadd', 'longin', (v) => goal('addLong', { text: v }))
+bind('curset', 'curin', (v) => goal('current', { text: v }))
+bind('queueadd', 'queuein', (v) => goal('queue', { text: v, priority: Number($('queuepri').value) }))
+bind('taskadd', 'taskin', async (v) => { const r = await post('/control', { type: 'task', op: 'add', text: v }); if (!r.ok) note(r.error) })
+$('stepsset').addEventListener('click', () => goal('steps', { steps: $('stepsin').value.split('\n').map((x) => x.trim()).filter(Boolean) }))
+$('replan').addEventListener('click', () => goal('replan'))
+
+// ------------------------------------------------------------------ chat
+const feed = []
+const KIND_OF = { chat: 'chat', you: 'chat', mind: 'mind', info: 'info', warn: 'info' }
+function lineText (l) { return `${new Date(l.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} ${l.text.replace(/\x1b\[[0-9;]*m/g, '')}` }
+function addLine (l) {
+  feed.push(l)
+  if (feed.length > 500) feed.shift()
+  // the few lines over the view, like the game's chat: what was said and what you did (thoughts and actions are in the history)
+  if (['chat', 'you', 'warn'].includes(l.kind)) {
     const div = document.createElement('div')
     div.className = `k-${l.kind}`
-    div.textContent = `${new Date(l.at).toLocaleTimeString()} ${l.text.replace(/\x1b\[[0-9;]*m/g, '')}`
-    const feed = $('feed')
-    const atBottom = feed.scrollTop + feed.clientHeight >= feed.scrollHeight - 30
-    feed.appendChild(div)
-    while (feed.children.length > 400) feed.removeChild(feed.firstChild)
-    if (atBottom) feed.scrollTop = feed.scrollHeight
+    div.textContent = lineText(l)
+    const lines = $('lines')
+    lines.appendChild(div)
+    while (lines.children.length > 6) lines.removeChild(lines.firstChild)
+    setTimeout(() => div.classList.add('old'), 12000)
   }
+  if (chatOpen && passes(l)) appendHistory(l)
+}
+function passes (l) { const f = $('filter').value; return f === 'all' || KIND_OF[l.kind] === f }
+function appendHistory (l) {
+  const h = $('history')
+  const atBottom = h.scrollTop + h.clientHeight >= h.scrollHeight - 30
+  const div = document.createElement('div')
+  div.className = `k-${l.kind}`
+  div.textContent = lineText(l)
+  h.appendChild(div)
+  while (h.children.length > 500) h.removeChild(h.firstChild)
+  if (atBottom) h.scrollTop = h.scrollHeight
+}
+let chatOpen = false
+function setChat (open) {
+  chatOpen = open
+  $('chat').classList.toggle('open', open)
+  $('chatopen').style.display = open ? 'none' : ''
+  if (open) {
+    const h = $('history')
+    h.innerHTML = ''
+    feed.filter(passes).forEach(appendHistory)
+    h.scrollTop = h.scrollHeight
+    $('text').focus()
+  }
+}
+$('chatopen').addEventListener('click', () => setChat(true))
+$('chatclose').addEventListener('click', () => setChat(false))
+$('filter').addEventListener('change', () => setChat(true))
+$('mode').addEventListener('change', () => { $('text').placeholder = { talk: 'Say something to it…', command: 'e.g. goals, status, stop', say: 'It will say this in game chat' }[$('mode').value] })
+$('send').addEventListener('submit', async (e) => {
+  e.preventDefault()
+  const text = $('text').value.trim()
+  if (!text) return
+  $('text').value = ''
+  const r = await post('/send', { mode: $('mode').value, text })
+  if (!r.ok) note(r.error)
+})
+function note (msg) { addLine({ at: Date.now(), kind: 'warn', text: `Not done: ${msg}` }) }
 
-  const events = new EventSource(`/events${q}`)
-  events.addEventListener('state', (e) => render(JSON.parse(e.data)))
-  events.addEventListener('line', (e) => addLine(JSON.parse(e.data)))
-  events.addEventListener('feed', (e) => JSON.parse(e.data).forEach(addLine))
-  fetch(`/state${q}`).then((r) => r.json()).then(render).catch(() => {})
+// ------------------------------------------------------------------ view settings
+let fov = store.get('fov', 70)
+let smooth = store.get('smooth', true)
+$('fov').value = fov
+$('fovv').textContent = fov
+$('bSmooth').classList.toggle('on', smooth)
+const tellView = () => { try { $('view').contentWindow.postMessage({ type: 'botView', fov, smooth }, location.origin) } catch {} }
+$('fov').addEventListener('input', () => { fov = Number($('fov').value); $('fovv').textContent = fov; store.set('fov', fov); tellView() })
+$('bSmooth').addEventListener('click', () => { smooth = !smooth; store.set('smooth', smooth); $('bSmooth').classList.toggle('on', smooth); tellView() })
+$('view').addEventListener('load', tellView)
+let panel = store.get('panel', true)
+const applyPanel = () => { $('app').classList.toggle('nopanel', !panel); $('bPanel').classList.toggle('on', panel) }
+applyPanel()
+$('bPanel').addEventListener('click', () => { panel = !panel; store.set('panel', panel); applyPanel(); setTimeout(() => { hudKey = ''; invKey = ''; S && render(S) }, 50) })
 
-  $('mode').addEventListener('change', () => { $('text').placeholder = { talk: 'Say something to it…', command: 'e.g. goals, status, stop', say: 'It will say this in game chat' }[$('mode').value] })
-  $('send').addEventListener('submit', async (e) => {
-    e.preventDefault()
-    const text = $('text').value.trim()
-    if (!text) return
-    $('text').value = ''
-    const r = await fetch(`/send${q}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: $('mode').value, text }) }).then((x) => x.json()).catch(() => ({ ok: false, error: 'not sent' }))
-    if (!r.ok) addLine({ at: Date.now(), kind: 'warn', text: `Not sent: ${r.error}` })
-  })
+// tabs
+let tab = store.get('tab', 'inv')
+function setTab (t) {
+  tab = t
+  store.set('tab', t)
+  document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === t))
+  document.querySelectorAll('.pane').forEach((p) => p.classList.toggle('active', p.id === `pane-${t}`))
+  invKey = ''
+  if (S) render(S)
+}
+$('tabs').addEventListener('click', (e) => { if (e.target.dataset.tab) setTab(e.target.dataset.tab) })
+setTab(tab)
+
+// ------------------------------------------------------------------ pointing at things
+const canvas = $('draw')
+const ctx = canvas.getContext('2d')
+let pointMode = null // 'point' | 'circle'
+let pending = null // { point } | { outline }
+let drawing = null
+function setPointMode (m) {
+  pointMode = pointMode === m ? null : m
+  $('viewbox').classList.toggle('pointing', Boolean(pointMode))
+  $('bPoint').classList.toggle('on', pointMode === 'point')
+  $('bCircle').classList.toggle('on', pointMode === 'circle')
+  if (pointMode) { $('pointbar').classList.add('show'); $('pointhint').textContent = pointMode === 'point' ? 'Click on something in the view.' : 'Draw a circle around what you mean (hold the mouse button).'; $('pointsend').disabled = true }
+  else if (!pending) $('pointbar').classList.remove('show')
+}
+function sizeCanvas () { canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight }
+const ndc = (e) => { const r = canvas.getBoundingClientRect(); return { x: ((e.clientX - r.left) / r.width) * 2 - 1, y: -(((e.clientY - r.top) / r.height) * 2 - 1), px: e.clientX - r.left, py: e.clientY - r.top } }
+function clearDraw () { ctx.clearRect(0, 0, canvas.width, canvas.height) }
+canvas.addEventListener('pointerdown', (e) => {
+  if (!pointMode) return
+  sizeCanvas(); clearDraw()
+  const p = ndc(e)
+  if (pointMode === 'point') {
+    pending = { point: { x: p.x, y: p.y }, cam: camNow() }
+    ctx.strokeStyle = '#fcfc54'; ctx.lineWidth = 3
+    ctx.beginPath(); ctx.arc(p.px, p.py, 14, 0, Math.PI * 2); ctx.stroke()
+    ready()
+    return
+  }
+  drawing = [p]
+  canvas.setPointerCapture(e.pointerId)
+})
+canvas.addEventListener('pointermove', (e) => {
+  if (!drawing) return
+  const p = ndc(e)
+  const last = drawing[drawing.length - 1]
+  if (Math.hypot(p.px - last.px, p.py - last.py) < 4) return
+  drawing.push(p)
+  ctx.strokeStyle = '#fcfc54'; ctx.lineWidth = 3; ctx.lineJoin = 'round'
+  ctx.beginPath(); ctx.moveTo(last.px, last.py); ctx.lineTo(p.px, p.py); ctx.stroke()
+})
+canvas.addEventListener('pointerup', () => {
+  if (!drawing) return
+  const pts = drawing
+  drawing = null
+  if (pts.length < 6) { clearDraw(); return }
+  ctx.beginPath(); ctx.moveTo(pts.at(-1).px, pts.at(-1).py); ctx.lineTo(pts[0].px, pts[0].py); ctx.stroke()
+  ctx.fillStyle = 'rgba(252,252,84,.12)'; ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p.px, p.py) : ctx.moveTo(p.px, p.py)); ctx.closePath(); ctx.fill()
+  pending = { outline: pts.map((p) => ({ x: p.x, y: p.y })), cam: camNow() }
+  ready()
+})
+function camNow () {
+  try {
+    const snap = $('view').contentWindow.__botView?.snapshot?.()
+    if (snap) return snap
+  } catch {}
+  return { fov, aspect: canvas.clientWidth / Math.max(1, canvas.clientHeight) }
+}
+function ready () {
+  $('pointhint').textContent = pending.outline ? 'Circled. Add a note if you like, then show it.' : 'Picked. Add a note if you like, then show it.'
+  $('pointsend').disabled = false
+  $('pointnote').focus()
+}
+async function sendPoint () {
+  if (!pending) return
+  const r = await post('/point', { ...pending, note: $('pointnote').value })
+  $('pointnote').value = ''
+  pending = null
+  if (!r.ok) note(r.error)
+  setTimeout(clearDraw, 1500)
+  pointMode = 'x'; setPointMode('x') // off
+  $('pointbar').classList.remove('show')
+}
+$('pointsend').addEventListener('click', sendPoint)
+$('pointnote').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendPoint(); if (e.key === 'Escape') $('pointcancel').click() })
+$('pointcancel').addEventListener('click', () => { pending = null; clearDraw(); pointMode = 'x'; setPointMode('x'); $('pointbar').classList.remove('show') })
+$('bPoint').addEventListener('click', () => setPointMode('point'))
+$('bCircle').addEventListener('click', () => setPointMode('circle'))
+
+// keys like the game: T chat, Esc close, P point, C circle
+document.addEventListener('keydown', (e) => {
+  const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName || '')
+  if (e.key === 'Escape') { if (chatOpen) setChat(false); if (pointMode) $('pointcancel').click(); return }
+  if (typing) return
+  if (e.key === 't' || e.key === 'T') { e.preventDefault(); setChat(true) }
+  if (e.key === '/') { e.preventDefault(); $('mode').value = 'command'; setChat(true) }
+  if (e.key === 'p' || e.key === 'P') setPointMode('point')
+  if (e.key === 'c' || e.key === 'C') setPointMode('circle')
+})
+
+// ------------------------------------------------------------------ state
+function render (s) {
+  S = s
+  renderF3(s)
+  if (!s.online) { $('invbox').innerHTML = '<div class="off">The bot isn\'t in a world right now.</div>'; invKey = ''; $('hudbar').innerHTML = ''; hudKey = ''; return }
+  if (s.botId !== botId) { botId = s.botId; $('view').src = `/view/${q}${q ? '&' : '?'}fov=${fov}&smooth=${smooth ? 1 : 0}` } // (re)joined: reload the view
+  renderHud(s)
+  if (tab === 'inv') renderInv(s)
+  $('around').textContent = [s.layout, s.players.length ? `players: ${s.players.join(', ')}` : 'no other players online'].filter(Boolean).join(' · ')
+  if (tab === 'mind') renderMind(s.mind)
+  if (tab === 'plans') renderPlans(s.plans)
+}
+function refresh () { fetch(`/state${q}`).then((r) => r.json()).then(render).catch(() => {}) }
+const events = new EventSource(`/events${q}`)
+events.addEventListener('state', (e) => render(JSON.parse(e.data)))
+events.addEventListener('line', (e) => addLine(JSON.parse(e.data)))
+events.addEventListener('feed', (e) => JSON.parse(e.data).forEach(addLine))
+refresh()
+addEventListener('resize', () => { hudKey = ''; invKey = ''; if (S) render(S) })
 </script>
 </body>
 </html>

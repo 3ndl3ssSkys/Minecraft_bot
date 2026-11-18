@@ -557,6 +557,24 @@ class TaskManager {
     this.next()
   }
 
+  /** An owner called a task off (panel or command): gone, no hard feelings, no "I gave up" chat. */
+  cancel (id, by = 'an owner') {
+    const t = this.tasks.find((x) => x.id === Number(id))
+    if (!t) return null
+    const wasActive = t === this.active()
+    t.status = 'cancelled'
+    t.finishedAt = now()
+    t.partialReason = `called off by ${by}`
+    this.tasks = this.tasks.filter((x) => x !== t)
+    this.history.push(t)
+    if (this.history.length > 25) this.history.shift()
+    this.agent.memory.addEvent('task', `${by} called off ${t.description} (for ${t.from}). You stopped working on it.`)
+    this.agent.log.info(`Task #${t.id} (${t.description}) cancelled by ${by}`)
+    if (wasActive) { this.agent.executor?.abort?.(`task cancelled by ${by}`); this.next() }
+    this.agent.learning?.markDirty()
+    return t
+  }
+
   /** Forgotten tasks vanish from the prompt — until the player brings them up. */
   forget (t, why) {
     t.status = 'forgotten'
