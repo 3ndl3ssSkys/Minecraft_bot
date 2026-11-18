@@ -1,59 +1,89 @@
 # Minecraft LLM Bot
 
-An autonomous Minecraft Java Edition player built on **Mineflayer** + **mineflayer-pathfinder**, with decisions made by a local LLM (**Ollama** running **Qwen 2.5**). It explores, mines, crafts, smelts, fights, chats, and reacts to what happens in the world.
+A Minecraft Java Edition player that plays on its own and talks like a real person. It's built on **Mineflayer**, and its decisions come from a local LLM through **Ollama** (`qwen3:4b-instruct` fits a 6 GB card fully). Nothing goes to the cloud unless you ask it to.
 
-On top of that it has an inner life:
+> **New here?** On Windows, start with [START-HERE.md](START-HERE.md): exact commands, step by step, from an empty PC to the bot walking around your own test server.
 
-- **Goals** on four levels (overall → long-term → current → steps), set by you or made up by itself, revised as it plays.
-- **Feelings** rise and fall with what happens to it.
-- **Trust** in each player (are they safe?) changes with what that player *does*.
-- **Liking** for each player (do I enjoy them?) grows from chemistry and time spent together, not from politeness.
-- **Learned experience** builds up over time: which fighting styles work, where it died, and short lessons.
-- **Its own judgment** about requests: it weighs what's asked, who's asking and what it would rather be doing. It sometimes does only part of a job, and sometimes forgets one. Owners and admins can add obedience on top, for any role or any single player.
-- **Real PvP**: bows with ballistics, axe/sword combos, mace + wind-charge smashes, potions, golden apples, totems, pearls, cobwebs, and tactics for specific mobs.
-- **Minecraft know-how**: recipes, loot and ore levels from the game's own data, plus hand-written experience.
-- **Its own buildings**: designed from reusable pieces, unique each time, and fitted to the terrain.
-- **Natural pacing**: it keeps busy while thinking, stops moving to type, and only types a word or two when it's in danger.
-- **An intelligence level**, from complete Beginner (who learns as it goes) to Impossible, plus a configurable way of thinking.
-- **Real senses**: line-of-sight vision (invisibility works), hearing mobs, footsteps, chests and mining, noticing particles, getting suspicious and investigating.
-- **Reading the world**: signs, and whose chest is whose (yours, community, someone's private chest, unlooted or looted loot chests).
-- **A good guest on friends' servers**: server profiles, login plugins, plugin chat formats, no griefing, and no fighting your own login.
+## What it does
 
-When it says no, it says it like a person, never like a bot.
+**Plays the game**
+- **Survival:** explores, mines (strip mining at the right depths), crafts, smelts, farms food, builds shelters, sleeps, and keeps its gear and hotbar in order like a regular player.
+- **Builds:** designs its own buildings from reusable pieces, fitted to the terrain and different every time.
+- **Fights:** bows with ballistics, axe and sword combos, maces, potions, totems, pearls, mob tactics. Plays PvP with you for fun (stops at 3 hearts and says gg), and plays PvP minigames with team awareness.
+- **Moves like a person on mouse and keyboard:** human camera flicks and WASD, sprint-jumping, real parkour. Its skill shows: a Beginner fumbles, a Master is smooth.
+- **Reflexes without the LLM**, 20 times a second: fall saves (water, blocks, boats, pearls, and clutches at higher levels), lava, drowning, getting hit.
+
+**Thinks for itself**
+- **Goals on four levels** (overall → long-term → current → steps), set by you or made up by itself.
+- **Its own judgment about requests:** it weighs who's asking and what it would rather do. It may do part of a job, forget one, or say no like a person would. Owners can add obedience on top.
+- **Feelings, trust** (is this player safe?) and **liking** (do I enjoy them?), which change with what happens.
+- **Common sense:** it won't craft a fourth crafting table, downgrade its tools, eat when full, or retry the same failure forever. It also picks up its stations before it leaves.
+- **Memory:** long-term memories, chat history per player, lessons from mistakes, a mental map (home, bed, deaths, what it placed).
+- **An intelligence level** from Beginner to Impossible. Beginners learn as they play and can end up better than a Master.
+- **Realistic senses:** it sees only what's in line of sight, hears footsteps and mining, gets suspicious and investigates. It needs F3 knowledge to use coordinates.
+- **Expert-only knowledge:** at the top levels it understands redstone (simulates, optimises, designs and builds circuits), recognises farms and other contraptions, and can read up online (wiki and guides) on minigames, designs and strategies.
+
+**Gets along with people**
+- **A good guest:** no griefing of player builds, it respects private chests, and it follows reasonable server rules ("don't kill the villagers", "no building near spawn"). It leaves iron-farm zombies, pets and farms alone. The `anarchist` personality ignores rules.
+- **Public networks:** reads scoreboards and menus, uses lobby items and menus, accepts your party invites, joins you, and stays quiet in public chat.
+- **Voice:** talk to it while you play and it answers out loud, through a browser page or **in game with Simple Voice Chat**. It can explain things while showing them ("show me how to make a furnace"). Speech can be fully local (Whisper + Kokoro).
+- **A browser viewer:** see what it sees, its inventory and feelings; change its goals and tasks; circle things on screen to point them out.
+- **Never** emojis, robot-speak or "As an AI…".
+
+## Using it
+
+On Windows, in Command Prompt, inside the bot folder:
+
+1. **Set it up once** with `npm run setup`. It asks a few questions: your Minecraft name, the server, the bot's name, personality and level, and the model. It writes them to `config.local.json`. It also downloads and tests the model.
+2. **Check everything** with `npm run doctor`. It checks Ollama, the model's speed (this step takes a minute) and the server.
+3. **Start it**:
+
+   | Command | What it does |
+   | --- | --- |
+   | `npm start` | the bot on its own |
+   | `npm run viewer` | the bot plus the browser page at http://localhost:3007: its view, inventory, feelings, goals, chat, pointing. The voice page is at http://localhost:3007/voice. |
+   | `npm run voice-server` | optional, in a second window: local speech recognition and voice (Whisper + Kokoro, needs Python) |
+   | `scripts\start-bot.bat` | keeps it running and restarts it if it crashes |
+
+4. **Talk to it in game** like a person ("can you get me some iron?", "come here", "don't break that"). Say its name if other people are around. Owner commands start with `!`: `!status`, `!stop`, `!resume`, `!goal <text>`, `!goals`, `!emotion`, `!tasks`, `!set <setting> <value>`, `!help`. The full list is in [Commands](#commands).
+
+To update it, run `git pull` and then `npm install`. Your `config.local.json` and the bot's memories in `data/` are never touched.
+
+## Configuring it
+
+- **`config.local.json`** holds your settings. `npm run setup` writes it, and you can edit it by hand. Anything in it overrides the defaults in `config.json` (don't edit that one; it's regenerated). Every option and its default is listed in `DEFAULT_CONFIG` at the top of `index.js`.
+- **In game**, `!set <key> <value>` changes many settings live, and they're remembered until `!settings reset` ([Live settings](#commands)).
+- **[CONFIGURING.md](CONFIGURING.md)** explains, with examples:
+  - goals, feelings and personality (or the presets in `personalities/`: friendly, grumpy-miner, hype-builder, shy-explorer, anarchist);
+  - intelligence level, chat style and reactions;
+  - fighting and PvP, reflexes;
+  - rules and manners, voice, voice chat, public networks and research.
+- **Several bots or several servers**: `--profile <name>` gives a bot its own memories (`data/profiles/<name>/`), and `--server <name>` picks a server from `servers` in the config.
+
+Environment variables also override the config, which is handy for scripts:
+- connection: `MC_HOST`, `MC_PORT`, `MC_USERNAME`, `MC_AUTH`, `MC_VERSION`, `MC_PASSWORD`, `BOT_SERVER` (profile name);
+- model: `OLLAMA_URL`, `OLLAMA_MODEL`;
+- bot: `BOT_PERSONALITY`, `BOT_CHAT_MODE`, `BOT_INTELLIGENCE`;
+- `BOT_DEBUG=1` for verbose logs.
+
+## The other documents
+
+| Document | For |
+| --- | --- |
+| [START-HERE.md](START-HERE.md) | first setup on Windows, with exact commands |
+| [SETUP.md](SETUP.md) | everything else: hardware and models, friends' servers, online-mode servers (FastLogin), Bedrock accounts, running it all the time, voice from another PC |
+| [CONFIGURING.md](CONFIGURING.md) | making the bot yours |
+| this README | how each part works, every command and option, troubleshooting |
+| [TRAINING.md](TRAINING.md) | fine-tuning the small model on the bot's own good decisions |
+| [HISTORY.md](HISTORY.md) | how it was built, request by request |
+| [CLAUDE.md](CLAUDE.md) | design notes and lessons learned, for whoever works on the code |
 
 ```
-Perception (every 2s) ──► state JSON + feelings + relationships + lessons ──► Ollama ──► {thought, emotion, goal, action}
-        ▲                                                                                      │
-        └──────────── result fed back into the next prompt ◄──── ActionExecutor (one action at a time)
+Perception (every 2s) ──► state + feelings + relationships + memories ──► LLM ──► {thought, emotion, goal, action}
+        ▲                                                                              │
+        └──────── result fed back into the next prompt ◄──── ActionExecutor (one action at a time)
+Reflexes (every tick, no LLM): falls, lava, drowning, hits
 ```
-
-> **Could we train our own Minecraft model?** See [TRAINING.md](TRAINING.md): not from scratch, but a fine-tune of the small model on the bot's own good decisions is realistic (`logging.trainingData` records them).
-
-> **New here?** On Windows, start with [START-HERE.md](START-HERE.md) (exact commands, step by step). [SETUP.md](SETUP.md) covers everything else, from an empty PC to friends' servers. [CONFIGURING.md](CONFIGURING.md) shows how to set goals, feelings, personality, chat, reactions, fighting and reflexes. [CLAUDE.md](CLAUDE.md) holds the project's design notes and lessons learned.
-
-## Quick start
-
-1. Install **Node.js 22+** and [Ollama](https://ollama.com), then pull the model:
-   ```bash
-   ollama pull qwen2.5:7b
-   ```
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-3. Edit `config.json`: set `server.host`, `server.port` and `server.username`, and put your username in `behavior.owners`.
-4. Run the bot:
-   ```bash
-   npm start
-   ```
-   To use a different config file:
-   ```bash
-   node index.js my-config.json
-   ```
-
-Environment variables override the config: `MC_HOST`, `MC_PORT`, `MC_USERNAME`, `MC_AUTH`, `MC_VERSION`, `MC_PASSWORD`, `OLLAMA_URL`, `OLLAMA_MODEL`, `BOT_PERSONALITY`, `BOT_CHAT_MODE`, `BOT_INTELLIGENCE`, `BOT_SERVER` (profile name), and `BOT_DEBUG=1` for verbose logs.
-
-> **Model size:** `qwen2.5:7b` is a good default. `qwen2.5:3b` is faster on weak hardware but makes more mistakes; `qwen2.5:14b` plans and role-plays noticeably better. Ollama 0.5+ is recommended for strict JSON-schema output.
 
 ## Running it on your server computer
 
@@ -66,9 +96,9 @@ The bot runs alongside Ollama on any PC that can reach the Minecraft server; it 
    - [Git](https://git-scm.com);
    - [Ollama](https://ollama.com/download);
    - an up-to-date NVIDIA driver.
-2. Download the model:
+2. Download the model (`npm run setup` can do this for you and sets it in `config.local.json`):
    ```bash
-   ollama pull qwen2.5:7b
+   ollama pull qwen3:4b-instruct
    ```
 3. Recommended for 6 GB graphics cards: in **System Properties → Environment Variables**, add these user variables, then quit Ollama from the tray and start it again.
    - `OLLAMA_FLASH_ATTENTION` = `1`
@@ -107,9 +137,9 @@ The bot runs alongside Ollama on any PC that can reach the Minecraft server; it 
    ```bash
    curl -fsSL https://ollama.com/install.sh | sh
    ```
-   Install Node.js 22 and git with your package manager or NodeSource, then pull the model:
+   Install Node.js 22 and git with your package manager or NodeSource, then pull the model (or let `npm run setup` do it):
    ```bash
-   ollama pull qwen2.5:7b
+   ollama pull qwen3:4b-instruct
    ```
 2. For the same 6 GB settings, add them to Ollama's service:
    ```bash
@@ -1098,6 +1128,8 @@ Without them setting anything up:
 
 ## Troubleshooting
 
+- **`Disconnected: socketClosed` right after "Connecting…"**, with no kick message: the server closed the connection during login. If the server is running and other clients can join, update the bot (`git pull`). The update that added Simple Voice Chat (18 November 2026) sent a packet before the handshake, and real servers drop that. Otherwise check `server.version` (leave it empty to auto-detect) and that the port is the Minecraft server's, not a proxy's.
+- **`ECONNREFUSED` / "Nothing is running at …"**: the server isn't up yet or the port is wrong. The bot keeps retrying.
 - **"Cannot reach Ollama"**: start it with `ollama serve`, or set `llm.url` / `OLLAMA_URL`.
 - **"Server version … is not supported" / "Outdated client"**: see [Minecraft 26.3 and other newer versions](#minecraft-263-and-other-newer-versions).
 - **Slow decisions**: use a smaller model, lower `llm.numCtx`, or raise `loop.minLlmIntervalMs`.

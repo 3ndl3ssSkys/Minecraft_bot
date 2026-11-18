@@ -198,7 +198,16 @@ class VoiceChat extends EventEmitter {
     if (this.cfg.enabled === false) return
     const client = bot._client
     for (const ch of ['voicechat:request_secret', 'voicechat:client_state']) client.registerChannel(ch, ['restBuffer', []], false)
-    client.registerChannel('voicechat:secret', ['restBuffer', []], true)
+    // Register quietly now and announce the channel only once logged in: registerChannel(..., true) writes
+    // minecraft:register at once, and a packet during the handshake makes the server drop the connection.
+    client.registerChannel('voicechat:secret', ['restBuffer', []], false)
+    const announce = () => {
+      try {
+        const old = bot.registry?.version?.['<']?.('1.13')
+        client.writeChannel(old ? 'REGISTER' : 'minecraft:register', ['voicechat:secret'])
+      } catch (err) { this.agent.log.debug?.(`Voice chat: couldn't register the channel (${err.message})`) }
+    }
+    bot.once('login', announce)
     const onSecret = (data) => { try { this.onSecret(Buffer.from(data)) } catch (err) { this.agent.log.warn(`Voice chat: bad secret packet (${err.message})`) } }
     client.on('voicechat:secret', onSecret)
     // The server lists its channels in minecraft:register when the mod is installed.
@@ -207,7 +216,7 @@ class VoiceChat extends EventEmitter {
     }
     client.on('custom_payload', onPayload)
     if (this.cfg.enabled === true) bot.once('spawn', () => this.requestSoon(4000)) // forced on: ask even if the server didn't announce it
-    this.cleanup = () => { client.removeListener('voicechat:secret', onSecret); client.removeListener('custom_payload', onPayload) }
+    this.cleanup = () => { bot.removeListener('login', announce); client.removeListener('voicechat:secret', onSecret); client.removeListener('custom_payload', onPayload) }
     bot.once('end', () => this.detach())
   }
 

@@ -53,7 +53,8 @@ const OpusScript = require('opusscript')
   // --- the bot side, with a fake Minecraft connection ---
   const channelWrites = []
   const mc = new EventEmitter()
-  mc.registerChannel = () => {}
+  // like minecraft-protocol: custom=true writes minecraft:register at once
+  mc.registerChannel = (name, parser, custom) => { if (custom) mc.writeChannel('minecraft:register', [name]) }
   mc.writeChannel = (ch, data) => channelWrites.push({ ch, data })
   const bot = new EventEmitter()
   bot._client = mc
@@ -62,6 +63,10 @@ const OpusScript = require('opusscript')
   const agent = { bot, config: { svc: { enabled: 'auto' }, server: { host: '127.0.0.1' } }, log: { info: (m) => logs.push(m), warn: (m) => logs.push(m) } }
   const vc = new VoiceChat(agent)
   vc.attach(bot)
+  // nothing may go out before login: a packet during the handshake makes real servers drop the connection
+  assert.equal(channelWrites.length, 0, 'no packets before login')
+  bot.emit('login')
+  assert.deepEqual(channelWrites.shift(), { ch: 'minecraft:register', data: ['voicechat:secret'] }, 'channel announced after login')
   // the server announces the mod; the bot asks for its secret
   mc.emit('custom_payload', { channel: 'minecraft:register', data: Buffer.from('voicechat:secret\0voicechat:player_state') })
   await new Promise((res) => setTimeout(res, 1700))

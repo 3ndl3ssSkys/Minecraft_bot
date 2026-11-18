@@ -586,6 +586,30 @@ It also had a stray line that reset the autopilot after nearly every action. Tha
 
 **Not verified:** a real Simple Voice Chat server; real minigames; real web search (DuckDuckGo may rate-limit; use SearXNG if so).
 
+## 27. The bot couldn't join after the voice chat update; a README that says what it is
+
+**Asked:** "the bot didn't want to join the server this time, it couldn't connect to the local port 25565", and whether the notes on GitHub explain what the bot does, how to configure it and how to use it.
+
+**What happened:**
+- The log showed `Connecting to localhost:25565 as Wanderer` and then `Disconnected: socketClosed` again and again, with no kick message.
+- The server (26.1, offline mode) was up.
+
+**Cause:**
+- The Simple Voice Chat client (§26) called `client.registerChannel('voicechat:secret', ..., true)` as soon as the bot was created.
+- With `true`, minecraft-protocol writes a `minecraft:register` packet at once, so it went out before the handshake.
+- A capture of the first bytes showed a stray `01 00` packet ahead of the handshake. A real server reads that as a broken handshake and closes the socket.
+- flying-squid ignores it, which is why every live test still passed.
+
+**Fix:**
+- The channel is registered quietly, and announced with `writeChannel('minecraft:register', ...)` on `login`, in the play state.
+- `test/svc.test.js` now fails if anything is written before login.
+- Verified with the byte capture: the handshake is the first packet again.
+
+**Docs:**
+- The README opening was stale: it said Qwen 2.5 and told people to edit `config.json`. It also didn't mention the viewer, voice, voice chat, networks, manners, redstone or research.
+- It now starts with "What it does" (grouped), "Using it" (setup, doctor, start commands, talking to it, `!` commands, updating), "Configuring it" (`config.local.json`, `!set`, CONFIGURING.md, profiles, environment variables) and a table of the other documents.
+- Troubleshooting entries for `socketClosed` were added to the README and START-HERE.
+
 ## Where it stands now
 
 **Next for the user:**
