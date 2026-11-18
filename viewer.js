@@ -5,7 +5,7 @@
  *
  * http://localhost:3007 shows its first-person view (prismarine-viewer) next to a panel: coordinates, health, food,
  * game mode, what it's doing, its goal and last thought, its inventory, the chat log, and a box to give it !commands,
- * talk to it, or make it say something in game. Listens on 127.0.0.1 only, unless a host AND a password are set.
+ * talk to it, or make it say something in game. Always behind a key (viewer.password, or one made for you: data/viewer-key.txt).
  *
  * prismarine-viewer knows Minecraft up to 1.21.4. Newer worlds (26.x) are translated block by block to the nearest
  * version it knows (same block names; unknown blocks become stone or air), so the view stays readable.
@@ -165,18 +165,21 @@ class BotViewer {
       agent.log.warn(`The viewer needs prismarine-viewer: run "npm install" in the bot folder (it's an optional extra). (${err.message.split('\n')[0]})`)
       return null
     }
-    const { host, port, password } = this.cfg
-    if (host !== '127.0.0.1' && host !== 'localhost' && !password) {
-      agent.log.warn('viewer.host opens the viewer to other computers: set viewer.password too. Using 127.0.0.1 for now.')
-    }
-    const bindHost = host !== '127.0.0.1' && host !== 'localhost' && !password ? '127.0.0.1' : host
+    const { host, port } = this.cfg
+    // Always a key. A tunnel or port forward (playit, ngrok, a router) reaches the viewer from this PC itself, so without
+    // a key anyone with the link could give the bot owner commands. With no viewer.password, a random one is made once
+    // and kept next to the save; the link printed below has it in.
+    const password = this.cfg.password || this.autoKey()
+    const bindHost = host
     const app = pv.express()
     const tls = this.cfg.https ? this.certificate() : null
     const server = tls ? https.createServer(tls, app) : http.createServer(app)
     const io = pv.socketIo(server, { path: '/view/socket.io' })
     const allowed = (req) => !password || req.query?.key === password || req.headers['x-key'] === password
 
-    app.use((req, res, next) => (allowed(req) || req.path.startsWith('/view/')) ? next() : res.status(401).send('Wrong or missing key (add ?key=your-password to the address).'))
+    // Scripts the pages load by plain <script src> can't carry the key; they hold nothing private.
+    const open = (p) => p.startsWith('/view/') || p === '/voice-client.js' || p === '/favicon.ico'
+    app.use((req, res, next) => (allowed(req) || open(req.path)) ? next() : res.status(401).send('Wrong or missing key (add ?key=your-password to the address).'))
     app.use(pv.express.json())
     app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'web', 'panel.html')))
     // Voice (voice.js): a small page to talk with it, and the routes the page uses.
@@ -245,7 +248,7 @@ class BotViewer {
     io.use((socket, next) => (!password || socket.handshake.query?.key === password || socket.handshake.headers.referer?.includes(`key=${password}`)) ? next() : next(new Error('unauthorized')))
     io.on('connection', (socket) => this.onViewer(socket, pv))
 
-    server.listen(port, bindHost, () => agent.log.info(`Viewer: ${tls ? 'https' : 'http'}://${bindHost === '0.0.0.0' ? 'localhost' : bindHost}:${port}${password ? '/?key=…' : ''} (the bot's view, inventory, coordinates and chat)`))
+    server.listen(port, bindHost, () => agent.log.info(`Viewer: ${tls ? 'https' : 'http'}://${bindHost === '0.0.0.0' ? 'localhost' : bindHost}:${port}/?key=${encodeURIComponent(password)} (the bot's view, inventory, coordinates and chat; keep the key to yourself: it gives owner control)`))
     server.on('error', (err) => agent.log.warn(`Viewer could not start on port ${port}: ${err.message}`))
     this.server = server
     this.io = io
@@ -354,6 +357,15 @@ class BotViewer {
         return dig(block, ...a).finally(done)
       }
     }
+  }
+
+  /** The viewer's key when no viewer.password is set: made once, kept next to the save (data/viewer-key.txt). */
+  autoKey () {
+    const file = path.join(path.dirname(path.resolve(__dirname, this.agent.config.learning.file)), 'viewer-key.txt')
+    try { const k = fs.readFileSync(file, 'utf8').trim(); if (k) return k } catch { /* not made yet */ }
+    const k = require('crypto').randomBytes(9).toString('base64url')
+    try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, k + '\n') } catch { /* this run only */ }
+    return k
   }
 
   /** Which prismarine-viewer texture set to use (the nearest version it has). */
@@ -647,12 +659,24 @@ class BotViewer {
       move: () => {
         socket.emit('position', { pos: bot.entity.position, yaw: bot.entity.yaw, pitch: this.cfg.firstPerson ? bot.entity.pitch : undefined, addMesh: true })
         view.updatePosition(bot.entity.position)
-      }
+        lastSent = { at: Date.now(), x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z, yaw: bot.entity.yaw, pitch: bot.entity.pitch }
+      },
+      // The server moving it (a correction, a teleport, respawn) is a different event: without it the view stayed put.
+      forcedMove: () => listeners.move(),
+      respawn: () => listeners.move()
     }
+    let lastSent = null
+    // And a safety net: if the view's idea of where it is has gone stale, send it again.
+    const resend = setInterval(() => {
+      const e = bot.entity
+      if (!e) return
+      const l = lastSent
+      if (!l || Date.now() - l.at > 500 || Math.abs(l.x - e.position.x) + Math.abs(l.y - e.position.y) + Math.abs(l.z - e.position.z) > 0.01 || l.yaw !== e.yaw || l.pitch !== e.pitch) listeners.move()
+    }, 500)
     for (const [ev, fn] of Object.entries(listeners)) bot.on(ev, fn)
     for (const e of Object.values(bot.entities)) emitEntity(e)
     listeners.move()
-    socket.on('disconnect', () => { for (const [ev, fn] of Object.entries(listeners)) bot.removeListener(ev, fn) })
+    socket.on('disconnect', () => { clearInterval(resend); for (const [ev, fn] of Object.entries(listeners)) bot.removeListener(ev, fn) })
   }
 }
 

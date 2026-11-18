@@ -659,6 +659,8 @@ Start it with `npm run viewer` (or `npm start -- --viewer`), or type `!viewer on
   - **Goals & tasks:** the overall goal, long-term goals, the current goal and its steps, goals waiting for later, and players' tasks. Add, edit, finish, drop or reorder them; call off a task; or ask it to do something (it decides, like a person).
 - **Point things out:** **Point** (P) and click something in the view, or **Circle** (C) and draw around things, then add a note if you like ("mine these", "stay away from that"). It works out exactly which blocks and creatures you meant from its own copy of the world, outlines them in the view, remembers them for a few minutes, and gets your note as if you had said it while pointing.
 
+**Always behind a key:** with no `viewer.password`, the bot makes one up the first time (kept in `data/viewer-key.txt`) and prints the full link with it, `http://127.0.0.1:3007/?key=…`. Use that link. A tunnel or port forward (playit, ngrok, a router) reaches the viewer from your own PC, so without the key anyone with the address could give the bot owner commands. Share the plain view at most, never the key.
+
 It only listens on your PC. To watch from another device, set `viewer.host` to `"0.0.0.0"` **and** a `viewer.password`, then open `http://<pc>:3007/?key=<password>`. `viewer.viewDistance` (chunks, default 4) controls how much the browser draws.
 
 ## Talking to it out loud (`voice`)
@@ -1177,7 +1179,8 @@ Without them setting anything up:
 - **"Server version … is not supported" / "Outdated client"**: see [Minecraft 26.3 and other newer versions](#minecraft-263-and-other-newer-versions).
 - **Slow decisions**: every decision logs `Thought for 4.1 s (read 820 new tokens, wrote 95 at 45/s)`.
   - **Many tokens read each time**, with "the cache was wiped by a chat reply": chat replies on the same model push the decision prompt out of Ollama's cache. Set `llm.fastModel` to `qwen3:1.7b` (with `OLLAMA_MAX_LOADED_MODELS=2`), or set `OLLAMA_NUM_PARALLEL=2`. The bot says so once in the log when it sees this happening.
-  - **A low writing speed** (under ~15/s): the model is partly on the CPU (`ollama ps`).
+  - **A low writing speed** (under ~15/s), or "reads prompts at only … tokens/s": the model is partly on the CPU (`ollama ps` must say 100% GPU).
+  - **Two models that don't both fit** keep pushing each other out of the graphics card. After two reloads the bot stops using the chat model and says so; `npm run set -- llm.fastModel ""` makes that permanent.
   - **"had to load the model again"**: something pushed the model out of the graphics card.
   - Otherwise use a smaller model, lower `llm.numCtx`, or raise `loop.minLlmIntervalMs`.
 - **Kicked for spam**: raise `chat.minSecondsBetweenMessages` and lower `chat.maxMessagesPerMinute`.

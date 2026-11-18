@@ -1,6 +1,6 @@
 'use strict'
 /**
- * npm run training-set [-- path/to/decisions.jsonl]
+ * npm run training-set [-- path/to/decisions.jsonl] [--short]
  *
  * Turns the decisions the bot recorded while playing (logging.trainingData) into a fine-tuning file: only the ones
  * that worked, no failures or repeats, no broken or emoji answers. Output: train.jsonl next to the input, one chat per
@@ -9,7 +9,10 @@
 const fs = require('fs')
 const path = require('path')
 
-const input = process.argv[2] || path.join(__dirname, '..', 'data', 'training', 'decisions.jsonl')
+const args = process.argv.slice(2)
+// --short: train with the short system prompt (llm.trained), so the model learns to need only that (much faster).
+const short = args.includes('--short')
+const input = args.find((a) => !a.startsWith('--')) || path.join(__dirname, '..', 'data', 'training', 'decisions.jsonl')
 if (!fs.existsSync(input)) {
   console.log(`No recorded decisions at ${input}.\nTurn on "logging": { "trainingData": true } in config.local.json and let the bot play for a while first.`)
   process.exit(1)
@@ -34,10 +37,12 @@ for (const l of lines) {
   if (act === last || seen.has(key)) { why.repeat++; continue }
   last = act
   seen.add(key)
-  out.push(JSON.stringify({ messages: [...d.messages.map((m) => ({ role: m.role, content: m.content })), { role: 'assistant', content: text }] }))
+  const msgs = d.messages.map((m) => ({ role: m.role, content: m.content }))
+  if (short) { if (!d.short) { why.broken++; continue } msgs[0] = { role: 'system', content: d.short } }
+  out.push(JSON.stringify({ messages: [...msgs, { role: 'assistant', content: text }] }))
   why.kept++
 }
-const file = path.join(path.dirname(input), 'train.jsonl')
+const file = path.join(path.dirname(input), short ? 'train-short.jsonl' : 'train.jsonl')
 fs.writeFileSync(file, out.join('\n') + (out.length ? '\n' : ''))
 console.log(`${lines.length} recorded decisions → ${why.kept} examples in ${file}`)
 console.log(`left out: ${why.failed} failed, ${why.repeat} repeats, ${why.waiting} waits, ${why.broken} broken, ${why.emoji} with emojis`)

@@ -34,7 +34,7 @@ http.createServer((req, res) => {
     log.write(`--- ${new Date().toISOString()} [${props.join(',') || 'json'}]\nSYSTEM:\n${data.messages?.[0]?.content}\nUSER:\n${user}\n`)
     let out
     const system = data.messages?.[0]?.content || ''
-    if (props.includes('action') || /## (Available actions|Actions)\n/.test(system)) { // decisions come without a schema now
+    if (props.includes('action') || /## (Available actions|Actions)\n|Answer with one JSON decision/.test(system)) { // decisions come without a schema now
       // Script entries are actions, optionally with goal fields: { name, args, goal, subgoal, goalStatus }
       const step = script[turn++] || { name: 'wait', args: { seconds: 3 } }
       const { goal = 'testing', subgoal = '', goalStatus = 'working', ...action } = step

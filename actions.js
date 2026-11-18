@@ -2105,6 +2105,7 @@ function shortParams (params) {
 function describeToolList (names, compact = false) {
   return names.map((name) => {
     const a = ACTIONS[name]
+    if (compact === 'names') return `${name}(${shortParams(a.params)})`
     if (compact) return `- ${name}(${shortParams(a.params)}) — ${SHORT[name] || a.description.split(/[.(]/)[0]}`
     const params = Object.entries(a.params).map(([k, v]) => `${k}: ${v}`).join(', ')
     return `- ${name}(${params}) — ${a.description}`

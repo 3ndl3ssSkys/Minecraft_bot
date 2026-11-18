@@ -732,6 +732,56 @@ It also had a stray line that reset the autopilot after nearly every action. Tha
 
 **Not verified:** rain and snow and the under-water look (flying-squid has no weather or water here), cracks mid-dig on screen, and how it runs on the user's GPU.
 
+## 32. Get going at once; why thinking was slow; the viewer behind a key; a model trained for this
+
+**Asked:**
+- After joining, it shouldn't wait minutes for a task or goal; it should start doing what it needs to.
+- From a session: "standing still and thinking took a long time", with a 35.8 s decision in the log.
+- The viewport lags when jumping, gets very dark underground, sometimes lags back and gets stuck, moves when the bot doesn't, and turns late.
+- (Shared a public TCP-forward address of the viewer.)
+- Should we train a model to decide extremely fast and understand Minecraft by level, moving, analysing, acting and building like a player?
+
+**Found:**
+- The 35.8 s decision read 3,852 tokens at ~125/s after an 8.7 s model reload. The chat model and the main model didn't both fit in 6 GB and kept pushing each other out; the reading speed means part of it ran on the CPU.
+- At join, the early-game routine was off whenever someone had just spoken, or a mob was anywhere near; then everything waited on the model.
+- Viewer:
+  - a whole-scene light floor of 0.2 underground (the viewer has no per-block light);
+  - bobbing from tiny position wobbles;
+  - turn easing on top of the bot's own human head movement;
+  - server corrections arriving as `forcedMove`, which the view didn't listen to.
+- The viewer had no key unless a password was set, and a tunnel arrives from localhost, so anyone with the link had owner control.
+
+**Built:**
+- **Joining:**
+  - for 3 minutes after joining, the routine runs regardless of chat and of mild danger;
+  - a starting goal from the inventory;
+  - idle waits replaced with something useful;
+  - decisions preempt background planning;
+  - models warmed up while connecting;
+  - a smaller context for the chat model.
+- **Speed:**
+  - after 2 reloads the main model takes over chat (one warning);
+  - a warning when prompts are read slowly, naming the cause;
+  - `llm.numCtx` 6144, and a warning when a prompt nears it.
+- **Viewer:**
+  - position easing 45 ms, turning twice as fast;
+  - bobbing from the bot's real velocity;
+  - a cave light floor of 0.6;
+  - `forcedMove`/`respawn` listened to, and a 0.5 s resend when stale;
+  - always a key (`data/viewer-key.txt`, the link printed with it), with `/voice-client.js` left open so the panel still loads.
+- **Trained-model path:**
+  - `llm.trained` uses a ~480-token system prompt instead of ~2,600;
+  - every recorded decision also stores that short prompt;
+  - `npm run training-set -- --short` builds a fine-tuning file with it;
+  - TRAINING.md explains the honest split: code for the hands, a trained small model for the head.
+
+**Tested:**
+- Unit tests.
+- With the key: the panel works with it and answers 401 without it.
+- The trained prompt measured at ~480 tokens with the mock.
+
+**Not verified:** the user's PC (whether the fallback kicks in, and real timings) and the viewport fixes in their browser.
+
 ## Where it stands now
 
 **Next for the user:**

@@ -143,12 +143,13 @@ const DEFAULT_CONFIG = {
     // Shorter decision prompt (same rules and tools, tersely): ~1.4k instead of ~3.4k tokens. A small GPU reads
     // every token of it before each decision. 'auto' = on for local models of 8B or smaller.
     compactPrompt: 'auto',
+    trained: false, // true for a model fine-tuned on the bot's decisions (TRAINING.md): a ~400-token system prompt instead of ~2,600
     // Enforce the decision JSON with a schema? Off: Ollama sorts schema keys alphabetically, which made the
     // model write action.args before action.name (always {}) and the action before its thought. Plain JSON mode
     // keeps the order from the prompt's example.
     decisionSchema: false,
     temperature: 0.7,
-    numCtx: 8192,
+    numCtx: 6144, // the context the model holds (a decision needs ~4.5k); every 1k costs video memory
     keepAlive: '24h', // keep the model loaded: reloading it costs seconds
     timeoutMs: 90000,
     maxRetries: 2,
@@ -1159,7 +1160,7 @@ class OllamaClient {
 
   laneFor (priority) {
     const chatty = priority === PRIORITY.reply || priority === PRIORITY.reaction || priority === PRIORITY.smalltalk
-    return this.cfg.fastModel && chatty ? 'fast' : 'main'
+    return this.cfg.fastModel && chatty && !this.fastOff ? 'fast' : 'main'
   }
 
   /** Queue a chat request. Resolves to the parsed JSON object the model produced. */
@@ -1234,6 +1235,12 @@ class OllamaClient {
       options: { temperature: temp, num_ctx: lane === 'fast' && this.cfg.fastModel ? Math.min(this.cfg.numCtx, this.cfg.fastNumCtx || 4096) : this.cfg.numCtx }
     }
     if (this.cfg.maxTokens) body.options.num_predict = this.cfg.maxTokens
+    // A prompt longer than the context is cut silently by Ollama (the rules at the start go first): say so once.
+    const chars = messages.reduce((a, m) => a + String(m.content || '').length, 0)
+    if (chars / 3.3 > body.options.num_ctx - (this.cfg.maxTokens || 400) && !this.warnedCtx) {
+      this.warnedCtx = true
+      this.log.warn(`A prompt (~${Math.round(chars / 3.3)} tokens) is close to llm.numCtx (${body.options.num_ctx}): raise it a little (npm run set -- llm.numCtx 8192) if answers get confused.`)
+    }
     if (typeof this.cfg.think === 'boolean' && this.thinkSupported) body.think = this.cfg.think
     return body
   }
@@ -1318,9 +1325,21 @@ class OllamaClient {
     this.timings ||= { decisions: 0, coldAfterChat: 0, warned: new Set() }
     const t = this.timings
     const warn = (key, text) => { if (!t.warned.has(key)) { t.warned.add(key); this.log.warn(text) } }
-    if (s(data.load_duration) > 1.5 && (lane.requests = (lane.requests || 0) + 1) > 1) {
+    lane.requests = (lane.requests || 0) + 1
+    if (s(data.load_duration) > 1.5 && lane.requests > 1) {
       warn('reload', `Ollama had to load the model again (${s(data.load_duration).toFixed(1)} s): something pushed it out of the graphics card. ${this.cfg.fastModel ? 'With two models, set OLLAMA_MAX_LOADED_MODELS=2 and make sure both fit (ollama ps).' : 'Check that nothing else uses Ollama, and that OLLAMA_KEEP_ALIVE / llm.keepAlive is long.'}`)
+      // Two models that don't both fit keep pushing each other out: every switch costs a reload and the whole prompt.
+      // After the second reload, the main model answers chat too (one model, always loaded, beats two that swap).
+      t.reloads = (t.reloads || []).filter((at) => Date.now() - at < 600000).concat(Date.now())
+      if (this.cfg.fastModel && !this.fastOff && t.reloads.length >= 2) {
+        this.fastOff = true
+        this.log.warn(`${this.cfg.fastModel} and ${this.cfg.model} don't both fit on the graphics card, so they keep pushing each other out (each reload costs seconds plus re-reading the whole prompt). Using ${this.cfg.model} for chat as well from now on. To make it permanent: npm run set -- llm.fastModel ""`)
+      }
     }
+    // Reading the prompt: a 4B model fully on a GTX 1660 Super reads ~1000+ tokens a second; a few hundred means part of
+    // it runs on the CPU (or it was just reloaded).
+    const readTps = read / Math.max(0.001, s(data.prompt_eval_duration))
+    if (read >= 500 && readTps < 350 && s(data.load_duration) < 1.5) warn('slowread', `The model reads prompts at only ${Math.round(readTps)} tokens/s (it should be over 1000 on a 6 GB card): part of it is running on the CPU. Run "ollama ps" while the bot runs: it must say 100% GPU. If two models are loaded, use one (npm run set -- llm.fastModel ""), or lower llm.numCtx.`)
     if (wrote >= 20 && writeTps < 12) warn('cpu', `The model writes only ${writeTps.toFixed(0)} tokens/s: it's probably partly on the CPU. Run "ollama ps" while the bot runs: it should say 100% GPU. A smaller model (npm run setup) fixes that.`)
     if (job.label !== 'decision') return
     t.decisions++
@@ -1617,6 +1636,19 @@ ONLY a JSON object, keys in this order. Think first, then pick the action, then 
 ${decisionExample(agent, true)}
 ${EXAMPLE_NOTE}
 "next": up to 2 follow-up actions you are SURE you will do right after this one (they run without asking you again); [] when unsure. Optional extras, only when they change: "queue" (up to 3 things you want to do later: [{"goal":"short text","priority":1-10}]; the engine keeps a backlog and does the most important first), "emotion" (one of ${EMOTIONS.join(', ')}) with "emotionIntensity" 1-10, and "taskUpdate" (only if status.task exists).`
+}
+
+/**
+ * The system prompt for a model fine-tuned on the bot's own decisions (llm.trained, TRAINING.md): it has learned the
+ * rules and the answer format, so it only needs who it is and which actions exist now. ~400 tokens instead of ~2,600,
+ * which is most of the reading time on a small graphics card.
+ */
+function buildTrainedPrompt (agent, toolNames) {
+  const p = agent.personality || {}
+  const lvl = safe(() => agent.intelligence.levelName?.()) || agent.config.intelligence?.level || ''
+  return `You are ${agent.bot.username}, playing Minecraft${lvl ? ` (${lvl} player)` : ''}. ${String(p.description || '').slice(0, 240)}
+Answer with one JSON decision: thought, goal, subgoal, goalStatus, action {name, args}, next.
+Actions: ${String(toolNames).split('\n').join(' ')}`
 }
 
 function buildDecisionPrompt (agent, toolDocs) {
@@ -3591,7 +3623,7 @@ ${said ? `${name} just said: ${said}
     if (!x) return
     this.lastExchange = null
     const file = path.join(path.dirname(path.resolve(__dirname, this.agent.config.learning.file)), 'training', 'decisions.jsonl')
-    const line = { at: new Date(x.at).toISOString(), model: this.agent.config.llm.model, messages: x.messages, answer: x.out, ok: result.ok, code: result.code || null, result: String(result.message || '').slice(0, 200) }
+    const line = { at: new Date(x.at).toISOString(), model: this.agent.config.llm.model, messages: x.messages, short: x.short, answer: x.out, ok: result.ok, code: result.code || null, result: String(result.message || '').slice(0, 200) }
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true })
       fs.appendFileSync(file, JSON.stringify(line) + '\n')
@@ -4129,7 +4161,7 @@ ${said ? `${name} just said: ${said}
     if (lastThought) nudges.push(`Your previous thought: "${lastThought}" Stay on your plan and keep your goal text the same unless something changed.`)
 
     const messages = [
-      { role: 'system', content: buildDecisionPrompt(agent, executor.describeTools(usesCompactPrompt(config))) },
+      { role: 'system', content: config.llm.trained ? buildTrainedPrompt(agent, executor.describeTools('names')) : buildDecisionPrompt(agent, executor.describeTools(usesCompactPrompt(config))) },
       {
         role: 'user',
         // Slow-changing parts first, the state last (and inside it, what changes every second last): Ollama re-reads
@@ -4143,7 +4175,8 @@ ${said ? `${name} just said: ${said}
       }
     ]
     const out = await agent.llm.chat(messages, { schema: config.llm.decisionSchema ? decisionSchema(tools) : undefined, priority: PRIORITY.decision, label: 'decision', temperature: config.mind.decisionTemperature ?? undefined })
-    this.lastExchange = { messages, out, at: Date.now() }
+    // The short system prompt a fine-tuned model would get instead (TRAINING.md): kept with each example.
+    this.lastExchange = { messages, out, at: Date.now(), short: safe(() => buildTrainedPrompt(agent, executor.describeTools('names'))) }
 
     const decision = {
       source: 'llm',
@@ -4938,4 +4971,4 @@ function main () {
 
 if (require.main === module) main()
 
-module.exports = { Agent, Brain, ChatResponder, Perception, ChatManager, EventReactor, OllamaClient, loadConfig, deepMerge, parsePluginChat, loginFor, fallbackServer, serverMods, errText, stripThinking, sampleDecisionPrompt, usesCompactPrompt, instructionFromText, pruneState, stableFirst, unknownSettings, readJson, DEFAULT_CONFIG }
+module.exports = { Agent, Brain, ChatResponder, Perception, ChatManager, EventReactor, OllamaClient, loadConfig, deepMerge, parsePluginChat, loginFor, fallbackServer, serverMods, errText, stripThinking, sampleDecisionPrompt, usesCompactPrompt, instructionFromText, pruneState, stableFirst, unknownSettings, readJson, buildTrainedPrompt, DEFAULT_CONFIG }

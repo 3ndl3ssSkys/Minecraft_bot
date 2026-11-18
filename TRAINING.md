@@ -41,6 +41,27 @@ You teach `qwen3:4b-instruct` to answer the way the bot needs, using examples of
 
 **Privacy:** the training file contains what players said in chat. Keep it on your PC, and ask your friends before uploading it anywhere.
 
+## The fast, Minecraft-trained model: what's realistic
+
+Asked for: a model that decides very fast and understands Minecraft at its level, and moves, analyses, acts and builds like a player.
+
+**Split it the way players' brains do:**
+- **Hands (moving, aiming, mining, clutches, parkour, building block by block):** code, 20 times a second, already tuned per level. No language model can steer a body that fast on a home graphics card. A small trained movement network would need tens of thousands of hours of recorded play (OpenAI's VPT used 70,000), so code stays in charge of the hands.
+- **Head (what to do next, what's worth a fight, how to build, what to say):** that's what can be trained, and it's where the slowness is.
+
+**Why a trained model is faster, not only smarter.** On a GTX 1660 Super most of each decision is spent reading the prompt, and most of the prompt is the rulebook: about 2,600 tokens of rules and action descriptions. A model fine-tuned on the bot's own good decisions has learned those, so it only needs a ~480-token prompt (`llm.trained: true`): who it is, the actions available now, and the answer format. It reads about 1,500 tokens per decision instead of about 4,000.
+
+**Make it small.** Fine-tune `qwen3:1.7b` for decisions: about twice as fast as the 4B at reading and writing, and the training makes up for most of the size. Keep the 4B as a fallback.
+
+**Recipe:**
+1. Record with the current model, or better, for a few hours with a big hosted model as the teacher (`llm.provider: "openai"`): `npm run set -- logging.trainingData true`. Every decision is saved with both the long and the short system prompt.
+2. `npm run training-set -- --short` writes `data/training/train-short.jsonl`: the good decisions, each with the short prompt.
+3. Fine-tune `Qwen3-1.7B` (or 4B) with LoRA in Unsloth's free Colab notebook on that file. Export to GGUF `q4_k_m`.
+4. `ollama create minecraft-bot -f Modelfile` (`FROM ./your-model.gguf`), then `npm run set -- llm.model minecraft-bot` and `npm run set -- llm.trained true`.
+5. Watch the `Thought for … s` lines, and compare its play with the old model's.
+
+**Levels:** one model serves every level. The level is in its prompt ("a beginner player") and in the code that runs its choices (skill, reaction times, what it knows). To make the model itself play more like a beginner or a master, record with bots of different levels and keep the level line in each example; the training then learns the difference.
+
 ## Option 3 (what the bot does now): skills in code, model for choices
 
 This gives the biggest gain for the least effort, and every new skill makes the bot smarter immediately, without training:

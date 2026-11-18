@@ -74,14 +74,14 @@
     const env = state.env
     // Position: ease toward the target; jump when it moved far (teleport, respawn).
     if (!state.pos || state.pos.distanceTo(target) > 6 || !state.smooth) state.pos = target.clone()
-    else state.pos.lerp(target, 1 - Math.exp(-dt / 0.07))
+    else state.pos.lerp(target, 1 - Math.exp(-dt / 0.045)) // ~45 ms: smooth, without lagging behind jumps
     const p = state.pos.clone()
     // Walking: distance covered drives the bob, as in the game.
     if (motion.prev) {
       const moved = Math.hypot(p.x - motion.prev.x, p.z - motion.prev.z)
-      if (moved < 1) motion.walk += moved
-      const speed = dt > 0 ? moved / dt : 0
-      const want = env && env.ground && !env.dead ? Math.min(0.1, speed / 20 * 0.5) : 0 // the game: min(0.1, blocks a tick); walking is ~0.1
+      if (moved < 1 && moved > 0.002) motion.walk += moved // tiny wobbles aren't steps
+      // How fast it really walks (its own velocity, blocks a tick), not the camera's easing: standing still never bobs.
+      const want = env && env.ground && !env.dead && env.speed > 0.03 ? Math.min(0.1, env.speed) : 0
       motion.bob = lerp(motion.bob, want, 1 - Math.exp(-dt * 10))
     }
     motion.prev = p.clone()
@@ -96,7 +96,7 @@
     const t = state.target
     if (t) {
       if (!state.shown) state.shown = { x: t.x, y: t.y }
-      const k = state.smooth ? 1 - Math.exp(-dt * 16) : 1 // ~95% of the way in 0.2 s
+      const k = state.smooth ? 1 - Math.exp(-dt * 30) : 1 // ~95% of the way in 0.1 s (the bot's own head already moves like a person's)
       state.shown.y += wrap(t.y - state.shown.y) * k
       state.shown.x += (t.x - state.shown.x) * k
     }
@@ -435,7 +435,9 @@
     const skyLight = (env.sky / 15) * (overworld ? (bright * 0.85 + 0.15) * (1 - rain * 0.25) : 0.6)
     const blockLight = env.block / 15
     // Never pitch black: the game's default brightness still shows the ground at night and in caves.
-    const level = clamp(Math.max(skyLight, blockLight * 0.9), env.sky >= 8 ? 0.3 : 0.2, 1)
+    // The viewer has no light per block, so dimming the whole scene underground would black out everything at once:
+    // keep caves readable (like a bright gamma setting), dimmer the further from the sky.
+    const level = clamp(Math.max(skyLight, blockLight * 0.9), env.sky >= 8 ? 0.35 : 0.6, 1)
     world.light = lerp(world.light ?? level, level, 1 - Math.exp(-dt * 3)) // eyes adjust over a second or so
     lights(world.scene, world.light)
 
