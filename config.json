@@ -159,6 +159,7 @@
     "startingGoal": "",
     "menuTime": true,
     "sprintJump": true,
+    "humanKeys": true,
     "smoothTurning": true,
     "nightShelter": true,
     "autopilot": true,
@@ -245,6 +246,11 @@
     "lock": null,
     "lockIntensity": 6
   },
+  "etiquette": {
+    "enabled": true,
+    "serverType": "auto",
+    "lawfulness": null
+  },
   "pvp": {
     "mode": "defensive",
     "rethinkSeconds": 6,
@@ -293,6 +299,7 @@
       "forget": "owner",
       "save": "owner",
       "iq": "owner",
+      "rules": "owner",
       "intelligence": "owner",
       "mind": "owner",
       "chests": "admin",

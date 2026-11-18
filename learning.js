@@ -336,6 +336,7 @@ class Learning {
       recipes: a.recipes?.toJSON(),
       chests: a.containers?.toJSON(),
       places: a.places?.toJSON(),
+      etiquette: a.etiquette?.toJSON(),
       reflexes: a.reflexes?.toJSON(),
       goals: a.goals?.toJSON(),
       knownFacts: a.knownFacts ? [...a.knownFacts] : undefined,

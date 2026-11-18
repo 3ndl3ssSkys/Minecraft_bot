@@ -13,6 +13,17 @@
  */
 
 const FACTS = [
+  // Redstone and game mechanics (technical players)
+  ['redstone basics dust torch lever lamp signal', 'Redstone: dust carries a signal 15 blocks (it weakens by 1 per block); a repeater restores it to 15 and delays 1-4 ticks; a redstone torch is ON unless the block it hangs on is powered (that makes it an inverter).', 3],
+  ['redstone gates and or not nor nand circuit logic', 'Logic gates: OR = two dust lines merged; NOT = a torch on the side of a powered block; NOR = OR into a torch; AND = torches on top of both input blocks joined by dust, read by a third torch. inspectRedstone tells you what a circuit does; buildCircuit builds and tests one.', 5],
+  ['redstone clock repeater comparator subtract pulse observer', 'Clocks and timing: a torch feeding back into its own block through a repeater blinks (period 2 x (1 + delay) ticks). Comparators compare (rear >= side) or subtract (rear - side). Observers send a 1-tick pulse when the block in front of them changes.', 5],
+  ['redstone efficiency compact cheaper circuit optimize', 'Good redstone is small, cheap and fast: drop parts that change nothing, use dust instead of repeaters when the signal reaches anyway, keep delays short. Two circuits are equal if they give the same output for every input.', 6],
+  ['farm iron golem villager zombie mechanic', 'Iron farms: villagers who slept recently panic at a zombie and summon iron golems, which fall into lava and drop iron. Never kill the zombie or villagers in someone\'s farm.', 4],
+  ['farm observer piston sugar cane kelp bamboo automatic', 'Observer farms: an observer sees a crop grow and fires a piston that breaks it; hoppers collect. Kelp into a smoker array makes dried kelp blocks, a free fuel.', 4],
+  ['mob farm spawner grinder xp water stream', 'Mob farms: dark spawning floors or a spawner, water streams to one spot, a drop or magma to weaken them; finish them yourself for XP and looting.', 5],
+  ['trading hall villager cure discount librarian mending', 'Trading halls: a workstation fixes a villager\'s job; curing a zombie villager (weakness potion + golden apple) gives lasting discounts; reroll a librarian by breaking its lectern before trading.', 5],
+  ['exploit duplication tnt duper zero tick bug patched', 'Exploits: TNT duplication and similar bugs give free resources, but many servers ban them; zero-tick farms were patched in 1.16. Check the server rules before using or copying an exploit.', 7],
+  ['ice boat travel nether highway blue packed ice', 'Ice roads: boats on packed ice reach about 40 blocks/s, on blue ice over 70; in the Nether each block is 8 Overworld blocks.', 4],
   // Progression & tools
   ['progress start wood tools early', 'Early game: punch logs → planks (1 log = 4) → sticks → crafting table → wooden pickaxe → mine stone → stone tools → furnace (8 cobblestone).', 0],
   ['tools tier pickaxe harvest', 'Tool tiers: wood < stone < iron < diamond < netherite. Stone needs a wooden pickaxe; Iron ore needs a stone pickaxe; diamond, gold, redstone and emerald ore need iron; obsidian and ancient debris need diamond.', 1],

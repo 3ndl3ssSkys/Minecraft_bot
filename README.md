@@ -308,6 +308,59 @@ The model is told why ("you already carry 3 crafting tables, and one is all anyo
 - Crafting, furnaces, chests and putting on armor take menu time: about 2 s for a beginner, a fraction of a second for a master (`behavior.menuTime`).
 - It turns its head smoothly (`behavior.smoothTurning`).
 
+### Mouse and keyboard like a person (`look.js`)
+
+How it looks around and walks is modelled on how people use a mouse and WASD:
+- **Flicks:** a look at something new takes as long as Fitts's law predicts, so farther turns take longer and better players are quicker. The turn speeds up and then slows down (a minimum-jerk curve). It usually lands slightly short (sometimes a bit past) and makes a small correction, and the path bends slightly instead of being a perfect line.
+- **Mouse steps:** turns come in Minecraft's own mouse steps (0.15°, the default sensitivity). A resting hand doesn't jitter.
+- **Fights:** the crosshair tracks the target smoothly, always a little behind, and closer behind for better players.
+- **Walking a path:**
+  - The camera eases toward where it's going, a few steps ahead, looking a little down at the ground (beginners look down more).
+  - The movement keys make up the difference: W, W+A, A, S+A, S, S+D, D or W+D, whichever heads closest to the next step. Players curve around corners with W+A/D while the mouse catches up.
+  - Keys don't flicker, and sprinting starts a moment after walking does.
+  - On narrow ledges, parkour jumps and blocks to dig it lines up exactly instead.
+- **Instant:** reflex saves (clutches) stay instant: that's muscle memory.
+- **Settings:** `behavior.humanKeys` and `behavior.smoothTurning`.
+
+### Server manners and rules (`etiquette.js`, `etiquette`)
+
+- **Rules people give it:** "don't kill my cows", "stop mining here", "no pvp" and "always close the door" become standing rules. It also reads rules from signs ("no griefing", "keep out") and from server announcements.
+  - It decides whether to keep each one, like a person: its owner always; staff and signs unless it's an anarchist; ordinary players when the rule protects their own stuff, or when it likes them and the request is reasonable. Never someone hostile.
+  - Kept rules are checked before every action. If what it's doing breaks one, it stops.
+  - `!rules` lists them, `!rules forget <n>` and `!rules clear` remove them.
+- **Understanding without being told:** it leaves alone:
+  - mobs kept in player-made boxes or pens (the zombie in an iron farm, cows in a pen);
+  - named mobs, pets, mobs in boats or minecarts;
+  - villagers and golems.
+
+  It won't dig, burn or loot inside someone's town or base (an area with lots of player-made blocks, not its own home). Signs naming a place (town hall, spawn, shop) mark it as public.
+- **How law-abiding it is:** the personality's `lawfulness` (0 anarchist .. 1 by the book; default 0.75), or `etiquette.lawfulness`.
+  - `etiquette.serverType`: `auto` (anarchy if the server's address says so), `community`, `smp` or `anarchy`.
+  - The `anarchist` personality preset ignores all of it, except its owner.
+
+### Redstone and game mechanics (`redstone.js`, `mechanics.js`, `tech.js`)
+
+Experienced bots understand redstone and the contraptions players build.
+
+**By knowledge level:**
+- **2+:** recognises simple things (cobblestone generators, water sources).
+- **3–4:** names farms and machines.
+- **5+:** explains which mechanic each one uses and what it gives.
+- **Master (6):** also judges how efficient they are and how to improve them, and can design, improve and build circuits.
+- **Impossible (7):** also spots exploits (TNT duplication and the like) and warns that servers often ban them.
+
+**What it can do:**
+- **Simulate:** a redstone simulator (dust, torches, repeaters, comparators, observers, levers, buttons, lamps, pistons, in redstone ticks) works out what a circuit does: its truth table, timing, clock period or memory.
+- **`inspectRedstone`:** reads the circuit around it out of the world and says what it computes, how fast, and what it costs. It also finds a cheaper circuit that does exactly the same job, testing every input combination, and lists the contraptions nearby.
+- **`designCircuit` / `buildCircuit`:** NOT, OR, NOR, AND, NAND and a clock, or `copy` (with `improve: true`) to rebuild the circuit it just inspected in its cheaper form.
+  - Building aims each part so the game gives it the right facing, checks it, and fixes wrong ones.
+  - Then it tests the circuit by flipping the levers and comparing the real lamp with the simulation.
+- **Recognises:** cobblestone generators, infinite water, observer crop farms (sugar cane, bamboo, kelp, pumpkin, melon, cactus), auto-smelters, item sorters, iron farms, trading halls, mob farms, chicken cookers, bubble elevators, ice-boat roads, piston doors, flying machines and TNT duplicators.
+
+**Limits:**
+- The simulator is logic-level: no quasi-connectivity, update order, container signal strength or moving blocks.
+- It builds only the circuits it knows; farms it recognises and explains but doesn't build from a template.
+
 ## Intelligence (`intelligence`)
 
 Set `intelligence.level` (or use `!iq <level>`). Every level is better than the one below, but the gains shrink as you go up. The skill curve is concave: a step from Hardcore to Master changes far less than one from Beginning to Simple.

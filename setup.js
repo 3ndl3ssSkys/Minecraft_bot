@@ -206,9 +206,15 @@ function customPersonality (text, base) {
   const likes = []
   if (/pve|mobs/.test(t)) likes.push('fighting mobs')
   if (/explor/.test(t)) likes.push('exploring new places')
+  // How law-abiding it is (etiquette.js): anarchists ignore server rules, rule-followers keep every one.
+  let lawfulness
+  if (/anarch|griefer|raider|chaotic|lawless|rule ?breaker/.test(t)) lawfulness = 0.05
+  else if (/rebel|mischiev|troll|prank/.test(t)) lawfulness = 0.35
+  else if (/law|rule|polite|respectful|by the book|good citizen/.test(t)) lawfulness = 0.95
   return {
     personality: {
       base,
+      ...(lawfulness !== undefined ? { lawfulness } : {}),
       setupDescription: text,
       traits: [...new Set([...(preset.traits || []), ...words])].slice(0, 10),
       description: `${preset.description} In a few words: ${text}.`,

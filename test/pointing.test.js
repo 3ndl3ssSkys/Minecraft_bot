@@ -7,7 +7,7 @@ const assert = require('assert')
 const { EventEmitter } = require('events')
 const { Vec3 } = require('vec3')
 const { rayDir, project, inside, resolvePointing, describePointing } = require(path.join(__dirname, '..', 'pointing.js'))
-const { installSmoothLook, wrap } = require(path.join(__dirname, '..', 'look.js'))
+const { wrap } = require(path.join(__dirname, '..', 'look.js'))
 const { iconResolver } = require(path.join(__dirname, '..', 'viewer.js'))
 
 const close = (a, b, eps = 1e-6) => assert.ok(Math.abs(a - b) < eps, `${a} ≈ ${b}`)
@@ -111,40 +111,52 @@ const aim = (p) => project(cam, p)
   console.log('icons ok:', JSON.stringify(icons.iconFor('furnace')))
 }
 
-// --- smooth turning ---
+// --- mouse and keyboard ---
 ;(async () => {
+  const { planFlick, flickTime, pickKeys, installHumanInput } = require(path.join(__dirname, '..', 'look.js'))
+  // Fitts: farther takes longer; better players are faster
+  assert.ok(flickTime(90, 0.2) > flickTime(20, 0.2))
+  assert.ok(flickTime(90, 1) < flickTime(90, 0))
+  // a 120° flick: several ticks, bell-shaped (slow-fast-slow), ends exactly on target
+  for (let n = 0; n < 20; n++) {
+    const pts = planFlick(0, 0, 2.1, -0.3, 0.5)
+    assert.ok(pts.length >= 5, `${pts.length} ticks`)
+    close(pts.at(-1)[0], 2.1, 1e-9)
+    close(pts.at(-1)[1], -0.3, 1e-9)
+    const steps = pts.map((p, i) => Math.abs(p[0] - (i ? pts[i - 1][0] : 0)))
+    assert.ok(Math.max(...steps) > steps[0] * 1.5, 'speeds up after the start')
+  }
+  // keys: target 45° to the left of the camera → W+A; behind → S; right → D
+  assert.deepEqual(pickKeys(0, Math.PI / 4).keys, { forward: true, left: true })
+  assert.deepEqual(pickKeys(0, -Math.PI / 2).keys, { right: true })
+  assert.deepEqual(pickKeys(1, 1 + Math.PI).keys, { back: true })
+
   const b = new EventEmitter()
-  b.entity = { yaw: 0, pitch: 0 }
+  b.entity = { yaw: 0, pitch: 0, position: { x: 0, y: 64, z: 0 } }
   const sent = []
   b.look = async (yaw, pitch) => { b.entity.yaw = yaw; b.entity.pitch = pitch; sent.push(yaw) }
-  let moving = false
-  installSmoothLook(b, { speed: () => 30, skip: () => moving })
-  const done = b.look(Math.PI, 0) // 180°: several ticks, not one
+  let precise = false
+  installHumanInput(b, { skill: () => 0.5, precise: () => precise })
+  const done = b.look(Math.PI, 0) // 180°: a flick over several ticks
   assert.equal(sent.length, 0, 'nothing sent before the next tick')
-  for (let i = 0; i < 20 && sent.length < 20; i++) b.emit('physicsTick')
+  for (let i = 0; i < 40; i++) b.emit('physicsTick')
   await done
   close(Math.abs(wrap(b.entity.yaw)), Math.PI, 1e-9)
-  assert.ok(sent.length >= 4 && sent.length <= 12, `turned over ${sent.length} ticks`)
-  for (let i = 1; i < sent.length; i++) assert.ok(Math.abs(wrap(sent[i] - sent[i - 1])) <= 30 * Math.PI / 180 + 1e-9, 'never faster than the skill allows')
-  // small corrections and forced looks are instant
+  assert.ok(sent.length >= 6, `turned over ${sent.length} ticks`)
+  // a reflex: instant
+  precise = true
   sent.length = 0
-  await b.look(b.entity.yaw + 0.05, 0)
-  assert.equal(sent.length, 1)
   await b.look(0, 0.3, true)
-  assert.equal(sent.length, 2)
-  // while walking a path: instant (the pathfinder steers by yaw)
-  moving = true
-  await b.look(2, 0)
-  assert.equal(b.entity.yaw, 2)
+  assert.equal(sent.length, 1)
+  precise = false
   // a new look replaces one under way
-  moving = false
   const first = b.look(-1, 0)
   b.emit('physicsTick')
   const second = b.look(1.5, 0.2)
   await first
-  for (let i = 0; i < 20; i++) b.emit('physicsTick')
+  for (let i = 0; i < 40; i++) b.emit('physicsTick')
   await second
   close(b.entity.yaw, 1.5, 1e-9)
   close(b.entity.pitch, 0.2, 1e-9)
-  console.log('pointing, icons and smooth turning ok')
+  console.log('pointing, icons, mouse and keyboard ok')
 })().catch((err) => { console.error(err); process.exit(1) })

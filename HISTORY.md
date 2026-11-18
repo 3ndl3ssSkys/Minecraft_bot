@@ -426,6 +426,63 @@ It also had a stray line that reset the autopilot after nearly every action. Tha
 
 **Not verified yet:** a real server (craft-table placement on Paper, pickup, armor equip, hotbar moves, death runs); real-model behaviour with the new hints.
 
+## 23. Mouse and keyboard like a person; server rules and manners; redstone and game mechanics
+
+**The user asked:**
+- Camera and player movement like someone on a mouse and keyboard, researched.
+- Following reasonable rules and requests on community servers (unless the bot is an anarchist).
+- Understanding town halls and farms: don't break things or kill the trapped zombie in an iron farm.
+- Then (mid-turn, after a worker restart): very high-level bots should understand redstone, build better and more efficient circuits, understand game mechanics players exploit, and copy or improve them.
+
+**Research (what was found):**
+- Anti-cheats (Grim, TruthfulAC, VoidAC) check that rotations are multiples of a real sensitivity step (GCD) and look for robotic aim. Mineflayer already rounds rotations to 0.15° (vanilla's default sensitivity: degrees per mouse count = 1.2·f³, f = 0.6·sensitivity + 0.2).
+- Human pointing follows Fitts's law. Movements have a bell-shaped speed profile (minimum jerk), usually land short, and are followed by a corrective submovement (arXiv 2002.11596, 2110.00443; the ACC 2008 paper on undershoot).
+- Eye tracking in FPS games: players fixate the screen centre most of the time.
+- No measured peak flick speeds in °/s were found (only vendor estimates), so speeds are set by skill as reasonable ranges.
+- mojira.dev was unreachable from the cloud session.
+
+**Done:**
+- **`look.js` rewritten** (`installHumanInput`):
+  - Flicks use Fitts timing by skill, a minimum-jerk speed curve, under- or overshoot with a correction, and a slight curve.
+  - Fights use smooth pursuit (`combat()`); reflexes stay instant (`precise()`).
+  - Paths: the pathfinder's per-tick `look(yaw, 0)` is caught. The camera eases toward a look-ahead point with a walking pitch by skill (beginners look down more). The movement keys are chosen from 8 WASD combos relative to the camera, with hysteresis, and sprint starts a few ticks late.
+  - Exact steering is kept for parkour nodes, dig/place nodes, ledges with drops beside them, and water.
+  - With `humanKeys` off, the pathfinder looks are passed through raw. A bug where they turned into flicks made the bot unable to walk; fixed.
+  - Live on flying-squid, WASD walking arrived as fast as exact steering (4.6–5.3 s for 25–30 blocks) using W, W+A and W+D, and the old 180° one-tick snaps were gone.
+- **`etiquette.js`:**
+  - Rules with authority (owner > admin/server/sign > trusted > player) and `lawfulness`; personality presets now include it, plus the new `anarchist` preset, and setup understands "anarchist" or "law-abiding".
+  - The chat analysis gets a `rule` field, handled by `ChatResponder.handleRule`: keep or ignore it, stop the current action if it breaks the rule, and answer in character.
+  - Rules are also read from signs (every 10 s) and from system messages.
+  - `check()` runs in `Brain.commonSense` before commonsense.js; owner commands and owner tasks bypass it.
+  - `protectedMob`: name tag, pet, villager or golem, in a vehicle, or `contained` (a flood fill of up to 40 cells, closed, with at least 2 player-made wall blocks; "iron farm" when villagers are near).
+  - `builtUp`: 30+ player-made blocks within 10 and not its home or build, so no breaking, burning or taking there.
+  - Protected mobs are left out of hunting (`mobsAround`) and out of the "too close" defence reflex. `state.rules` and `leaveAlone` on entities go in the prompt; `!rules`.
+- **`redstone.js`:**
+  - A logic-level simulator in redstone ticks covering dust (decay, steps, cut), strong and weak power, torches (1 tick, attachment), repeaters (delay), comparators (compare/subtract), observers (pulse), levers, buttons and outputs.
+  - `analyze` gives the truth table, delay, clock period or latch; `optimize` greedily removes or swaps parts while every input case stays the same.
+  - `DESIGNS`: NOT, OR, NOR, AND, NAND and a torch-repeater clock. Also `place` (rotation) and `readFromWorld`.
+- **`mechanics.js`:** recognises 14 contraptions with the mechanic, benefit, rate and improvements, by knowledge level; exploits only at level 7.
+- **`tech.js`:** actions `inspectRedstone` (4+), `designCircuit` and `buildCircuit` (6+, via `minKnowledge` in `availableTools`).
+  - `buildCircuit` aims the camera so vanilla gives each part the right facing (repeaters: look the way the signal flows; observers: look where it should watch; pistons: look at the head side), clicks with `_genericPlace(forceLook: 'ignore')`, checks the facing, and digs and retries if it's wrong. It sets repeater delays and comparator mode by clicking.
+  - Then it tests every input combination with real levers against the simulation.
+- **Knowledge:** 10 redstone and mechanics facts (tiers 3–7).
+
+**Verified:**
+- Unit tests:
+  - every design's truth table and timing; the clock's period by repeater delay; rotation;
+  - a clumsy OR gate optimised from cost 11.25 to 4, and faster;
+  - a backwards repeater detected;
+  - a NOR gate built in a prismarine world, read back and recognised;
+  - a cobblestone generator and a sugar cane farm recognised;
+  - etiquette: authority and lawfulness, rules vs actions, an iron-farm zombie, a cow pen, villagers, a town, sign rules.
+- Live on flying-squid: `designCircuit`, and `buildCircuit` placing dust and the lamp.
+
+**Not verified:**
+- Oriented placement (repeaters, wall torches, levers) and the in-world lever test. flying-squid derives facing from the player's position and doesn't place wall torches or levers, so this needs a real Paper server.
+- Real-model rule extraction from chat.
+- Contained-mob detection on real farms.
+- WASD walking on real terrain.
+
 ## Where it stands now
 
 **Next for the user:**

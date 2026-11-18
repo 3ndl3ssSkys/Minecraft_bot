@@ -228,6 +228,17 @@ You can also put the whole object inline: `"personality": { "name": "...", ... }
 - **`sprintJump`:** at Complicated level and up it sprint-jumps along long straight paths; lower levels walk.
 - **`menuTime`:** crafting, furnaces, chests and armor take menu time, about 2 s for a beginner and a blink for a master.
 - **`nightShelter`:** at dusk it heads home to its bed, or digs in if it has none.
+- **`humanKeys`:** walk paths with WASD like a person (the camera leads, W+A/D around corners). Off = exact bot steering.
+
+**Server manners** (`etiquette`):
+
+```json
+"etiquette": { "enabled": true, "serverType": "auto", "lawfulness": null }
+```
+
+- **`serverType`:** `auto`, `community`, `smp` or `anarchy`. On anarchy servers there are no rules.
+- **`lawfulness`:** 0 (anarchist) to 1 (follows every rule). Leave `null` to take it from the personality (`"lawfulness": 0.75` by default; the `anarchist` preset is 0.05).
+- **In game:** `!rules`, `!rules forget 2`, `!rules clear`.
 
 ---
 

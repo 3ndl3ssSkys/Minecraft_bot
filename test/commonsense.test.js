@@ -35,6 +35,8 @@ const failed = { action: 'mineBlock', args: { blockType: 'iron_ore', count: 3 },
 assert.equal(review(act('mineBlock', { blockType: 'iron_ore', count: 3 }), view({ recent: [failed, failed] })).code, 'TRIED_TWICE')
 assert.equal(review(act('mineBlock', { blockType: 'iron_ore', count: 3 }), view({ recent: [failed] })), null)
 assert.equal(review(act('mineBlock', { blockType: 'coal_ore', count: 3 }), view({ recent: [failed, failed] })), null, 'something else is fine')
+const skipped = { ...failed, code: 'TRIED_TWICE', message: 'skipped' }
+assert.equal(review(act('mineBlock', { blockType: 'iron_ore', count: 3 }), view({ recent: [failed, skipped, skipped] })), null, 'its own skips are not failures')
 
 // Plenty of wood already
 assert.equal(review(act('mineBlock', { blockType: 'oak_log', count: 8 }), view({ inv: { oak_log: 20, oak_planks: 40 } })).code, 'ENOUGH')

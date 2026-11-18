@@ -42,8 +42,10 @@ const { Vec3 } = require('vec3')
 const commonsense = require('./commonsense')
 const { Places } = require('./places')
 const habits = require('./habits')
+const { Etiquette } = require('./etiquette')
+const mechanics = require('./mechanics')
 const { BotViewer } = require('./viewer')
-const { installSmoothLook, turnSpeed } = require('./look')
+const { installHumanInput } = require('./look')
 const { installMotion, adjustLook } = require('./motion')
 const { TaskManager, KINDS: TASK_KINDS, EFFORTS, RISKS } = require('./tasks')
 const combat = require('./combat')
@@ -274,6 +276,7 @@ const DEFAULT_CONFIG = {
     startingGoal: '', // old name for goals.current (still works)
     menuTime: true, // crafting, furnaces, chests and armor take time in the menu, longer for beginners
     sprintJump: true, // experienced players (parkour level 3+) sprint-jump along long straight flat paths, like real players do
+    humanKeys: true, // walk paths with WASD like a person: the camera leads, W+A/D curve around corners (look.js)
     smoothTurning: true, // turn the head over a few ticks like a person instead of snapping (aiming and fights stay instant)
     nightShelter: true, // at nightfall: bed if it has one, otherwise dig in (skilled, armed players keep playing)
     autopilot: true, // early-game basics (logs, wooden and stone pickaxe) by rules, not by asking the model: fast and reliable
@@ -352,6 +355,12 @@ const DEFAULT_CONFIG = {
     lock: null, // force one emotion label (set with !emotion lock <label>)
     lockIntensity: 6
   },
+  // Being a decent member of a server (etiquette.js): rules people set, and leaving farms, pens, pets and towns alone.
+  etiquette: {
+    enabled: true,
+    serverType: 'auto', // auto | community | smp | anarchy ("auto": anarchy if the server's name or message of the day says so)
+    lawfulness: null // 0 (anarchist) .. 1 (by the book); null = from the personality (default 0.75)
+  },
   pvp: {
     mode: 'defensive', // 'never' | 'defensive' (fight players who attack it) | 'always'
     rethinkSeconds: 6, // during a fight with a player, ask the mind every N s whether to keep going (0 = never)
@@ -381,7 +390,7 @@ const DEFAULT_CONFIG = {
       help: 'admin', status: 'admin', stop: 'admin', pause: 'admin', resume: 'admin', come: 'admin', follow: 'admin',
       goal: 'admin', goals: 'admin', viewer: 'owner', mode: 'admin', emotion: 'admin', trust: 'admin', tasks: 'admin', settings: 'admin', get: 'admin', set: 'admin',
       reactions: 'admin', lessons: 'admin', obey: 'admin', build: 'admin', admin: 'owner', persona: 'owner', forget: 'owner', save: 'owner',
-      iq: 'owner', intelligence: 'owner', mind: 'owner', chests: 'admin', senses: 'admin'
+      iq: 'owner', rules: 'owner', intelligence: 'owner', mind: 'owner', chests: 'admin', senses: 'admin'
     },
     // Settings under these prefixes can only be changed by owners, even with !set / !obey.
     ownerOnlySettings: ['trust.', 'pvp.', 'learning.', 'intelligence.', 'mind.', 'obedience.levels.owner', 'obedience.levels.admin', 'obedience.overrideConscience', 'obedience.whoCanInstruct']
@@ -458,6 +467,7 @@ const DEFAULT_PERSONALITY = {
   patience: 1, // how long it sticks with a job before calling it (multiplier)
   forgetfulness: 0.3, // 0 = never forgets a request, 1 = scatterbrained
   violence: 0.35, // appetite for fighting people when someone asks it to
+  lawfulness: 0.75, // 0 = anarchist (ignores rules, takes what it wants) .. 1 = follows every server rule
   generosity: 0.5, // willingness to give away valuable things
   restlessness: 0.5, // how much it fidgets (parkour, hopping around) while thinking
   refusalStyle: 'casual — a quick excuse, a joke, or a plain "nah" depending on mood',
@@ -776,6 +786,7 @@ class Perception {
         if (tag?.tag) out.nameTag = tag.tag
         if (tag?.tamed) out.tamed = true
         if (tag?.owner) out.owner = tag.owner
+        if (kind !== 'item' && kind !== 'player' && d < 24) { const why = safe(() => this.agent.etiquette.protectedMob(e)); if (why) out.leaveAlone = why }
         if (kind === 'item') {
           const it = safe(() => e.getDroppedItem())
           out.item = it?.name
@@ -897,6 +908,18 @@ class Perception {
     return out.join('; ')
   }
 
+  /** Farms, generators and machines around, understood as far as its knowledge goes (mechanics.js). Cached. */
+  contraptions () {
+    const { bot } = this
+    const lvl = this.agent.intelligence.level('knowledge')
+    if (lvl < 2) return undefined
+    const c = this.contraptionCache
+    if (c && Date.now() - c.at < 15000 && c.pos.distanceTo(bot.entity.position) < 6) return c.list
+    const list = safe(() => mechanics.scan(bot, bot.entity.position.floored(), lvl, 12).map((m) => m.text)) || []
+    this.contraptionCache = { at: Date.now(), pos: bot.entity.position.clone(), list: list.length ? list : undefined }
+    return this.contraptionCache.list
+  }
+
   /** Signs it can see and read. */
   visibleSigns () {
     const { bot } = this
@@ -989,6 +1012,8 @@ class Perception {
       surroundings: this.surroundings(),
       layout: this.layout(),
       places: this.agent.places.forPrompt(e.position, String(bot.game?.dimension), (p) => this.agent.where(p)),
+      contraptions: this.contraptions(),
+      rules: this.agent.etiquette.forPrompt(e.position, String(bot.game?.dimension)),
       pointedOut: this.agent.pointed && Date.now() - this.agent.pointed.at < 180000 ? this.agent.pointed.text : undefined,
       onlinePlayers: Object.keys(bot.players).filter((n) => n !== bot.username),
       status: {
@@ -1299,6 +1324,19 @@ const ANALYSIS_SCHEMA = {
       },
       required: ['kind', 'description', 'item', 'count', 'target', 'effort', 'risk']
     },
+    rule: {
+      type: 'object',
+      description: 'Are they telling you NOT to do something, or to ALWAYS do something, from now on?',
+      properties: {
+        made: { type: 'boolean' },
+        kind: { type: 'string', enum: ['forbid', 'require'] },
+        what: { type: 'string', description: 'the rule in a few words' },
+        acts: { type: 'array', items: { type: 'string', enum: ['break', 'place', 'kill', 'take', 'enter', 'pvp', 'burn', 'chat', 'use', 'other'] } },
+        target: { type: 'string', description: 'what it is about: a block, mob, item, player or place ("" = anything)' },
+        here: { type: 'boolean', description: 'only around here' }
+      },
+      required: ['made', 'kind', 'what', 'acts', 'target', 'here']
+    },
     promise: {
       type: 'object',
       description: 'Did THEY promise you something?',
@@ -1313,7 +1351,7 @@ const ANALYSIS_SCHEMA = {
       required: ['made', 'kind', 'description', 'item', 'count', 'withinMinutes']
     }
   },
-  required: ['reply', 'emotion', 'emotionIntensity', 'playerEmotion', 'playerIntent', 'trustImpact', 'likeImpact', 'remindsOfTask', 'isRequest', 'request', 'promise']
+  required: ['reply', 'emotion', 'emotionIntensity', 'playerEmotion', 'playerIntent', 'trustImpact', 'likeImpact', 'remindsOfTask', 'isRequest', 'request', 'rule', 'promise']
 }
 
 const MESSAGE_SCHEMA = {
@@ -1837,6 +1875,7 @@ First: are they asking you to DO something in the game (gather or craft somethin
 - Advice, suggestions and comments are NOT requests ("you should get iron", "maybe mine at night", "nice base"): isRequest=false, and reply to what they actually said. If it fits what you're already doing (see Goal/Doing in your status), agree and say so; if it doesn't, say what you'd rather do first. Never answer a suggestion like a new job.
 - Reply to what was actually said, in context of the recent chat. Don't use stock phrases (gg, lol, ez) unless they truly fit.
 remindsOfTask: true if they're asking about or reminding you of something they asked before.
+- rule: if they tell you to STOP or NOT do something, or to always/never do something ("stop mining here", "don't kill my cows", "no pvp", "don't break stuff at spawn", "always close the door", "stay out of my house"), made=true: kind forbid/require, what = the rule in a few words, acts = what kind of doing it is about, target = the block/mob/item/player/place ("" if anything), here = only around this spot. Leave reply "" — you'll answer once you've decided. Otherwise made=false, kind "forbid", empty strings, [] and false.
 
 Then read the other player:
 - playerEmotion / playerIntent: how they seem (banter between friends is "joking", not "rude").
@@ -1868,6 +1907,7 @@ ${speaker}'s latest message${said.length > 1 ? 's' : ''}: ${said.map((m) => `"${
     memory.lastTalkedWith.set(speaker, Date.now())
     const recalled = out.remindsOfTask ? tasks.recall(speaker) : null
 
+    if (out.rule?.made && (out.rule.what || out.rule.acts?.length)) return this.handleRule(speaker, out.rule, { whisper, message: said.join(' ') })
     if (out.isRequest && out.request) return this.handleRequest(speaker, out.request, { whisper, message: said.join(' '), dangerNote })
     if (recalled && !out.reply) {
       return this.sayNaturally(speaker, `${speaker} reminded you about "${recalled.description}" — you had completely forgotten. You'll get on it.`, whisper)
@@ -1876,6 +1916,26 @@ ${speaker}'s latest message${said.length > 1 ? 's' : ''}: ${said.map((m) => `"${
       await agent.chat.send(out.reply, 'reply', { whisperTo: whisper && this.cfg.whisperReplies ? speaker : undefined })
       agent.longMemory?.noteChat(speaker, out.reply, true, speaker)
     }
+  }
+
+  /**
+   * Someone set a rule ("don't kill my cows", "stop mining here"): keep it or not, like a person would (etiquette.js),
+   * stop what it's doing if that breaks it, and say so in character.
+   */
+  async handleRule (speaker, raw, { whisper = false, message = '' } = {}) {
+    const agent = this.agent
+    const { bot, etiquette, executor, brain, log } = agent
+    const where = bot.players[speaker]?.entity?.position || bot.entity?.position
+    const d = etiquette.consider(speaker, raw, where)
+    log.info(`Rule from ${speaker}: ${raw.kind} "${raw.what}" → ${d.accept ? 'keeps it' : 'ignores it'} (${d.reason})`)
+    if (d.accept && executor.current) {
+      const breaking = etiquette.check({ source: 'llm', action: { name: executor.current.name, args: executor.current.args } }, { entity: (id) => bot.entities[id], pos: bot.entity.position, dim: String(bot.game?.dimension) })
+      if (breaking) { executor.abort(`${speaker} asked it to stop`); brain.prethought = null }
+    }
+    const situation = d.accept
+      ? `${speaker} said: "${message}". You'll go along with it (${d.reason}). Say ok briefly, in character.`
+      : `${speaker} said: "${message}". You're NOT going along with it (${d.reason}). Say so the way you would, in character — ${agent.personality.refusalStyle}.`
+    return this.sayNaturally(speaker, situation, whisper)
   }
 
   /**
@@ -2191,6 +2251,14 @@ ${speaker}'s latest message${said.length > 1 ? 's' : ''}: ${said.map((m) => `"${
         return reply(`${building.describePlan(plan)}${miss ? ` missing: ${miss}` : ''}`.slice(0, 250))
       }
 
+      case 'rules': {
+        // !rules | !rules forget <n> | !rules clear
+        const e = agent.etiquette
+        if (rest[0] === 'clear') { e.rules = []; agent.learning?.markDirty(); return reply('forgot every rule.') }
+        if (rest[0] === 'forget') { const r = e.rules[Number(rest[1]) - 1]; if (!r) return reply('no such rule (see !rules).'); e.drop(r.id); return reply(`forgot: ${r.what}`) }
+        if (!e.rules.length) return reply(`no rules yet. server: ${e.serverType()}, lawfulness ${e.lawfulness()}`)
+        return reply(e.rules.map((r, i) => `${i + 1}) ${r.kind === 'require' ? 'always' : 'never'}: ${r.what}${r.area ? ' (there)' : ''}`).join(' | ').slice(0, 250))
+      }
       case 'tasks': {
         if (rest[0] === 'clear') {
           for (const t of [...agent.tasks.tasks]) agent.tasks.forget(t, `cleared by ${username}`)
@@ -3158,6 +3226,17 @@ ${said ? `${name} just said: ${said}
       if (builder?.current) { const miss = safe(() => building.remaining(builder.current, bot).missing) || {}; if (miss[item]) return true }
       return false
     }
+    const own = (p) => agent.places.placed.some((x) => x.x === Math.floor(p.x) && x.y === Math.floor(p.y) && x.z === Math.floor(p.z)) || Boolean(agent.builder?.current)
+    const manners = agent.etiquette.check(decision, {
+      entity: (id) => bot.entities[id],
+      pos: bot.entity.position,
+      dim: String(bot.game?.dimension),
+      ownBlock: own,
+      provokedBy: (e) => Date.now() - (agent.lastHurtAt || 0) < 8000 && e.position.distanceTo(bot.entity.position) < 6,
+      mayTake: (p) => safe(() => agent.containers.mayTake(p).ok),
+      byOwner: decision.source === 'task' && agent.social.role(tasks.active()?.from || '') === 'owner'
+    })
+    if (manners) return manners
     return commonsense.review(decision, {
       inv: inventorySummary(bot),
       items: bot.inventory.items(),
@@ -3298,7 +3377,7 @@ ${said ? `${name} just said: ${said}
   }
 
   mobsAround (s) {
-    return (s?.nearbyEntities || []).filter((e) => e.id !== undefined && e.kind !== 'player').map((e) => ({ id: e.id, name: e.name, distance: e.distance }))
+    return (s?.nearbyEntities || []).filter((e) => e.id !== undefined && e.kind !== 'player' && !e.leaveAlone).map((e) => ({ id: e.id, name: e.name, distance: e.distance })) // not someone's pen or farm
   }
 
   obtainStep () {
@@ -3570,7 +3649,7 @@ ${said ? `${name} just said: ${said}
     }
     // Neutral mobs are only fought back against, never engaged just for being close.
     const provoked = recentlyHurt && dist < 5
-    const tooClose = dist < 2.5 && !NEUTRAL_MOBS.has(nearest?.name)
+    const tooClose = dist < 2.5 && !NEUTRAL_MOBS.has(nearest?.name) && !safe(() => this.agent.etiquette.protectedMob(nearest)) // a zombie in an iron farm stays put
     if (b.selfDefense && nearest && nearest.name !== 'creeper' && (provoked || tooClose) && ready('defend', 5000)) {
       return make('defend', `A ${nearest.name} is attacking me, fighting back!`, 'determined', { name: 'attackTarget', args: { entityId: nearest.id, maxSeconds: 15 } })
     }
@@ -3694,6 +3773,7 @@ class Agent {
       : saved.chests
     this.containers = new ContainerIntel(this, legacy)
     // Its mental map: home, bed, deaths, and the blocks it put down (whether it remembers each depends on skill).
+    this.etiquette = new Etiquette(this, saved.etiquette)
     this.places = new Places(saved.places, () => Math.min(0.98, 0.35 + 0.1 * (this.intelligence?.level('survival') ?? 3)))
     this.knownFacts = new Set(saved.knownFacts || []) // facts above its level it has learned
     this.reflexes = new Reflexes(this, saved.reflexes)
@@ -4160,6 +4240,7 @@ class Agent {
       }
       // Plugin chat formats ("[Member] Steve: hi", "Steve » hi", "Steve -> me: psst") that don't come through as normal chat.
       const parsed = parsePluginChat(text, userPatterns)
+      if (!parsed && position === 'system') safe(() => this.etiquette.serverMessage(text)) // "Rule 3: no griefing"
       if (!parsed || !bot.players[parsed.user] || parsed.user === bot.username) return
       if (recentChat.includes(`${parsed.user}|${parsed.msg}`)) return // already handled as normal chat
       recentChat.push(`${parsed.user}|${parsed.msg}`)
@@ -4172,11 +4253,13 @@ class Agent {
     this.reconnectAttempts = 0
     log.info(`Spawned in ${bot.game.dimension} at ${bot.entity.position.floored()} (Minecraft ${bot.version}).`)
     if (config.viewer.enabled) this.viewer.start()
-    // Human head turning: big turns take a few ticks. Paths, fights and reflexes keep exact, instant looks.
-    installSmoothLook(bot, {
+    // Mouse and keyboard like a person (look.js): flicks with Fitts timing, tracking in fights, WASD steering on paths.
+    installHumanInput(bot, {
       enabled: () => config.behavior.smoothTurning !== false,
-      speed: () => turnSpeed(safe(() => this.intelligence.skill('parkour')) ?? 0.5),
-      skip: () => Boolean(bot.pathfinder?.isMoving?.() || this.reflexes?.busy || /attack|parkour/.test(this.executor?.current?.name || '')),
+      keyboard: () => config.behavior.humanKeys !== false,
+      skill: () => safe(() => this.intelligence.skill('parkour')) ?? 0.5,
+      precise: () => Boolean(this.reflexes?.busy || this.executor?.current?.name === 'parkour'),
+      combat: () => this.executor?.current?.name === 'attackTarget',
       // Anyone who knows endermen never looks one in the eyes (unless it's fighting one anyway).
       adjust: (yaw, pitch) => this.executor?.current?.name !== 'attackTarget' && this.intelligence.knowledgeTier() >= 1 ? adjustLook(bot, yaw, pitch) : [yaw, pitch]
     })
@@ -4216,6 +4299,7 @@ class Agent {
       if (!bot.entity || this.dead) return
       try {
         const state = this.perception.snapshot()
+        if (Date.now() - (this.signRulesAt || 0) > 10000) { this.signRulesAt = Date.now(); safe(() => this.etiquette.readSigns(bot.entity.position)) } // "no griefing" signs become rules
         this.reactor.observe(state)
         this.social.observe(state)
         this.social.tickRecovery()

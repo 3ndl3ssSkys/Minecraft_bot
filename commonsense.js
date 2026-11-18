@@ -26,6 +26,7 @@ const STATIONS = /^(crafting_table|furnace|smoker|blast_furnace)$/
 const PLENTY = [[WOOD, 24, (inv) => sum(inv, /_log$|_stem$/) + sum(inv, /_planks$/) / 4], [/^(stone|cobblestone|cobbled_deepslate|deepslate)$/, 192, (inv) => sum(inv, /^(cobblestone|cobbled_deepslate|stone)$/)], [/^(dirt|grass_block|sand|gravel|netherrack)$/, 128, (inv, b) => inv[b === 'grass_block' ? 'dirt' : b] || 0]]
 const VALUABLE = /diamond|netherite|emerald|totem|elytra|enchanted|golden_apple|beacon|nether_star|shulker|trident|heart_of_the_sea|ancient_debris/
 
+const GUARD_CODES = new Set(['TRIED_TWICE', 'ALREADY_HAVE', 'ENOUGH', 'NOT_HUNGRY', 'NOT_NIGHT', 'ALREADY_DONE', 'ALREADY_HERE', 'VALUABLE', 'RULE', 'NOT_YOURS'])
 const sum = (inv, re) => Object.entries(inv).filter(([n]) => re.test(n)).reduce((a, [, c]) => a + (Number(c) || 0), 0)
 const nice = (n) => String(n).replace(/_/g, ' ')
 const norm = (s) => String(s || '').toLowerCase().trim().replace(/^minecraft:/, '').replace(/\s+/g, '_')
@@ -58,7 +59,8 @@ function review (decision, v) {
 
   // --- the same thing failing again and again -------------------------------------------------------------
   const recent = (v.recent || []).slice(-4)
-  const sameFails = recent.filter((a) => a.action === name && sameArgs(a.args, args) && !a.ok && a.code !== 'ABORTED' && a.code !== 'INTERRUPTED')
+  // Real failures only: its own "skipped" verdicts and interruptions don't count.
+  const sameFails = recent.filter((a) => a.action === name && sameArgs(a.args, args) && !a.ok && !GUARD_CODES.has(a.code) && a.code !== 'ABORTED' && a.code !== 'INTERRUPTED')
   if (sameFails.length >= 2) {
     const last = sameFails.at(-1)
     return { code: 'TRIED_TWICE', message: `${name} with these arguments already failed twice just now (${last.code}: ${String(last.message || '').slice(0, 120)}). Doing it a third time won't help: change the approach (another place, another item, get what's missing first, or ask someone).` }

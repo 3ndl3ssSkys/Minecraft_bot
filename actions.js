@@ -1971,6 +1971,7 @@ class ActionExecutor {
   constructor ({ bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes, parkour, recipes, startObtain, dropVerdict, places }) {
     Object.assign(this, { bot, config, chat, log, notify, social, learning, memory, tasks, builder, intel, containers, knowledgeOpts, reflexes, parkour, recipes, startObtain, dropVerdict, places })
     this.current = null // { name, args, startedAt, controller }
+    this.memoryBag = {} // things actions remember between runs (the last circuit it inspected)
     this.pauseUntil = 0
     this.pauseListeners = new Set()
   }
@@ -2006,6 +2007,7 @@ class ActionExecutor {
       if (mode === 'spectator' && !SPECTATOR_OK.has(name)) return false
       if (enabledActions?.length && !enabledActions.includes(name)) return false
       if (disabledActions?.includes(name)) return false
+      if (ACTIONS[name].minKnowledge && (this.intel?.level?.('knowledge') ?? 0) < ACTIONS[name].minKnowledge) return false // redstone know-how is for experienced players
       if (name === 'chatMessage' && !this.chat.allows('tool')) return false
       if ((name === 'experimentCrafting' || name === 'askForHelp') && this.recipes?.knowsEverything) return false // it already knows every recipe
       if (name === 'askForHelp' && !this.chat.allows('tool')) return false
@@ -2063,6 +2065,7 @@ class ActionExecutor {
       parkour: this.parkour,
       recipes: this.recipes,
       places: this.places,
+      executorMemory: this.memoryBag,
       dimension: () => String(this.bot.game?.dimension),
       // Every block it puts down goes on its mental map (stations get picked back up when it leaves; builds stay).
       placed: (pos, blockName, kind) => this.places?.onPlaced(pos, blockName, kind || (name === 'build' ? 'build' : 'placed'), String(this.bot.game?.dimension)),
@@ -2122,6 +2125,7 @@ class ActionExecutor {
 require('./skills').install(ACTIONS, {
   argNumber, argString, ActionError, sleep, gotoGoal, goals, placeAt, digWithAbort, equipToolFor, findInventoryItem, throwIfAborted, collectNearbyDrops
 }, SHORT)
+require('./tech').install(ACTIONS, { argNumber, argString, ActionError, sleep, gotoGoal, goals, placeAt, digWithAbort, findInventoryItem, throwIfAborted }, SHORT)
 
 module.exports = {
   ACTIONS,
