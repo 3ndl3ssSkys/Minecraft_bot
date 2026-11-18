@@ -52,6 +52,7 @@ class Network {
     this.commands = null // discovered command names
     this.lastInviteAt = 0
     this.window = null // the open menu
+    this.notices = [] // recent server notices: { text, at }
   }
 
   get cfg () { return this.agent.config.network || {} }
@@ -67,7 +68,10 @@ class Network {
     bot.on('actionBar', (m) => { this.actionbar = { text: textOf(reg(), m), at: Date.now() } })
     bot.on('windowOpen', (w) => { this.window = w })
     bot.on('windowClose', () => { this.window = null })
-    bot.on('message', (msg, position) => { try { this.onMessage(msg, position) } catch { /* not an invite */ } })
+    bot.on('message', (msg, position) => {
+      try { this.notice(msg, position) } catch { /* not a notice */ }
+      try { this.onMessage(msg, position) } catch { /* not an invite */ }
+    })
     bot.on('login', () => { this.commands = null; this.window = null }) // a new server on the network: learn its commands again
     bot.once('spawn', () => setTimeout(() => this.discoverCommands().catch(() => {}), 4000))
   }
@@ -136,8 +140,10 @@ class Network {
     const named = this.hotbarItems()
     if (named.length) out.hotbar = named.map((n) => `${n.slot + 1}: ${n.name}`)
     if (this.window) out.openMenu = this.describeWindow()
+    const recent = this.notices.filter((n) => Date.now() - n.at < 90000).slice(-6).map((n) => n.text)
+    if (recent.length) out.notices = recent
     if (this.commands?.length) out.commands = this.commands.filter((c) => SAFE_COMMAND.test(`/${c}`)).slice(0, 25).map((c) => `/${c}`)
-    out.note = 'A public server: be polite, follow its rules, don\'t spam public chat; menus and hotbar items take you to games; your owner invites you to their party to bring you along.'
+    out.note = 'A public server: be polite, follow its rules, don\'t spam public chat. To get anywhere (a game, a party, the hub, accepting an invite) use navigateMenus with what you want; your owner invites you to their party to bring you along.'
     return out
   }
 
@@ -196,6 +202,19 @@ class Network {
     return Boolean(this.commands?.includes(name))
   }
 
+  /**
+   * Server notices worth knowing (game starting, your team, invites, queue, rewards): the "chat reading for special
+   * things" a player does, also on servers whose chat can't be clicked (Bedrock).
+   */
+  notice (msg, position) {
+    if (position === 'chat' || position === 'game_info') return
+    const text = msg.toString().replace(/\s+/g, ' ').trim()
+    if (!text || text.length > 200 || /^<[^>]+>/.test(text)) return
+    if (!/start|begin|joined|join|left|team|queue|invite|party|friend|won|win|lost|eliminat|kill|round|countdown|seconds?|minutes?|teleport|warp|sent you|request|reward|level|unlock|welcome|game|lobby|hub|server/i.test(text)) return
+    this.notices.push({ text, at: Date.now() })
+    if (this.notices.length > 12) this.notices.shift()
+  }
+
   // --------------------------------------------------------------------------------------------------------------
   // Invites from its owner: follow them
   // --------------------------------------------------------------------------------------------------------------
@@ -210,6 +229,8 @@ class Network {
     const esc = who.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     if (new RegExp(`^\\s*(\\[[^\\]]*\\]\\s*)*(<\\.?${esc}>|\\.?${esc}\\s*[:»>|])`, 'i').test(text)) return // their own chat line, not a server notice
     const json = safe(() => msg.json) || msg
+    const kind = /tpa|teleport/i.test(text) ? 'teleport' : /friend/i.test(text) ? 'friend' : /party|group|squad/i.test(text) ? 'party' : 'game'
+    // 1. What the message itself offers: a clickable [ACCEPT] (Java), or a command it names.
     let cmd = clickCommands(json).find((c) => /accept|join|yes/i.test(c)) || clickCommands(json).find((c) => c.startsWith('/'))
     if (!cmd) {
       const m = text.match(ACCEPT_CMD)
@@ -218,19 +239,75 @@ class Network {
         const after = text.slice(m.index + m[0].length)
         if (new RegExp(`^\\s+\\.?${who}\\b`, 'i').test(after)) cmd += ` ${who}` // "/party accept EndlessSkys"
       }
-      else if (/tpa|teleport/i.test(text)) cmd = '/tpaccept'
-      else if (/party/i.test(text)) cmd = `/party accept ${who}`
-      else if (/friend/i.test(text)) cmd = `/friend accept ${who}`
+    }
+    const via = this.cfg.inviteVia || 'auto'
+    const bedrock = this.agent.config.server?.platform === 'bedrock'
+    this.lastInviteAt = Date.now()
+    this.agent.memory?.addEvent('invite', `${who} invited you (${kind}).`)
+    // 2. No command to run (Bedrock chat can't be clicked): accept it through the menus, like a player would.
+    if (via === 'menu' || (!cmd && (bedrock || via !== 'chat'))) {
+      if (!cmd && !bedrock && via === 'auto') { // Java with no command in the text: the usual one first, menus if the server doesn't know it
+        const guess = kind === 'teleport' ? '/tpaccept' : kind === 'friend' ? `/friend accept ${who}` : kind === 'party' ? `/party accept ${who}` : null
+        if (guess) return this.runInviteCommand(who, guess, text, kind)
+      }
+      this.agent.log.info(`${who} invited it (${text.slice(0, 80)}): accepting through the menus`)
+      this.agent.brain?.queueAction({ name: 'navigateMenus', args: { goal: `accept ${who}'s ${kind} invite` } }, `${who} invited me`)
+      return
     }
     if (!cmd || DANGEROUS.test(cmd)) return
-    this.lastInviteAt = Date.now()
+    this.runInviteCommand(who, cmd, text, kind)
+  }
+
+  /** Type the accept command; if the server says it doesn't know it, try the menus instead. */
+  runInviteCommand (who, cmd, text, kind) {
+    if (DANGEROUS.test(cmd)) return
     this.agent.log.info(`${who} invited it (${text.slice(0, 80)}): ${cmd}`)
-    this.agent.memory?.addEvent('invite', `${who} invited you, and you accepted (${cmd}).`)
-    setTimeout(() => { try { this.bot.chat(cmd) } catch { /* gone */ } }, 600 + Math.random() * 900) // a moment to read it
+    const bot = this.bot
+    const unknown = (m, pos) => {
+      if (pos === 'chat') return
+      if (/unknown command|not found|doesn'?t exist|no such command|invalid command/i.test(String(m))) {
+        bot.removeListener('messagestr', unknown)
+        this.agent.brain?.queueAction({ name: 'navigateMenus', args: { goal: `accept ${who}'s ${kind} invite` } }, `${who} invited me (the command didn't work)`)
+      }
+    }
+    setTimeout(() => {
+      try { bot.on('messagestr', unknown); bot.chat(cmd) } catch { /* gone */ }
+      setTimeout(() => bot.removeListener('messagestr', unknown), 2500)
+    }, 600 + Math.random() * 900) // a moment to read it
   }
 }
 
 function safe (fn) { try { return fn() } catch { return null } }
+
+// Words that mean the same thing in server menus.
+const SYNONYMS = {
+  party: ['party', 'group', 'squad', 'team', 'social'], friend: ['friend', 'friends', 'social'], invite: ['invite', 'invites', 'request', 'requests', 'pending', 'notification'],
+  accept: ['accept', 'join', 'yes', 'confirm'], join: ['join', 'play', 'enter', 'accept', 'queue'], play: ['play', 'join', 'games', 'game'],
+  lobby: ['lobby', 'hub', 'spawn', 'main'], hub: ['hub', 'lobby', 'spawn'], game: ['game', 'games', 'play', 'selector', 'navigator', 'menu'],
+  solo: ['solo', 'singles', '1v1', 'single'], duo: ['duo', 'duos', 'doubles', '2v2'], squad: ['squad', 'squads', '4v4', 'team'],
+  teleport: ['teleport', 'tpa', 'request'], create: ['create', 'new', 'start', 'host', 'make'], leave: ['leave', 'quit', 'exit', 'disband']
+}
+const STOP = new Set(['the', 'a', 'an', 'to', 'of', 'my', 'me', 'i', 'please', 'go', 'get', 'in', 'into', 'on', 'for', 'from', 's', 'and', 'with', 'want', 'some', 'game'])
+// Hotbar items that usually lead to a kind of goal.
+const ITEM_HINTS = [[/party|friend|invite|social/, /party|friend|social|profile|menu|player/], [/lobby|hub/, /lobby|hub|selector|navigator/], [/./, /game|play|selector|navigator|compass|menu/]]
+
+/** The words a goal is made of (plus what they're called in menus). */
+function goalWords (goal) {
+  const words = String(goal).toLowerCase().replace(/'s\b/g, '').split(/[^a-z0-9_]+/).filter((w) => w && !STOP.has(w))
+  return words.map((w) => ({ w, alts: SYNONYMS[w] || (SYNONYMS[w.replace(/s$/, '')] || []) }))
+}
+
+/** How well a menu entry or item name fits the goal (0 = not at all). */
+function scoreText (words, text) {
+  const t = String(text || '').toLowerCase()
+  const flat = t.replace(/[^a-z0-9]/g, '')
+  let score = 0
+  for (const { w, alts } of words) {
+    if (w.length >= 3 && (t.includes(w) || flat.includes(w))) score += w.length >= 5 ? 3 : 2
+    else if (alts.some((a) => t.includes(a))) score += 1
+  }
+  return score
+}
 
 /** Actions for playing on networks, installed into ACTIONS. */
 function install (ACTIONS, h, SHORT = {}) {
@@ -263,6 +340,77 @@ function install (ACTIONS, h, SHORT = {}) {
       if (!w) return `Used ${pick?.name || 'it'}; no menu opened (maybe it did something else: look around).`
       const d = n.describeWindow(w)
       return `Opened "${d.title}": ${d.items.join('; ').slice(0, 700)}`
+    }
+  }
+
+  ACTIONS.navigateMenus = {
+    description: 'Get somewhere through the server\'s menus, like a player clicking through them: "play Treasure Wars solo", ' +
+      '"accept EndlessSkys\'s party invite", "create a party", "go to the hub". Opens the right hotbar item, picks the entries that fit, goes back when one leads nowhere.',
+    params: { goal: 'string: what you want to do' },
+    async run (ctx, args) {
+      const { bot } = ctx
+      const n = net(ctx)
+      const goal = argString(args, 'goal', { maxLength: 120 })
+      const words = goalWords(goal)
+      const path = []
+      const clicked = new Set()
+      const triedItems = new Set()
+      for (let step = 0; step < 12; step++) {
+        if (ctx.signal?.aborted) break
+        if (!n.window) {
+          // Which hotbar item to open: the one whose name fits the goal, else the usual kind for it.
+          const items = n.hotbarItems().filter((h) => !triedItems.has(h.slot))
+          if (!items.length) break
+          const hint = ITEM_HINTS.find(([g]) => g.test(goal.toLowerCase()))[1]
+          const pick = items.map((h) => ({ h, s: scoreText(words, h.name) * 2 + (hint.test(h.name.toLowerCase()) ? 3 : 0) })).sort((a, b) => b.s - a.s)[0].h
+          triedItems.add(pick.slot)
+          bot.setQuickBarSlot(pick.slot)
+          await sleep(300 + Math.random() * 300)
+          const opened = waitWindow(bot, 2500)
+          bot.activateItem()
+          await sleep(80)
+          bot.deactivateItem()
+          const w = await opened
+          path.push(pick.name)
+          if (!w) { path.push('(nothing opened)'); continue }
+          continue
+        }
+        // In a menu: the entry that fits best, not one already clicked here.
+        const title = textOf(bot.registry, n.window.title)
+        const end = n.window.inventoryStart ?? n.window.slots.length
+        const entries = []
+        for (let i = 0; i < end; i++) {
+          const it = n.window.slots[i]
+          if (!it) continue
+          const name = textOf(bot.registry, it.customName) || it.name.replace(/_/g, ' ')
+          const lore = (Array.isArray(it.customLore) ? it.customLore : []).map((l) => textOf(bot.registry, l)).join(' ')
+          if (!name.trim() || /glass_pane$/.test(it.name) && !it.customName) continue
+          entries.push({ i, name, s: scoreText(words, name) * 2 + scoreText(words, lore), back: /^(back|go back|previous|return|<|←)/i.test(name.trim()) })
+        }
+        const best = entries.filter((e) => !clicked.has(`${title}#${e.i}`) && !e.back).sort((a, b) => b.s - a.s)[0]
+        if (best && best.s >= 2) {
+          clicked.add(`${title}#${best.i}`)
+          path.push(best.name)
+          await sleep(300 + Math.random() * 500) // finding it in the grid
+          const before = n.window
+          const next = waitWindow(bot, 2000)
+          await bot.clickWindow(best.i, 0, 0).catch(() => {})
+          const w = await next
+          if (w && w !== before) continue // deeper
+          await sleep(700)
+          if (!n.window) return `Done: ${path.join(' → ')} (the menu closed: watch the chat and title to see what happened).`
+          continue // same menu changed (a toggle, a page): look again
+        }
+        // Nothing here fits: back out, or close and try another item.
+        const back = entries.find((e) => e.back && !clicked.has(`${title}#${e.i}`))
+        if (back) { clicked.add(`${title}#${back.i}`); path.push('back'); await bot.clickWindow(back.i, 0, 0).catch(() => {}); await sleep(600); continue }
+        path.push('(nothing fits, closing)')
+        try { bot.closeWindow(n.window) } catch { /* already closed */ }
+        n.window = null
+        await sleep(400)
+      }
+      if (n.window) { try { bot.closeWindow(n.window) } catch {} n.window = null }
+      throw new ActionError('NOT_FOUND', `Couldn't find a way to "${goal}" in the menus (tried: ${path.join(' → ') || 'no named hotbar items'}). Ask someone, or try serverCommand.`)
     }
   }
 
@@ -333,6 +481,7 @@ function install (ACTIONS, h, SHORT = {}) {
   }
 
   Object.assign(SHORT, {
+    navigateMenus: 'get somewhere through the server menus (a game, a party, an invite, the hub)',
     useHotbarItem: 'right-click a named hotbar item (game selector...) and see the menu',
     readMenu: 'read the open menu',
     clickMenu: 'click a menu entry',
@@ -341,4 +490,4 @@ function install (ACTIONS, h, SHORT = {}) {
   })
 }
 
-module.exports = { Network, install, textOf, clickCommands, SAFE_COMMAND, DANGEROUS }
+module.exports = { Network, install, textOf, clickCommands, goalWords, scoreText, SAFE_COMMAND, DANGEROUS }

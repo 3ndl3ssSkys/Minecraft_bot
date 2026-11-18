@@ -2010,6 +2010,7 @@ class ActionExecutor {
       // Lobby tools only where they make sense: menus when one is open or on a network, commands on networks.
       if ((name === 'readMenu' || name === 'clickMenu') && !this.network?.window) return false
       if ((name === 'useHotbarItem' || name === 'serverCommand') && !safe(() => this.network?.isNetwork())) return false
+      if (name === 'navigateMenus' && !this.network?.window && !safe(() => this.network?.isNetwork() || this.network?.hotbarItems().length)) return false
       if (ACTIONS[name].minKnowledge && (this.intel?.level?.('knowledge') ?? 0) < ACTIONS[name].minKnowledge) return false // redstone know-how is for experienced players
       if (name === 'chatMessage' && !this.chat.allows('tool')) return false
       if ((name === 'experimentCrafting' || name === 'askForHelp') && this.recipes?.knowsEverything) return false // it already knows every recipe

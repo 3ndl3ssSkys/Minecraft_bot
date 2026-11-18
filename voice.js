@@ -20,6 +20,17 @@
 
 const SHOW_ME = /\b(show me|explain|teach me|walk me through|how (do|does|did|would|can|should) (i|you|we|it|this|that)|how to)\b/i
 
+/** Split speech into sentences (short ones stay together) so the first can play while the rest is made. */
+function sentences (text) {
+  const raw = String(text).match(/[^.!?]+[.!?]+["')\]]*|[^.!?]+$/g) || [text]
+  const out = []
+  for (const r of raw.map((x) => x.trim()).filter(Boolean)) {
+    if (out.length && (out[out.length - 1].length < 25 || r.length < 12)) out[out.length - 1] += ` ${r}`
+    else out.push(r)
+  }
+  return out
+}
+
 class Voice {
   constructor (agent) {
     this.agent = agent
@@ -58,35 +69,47 @@ class Voice {
   async speakNow (text) {
     const viewer = this.agent.viewer
     if (!this.active() || !viewer?.server) return null
-    const id = `s${++this.seq}`
-    let audio = null
-    if (this.cfg.tts === 'server' && this.cfg.ttsUrl) {
-      try {
-        const res = await fetch(this.cfg.ttsUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...(this.cfg.ttsKey ? { Authorization: `Bearer ${this.cfg.ttsKey}` } : {}) },
-          body: JSON.stringify({ model: this.cfg.ttsModel || 'tts-1', input: text, voice: this.cfg.ttsVoice || 'alloy', response_format: 'mp3', speed: this.cfg.rate || 1 }),
-          signal: AbortSignal.timeout(20000)
-        })
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        this.audio.set(id, { buf: Buffer.from(await res.arrayBuffer()), type: res.headers.get('content-type') || 'audio/mpeg', at: Date.now() })
-        audio = `/voice/audio/${id}`
-      } catch (err) {
-        this.agent.log.warn(`Text-to-speech server failed (${err.message}); using the browser's voice.`)
-      }
-    }
-    for (const [k, v] of this.audio) if (Date.now() - v.at > 120000) this.audio.delete(k)
-    const words = text.split(/\s+/).length
-    const estimate = (words / 2.6 / (this.cfg.rate || 1)) * 1000 + 1200
-    const done = new Promise((resolve) => {
-      this.pending.set(id, resolve)
-      setTimeout(() => { if (this.pending.delete(id)) resolve() }, estimate + 4000).unref?.()
-    })
-    viewer.broadcast('speak', { id, text, audio, rate: this.cfg.rate || 1, voiceName: this.cfg.browserVoice || '' })
     viewer.push('chat', `(says aloud) ${text}`)
     this.openUntil = Date.now() + (this.cfg.conversationSeconds ?? 30) * 1000
-    await done
+    const server = this.cfg.tts === 'server' && this.cfg.ttsUrl
+    // With a TTS server, sentence by sentence: the first plays while the next is being made, so it starts sooner.
+    const parts = server ? sentences(text) : [text]
+    const waits = []
+    for (const part of parts) {
+      const id = `s${++this.seq}`
+      let audio = null
+      if (server) audio = await this.synthesize(id, part)
+      const words = part.split(/\s+/).length
+      const estimate = (words / 2.6 / (this.cfg.rate || 1)) * 1000 + 1200
+      waits.push(new Promise((resolve) => {
+        this.pending.set(id, resolve)
+        setTimeout(() => { if (this.pending.delete(id)) resolve() }, estimate * parts.length + 4000).unref?.()
+      }))
+      viewer.broadcast('speak', { id, text: part, audio, rate: this.cfg.rate || 1, voiceName: this.cfg.browserVoice || '' })
+    }
+    for (const [k, v] of this.audio) if (Date.now() - v.at > 120000) this.audio.delete(k)
+    await Promise.all(waits)
+    this.openUntil = Date.now() + (this.cfg.conversationSeconds ?? 30) * 1000
     return text
+  }
+
+  /** One piece of speech from the TTS server, kept for the page to fetch. Returns its URL, or null (browser voice). */
+  async synthesize (id, text) {
+    try {
+      const res = await fetch(this.cfg.ttsUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(this.cfg.ttsKey ? { Authorization: `Bearer ${this.cfg.ttsKey}` } : {}) },
+        body: JSON.stringify({ model: this.cfg.ttsModel || 'tts-1', input: text, voice: this.cfg.ttsVoice || 'af_bella', response_format: 'wav', speed: this.cfg.rate || 1 }),
+        signal: AbortSignal.timeout(20000)
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      this.audio.set(id, { buf: Buffer.from(await res.arrayBuffer()), type: res.headers.get('content-type') || 'audio/wav', at: Date.now() })
+      return `/voice/audio/${id}`
+    } catch (err) {
+      if (!this.ttsWarned) this.agent.log.warn(`Text-to-speech server failed (${err.message}); using the browser's voice.`)
+      this.ttsWarned = true
+      return null
+    }
   }
 
   /** The page finished saying line `id`. */
@@ -148,4 +171,4 @@ class Voice {
   }
 }
 
-module.exports = { Voice, SHOW_ME }
+module.exports = { Voice, SHOW_ME, sentences }

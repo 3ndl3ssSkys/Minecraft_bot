@@ -12,7 +12,8 @@
     "doctor": "node doctor.js",
     "setup": "node setup.js",
     "test": "node test/run.js",
-    "viewer": "node index.js --viewer"
+    "viewer": "node index.js --viewer",
+    "voice-server": "python scripts/voice-server.py"
   },
   "keywords": [
     "minecraft",

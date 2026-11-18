@@ -530,6 +530,32 @@ It also had a stray line that reset the autopilot after nearly every action. Tha
 
 **Not verified:** real speech recognition (headless Chromium has none) and Whisper/Kokoro servers; a real network (menus, invites, `/play`); the Bedrock route on The Hive; real-model walkthrough plans.
 
+## 25. The Hive's menus; local Whisper and Kokoro
+
+**The user said:**
+- On The Hive, inventory items open menus where you join and create parties, invite, join games and lobbies. Chat only has notifications and can't be clicked on Bedrock.
+- Keep the chat reading for Java, where clicking works.
+- "You could use Kokoro TTS or other local models. Is Whisper local and fast?"
+
+**Done:**
+- **`navigateMenus`** (network.js): a goal → the hotbar item that fits (name match, plus hints: party/friend → social or profile items, lobby → hub selectors, else the game selector) → each menu read, the best-matching entry clicked (name ×2 + lore, with synonyms such as party/group/squad, accept/join/confirm, lobby/hub, solo/singles) → deeper, back out via "Back" entries, or close and try the next item. Up to 12 steps; reports the path.
+  - On a fake Hive-style server in the tests: "play Treasure Wars solo" went Game Selector → Treasure Wars → Solo; "accept EndlessSkys's party invite" went Party & Friends → Invites (1) → EndlessSkys's party; an impossible goal failed cleanly.
+- **Invites:**
+  - The clickable or named command when there is one (Java).
+  - On Bedrock, or with `inviteVia: 'menu'`: queue `navigateMenus("accept <owner>'s <kind> invite")`.
+  - On Java with no command in the text: the usual `/party accept`, falling back to menus if the server replies "unknown command".
+- **Server notices** (game starting, team, queue, rewards...) go into `state.server.notices`.
+- **`scripts/voice-server.py`:** faster-whisper + kokoro-onnx behind OpenAI-compatible endpoints (stdlib server; Kokoro files auto-downloaded). `npm run voice-server`.
+- **Speech:** Voice speaks sentence by sentence through a TTS server; the page plays parts in order (a queue) and records 16 kHz mono WAV itself (ScriptProcessor + resampling), so any Whisper server works without ffmpeg.
+
+**Measured:**
+- Kokoro fp32 on the cloud box (4 vCPU): a 1.2 s line in 0.46 s; 5.5 s of speech in 1.56 s (about 0.3 of real time). The int8 model was slower than real time there.
+- Through the bot and a Chromium page: the first audio was ready in 1.5 s and played.
+- The page's push-to-talk upload was RIFF WAV at 16 kHz, transcribed by a stub, and reached the bot as heard speech.
+- Whisper itself couldn't be timed (Hugging Face blocked here). The faster-whisper project benchmark: small int8 transcribes 13 min in 1 min 42 s on an i7-12700K with 8 threads (about 7.6× real time); base is faster.
+
+**Not verified:** a real Whisper model; The Hive itself (the Bedrock route through ViaBedrock, whether its form menus arrive as windows); real Java network menus.
+
 ## Where it stands now
 
 **Next for the user:**

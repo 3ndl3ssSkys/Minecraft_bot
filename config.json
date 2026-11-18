@@ -249,7 +249,8 @@
   },
   "network": {
     "public": "auto",
-    "acceptInvites": true
+    "acceptInvites": true,
+    "inviteVia": "auto"
   },
   "etiquette": {
     "enabled": true,

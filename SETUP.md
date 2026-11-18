@@ -434,10 +434,29 @@ In the terminal you can type `!status` (or any `!command`) to control it, or typ
 ```
 Restart the bot, then on your gaming PC open `https://<bot-pc-ip>:3007/voice?key=pick-something`. The browser warns about the certificate the first time: **Advanced → Continue**. It's the bot's own. Keep the tab open while you play; Chrome or Edge work best.
 
-**Optional, fully local speech** (nothing leaves your PCs):
-- **Recognition:** run a Whisper server, then set `"voice": { "stt": "server", "sttUrl": "http://localhost:8000/v1/audio/transcriptions" }`.
-- **Speaking:** run Kokoro-FastAPI, then set `"tts": "server", "ttsUrl": "http://localhost:8880/v1/audio/speech", "ttsVoice": "af_bella"`.
-- **Graphics card:** both can run on the CPU, which leaves the graphics card to Ollama.
+**Fully local speech** (nothing leaves your PCs, better voice): the bot comes with a small voice server that runs Whisper (hearing) and Kokoro (speaking) on the bot's PC.
+1. Install Python 3.10 or newer from https://www.python.org/downloads/ (tick **"Add python.exe to PATH"**).
+2. In a Command Prompt, in the bot folder:
+   ```bat
+   pip install faster-whisper kokoro-onnx soundfile
+   ```
+3. Start it (leave the window open; it downloads the voice, about 350 MB, and the Whisper model the first time):
+   ```bat
+   npm run voice-server
+   ```
+   When it says `Voice server on http://127.0.0.1:8880`, it's ready.
+4. In `config.local.json`:
+   ```json
+   "voice": { "stt": "server", "sttUrl": "http://localhost:8880/v1/audio/transcriptions",
+              "tts": "server", "ttsUrl": "http://localhost:8880/v1/audio/speech", "ttsVoice": "am_michael" }
+   ```
+   Voices: `af_bella`, `af_heart`, `am_michael`, `am_adam`, `bf_emma`, `bm_george` and about 50 more (http://localhost:8880/v1/audio/voices).
+5. Restart the bot.
+
+**How it runs:**
+- Both run on the CPU, so the graphics card stays free for Ollama.
+- **Whisper (`base.en`):** for a few seconds of speech, expect well under a second on a normal desktop CPU. For better accuracy, use `npm run voice-server -- --stt-model small.en`, a bit slower.
+- **Kokoro:** makes speech about 3 times faster than it plays, even on a slow 4-core machine. The bot sends it one sentence at a time, so it starts talking almost at once.
 
 ---
 

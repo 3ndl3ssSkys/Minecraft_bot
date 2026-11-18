@@ -86,56 +86,52 @@
     }
 
     // ---------------------------------------------------------------- server recognition (Whisper)
+    // The microphone is captured as raw samples and sent as 16 kHz WAV: every Whisper server reads that (no ffmpeg).
     async openMic () {
       if (this.stream) return
-      this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
-      if (this.mode === 'hands-free') this.startVad()
-    }
-
-    /** Hands-free with Whisper: record while the voice level is up, send after a short silence. */
-    startVad () {
+      this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } })
       const ctx = new AudioContext()
       const src = ctx.createMediaStreamSource(this.stream)
-      const an = ctx.createAnalyser()
-      an.fftSize = 1024
-      src.connect(an)
-      const buf = new Float32Array(an.fftSize)
+      const proc = ctx.createScriptProcessor(4096, 1, 1)
+      src.connect(proc)
+      proc.connect(ctx.destination)
+      this.audioCtx = ctx
+      this.capture = null // Float32Array chunks while recording
       let talking = false
       let quietSince = 0
-      this.vad = setInterval(() => {
-        if (this.speaking) return
-        an.getFloatTimeDomainData(buf)
-        const level = Math.sqrt(buf.reduce((a, v) => a + v * v, 0) / buf.length)
+      proc.onaudioprocess = (e) => {
+        const data = e.inputBuffer.getChannelData(0)
+        if (this.capture) this.capture.push(new Float32Array(data))
+        if (this.mode !== 'hands-free' || this.pttHeld || this.speaking) return
+        // Hands-free: start when the voice level rises, send after ~0.9 s of quiet.
+        let sum = 0
+        for (let i = 0; i < data.length; i++) sum += data[i] * data[i]
+        const level = Math.sqrt(sum / data.length)
         if (level > 0.03) { quietSince = 0; if (!talking) { talking = true; this.record() } } else if (talking) {
           quietSince ||= Date.now()
           if (Date.now() - quietSince > 900) { talking = false; this.finish(false) }
         }
-      }, 60)
-      this.vadCtx = ctx
-    }
-
-    stopVad () { clearInterval(this.vad); try { this.vadCtx?.close() } catch {} this.vadCtx = null; try { this.stream?.getTracks().forEach((t) => t.stop()) } catch {} this.stream = null }
-
-    record () {
-      if (!this.stream) return
-      this.chunks = []
-      this.recorder = new MediaRecorder(this.stream)
-      this.recorder.ondataavailable = (e) => this.chunks.push(e.data)
-      this.recorder.start()
-      this.recStarted = Date.now()
-    }
-
-    finish (ptt) {
-      const r = this.recorder
-      if (!r || r.state === 'inactive') return
-      r.onstop = async () => {
-        if (Date.now() - this.recStarted < 400) return // a click or a cough
-        const blob = new Blob(this.chunks, { type: r.mimeType || 'audio/webm' })
-        const res = await fetch(this.url(`/voice/listen?ptt=${ptt ? 1 : 0}`), { method: 'POST', headers: { 'Content-Type': blob.type }, body: blob }).then((x) => x.json()).catch(() => ({}))
-        if (res.text) this.log('you', res.text)
-        if (res.ok === false && res.why) this.log('info', `(${res.why})`)
       }
-      r.stop()
+    }
+
+    stopVad () {
+      try { this.audioCtx?.close() } catch {}
+      this.audioCtx = null
+      try { this.stream?.getTracks().forEach((t) => t.stop()) } catch {}
+      this.stream = null
+      this.capture = null
+    }
+
+    record () { this.capture = []; this.recStarted = Date.now() }
+
+    async finish (ptt) {
+      const chunks = this.capture
+      this.capture = null
+      if (!chunks || Date.now() - this.recStarted < 400) return // a click or a cough
+      const wav = toWav(chunks, this.audioCtx?.sampleRate || 48000)
+      const res = await fetch(this.url(`/voice/listen?ptt=${ptt ? 1 : 0}`), { method: 'POST', headers: { 'Content-Type': 'audio/wav' }, body: wav }).then((x) => x.json()).catch(() => ({}))
+      if (res.text) this.log('you', res.text)
+      if (res.ok === false && res.why) this.log('info', `(${res.why})`)
     }
 
     // ---------------------------------------------------------------- push-to-talk
@@ -155,35 +151,67 @@
     }
 
     // ---------------------------------------------------------------- speaking
+    /** Lines are played one after another, in the order they arrive. */
     speak (msg) {
       if (this.mode === 'off') return
-      this.speaking = true
-      try { this.rec?.abort() } catch {} // don't hear ourselves
-      const done = () => {
-        this.speaking = false
-        this.post('/voice/done', { id: msg.id })
-        if (this.mode === 'hands-free' && this.settings.stt === 'browser') setTimeout(() => this.listen(), 200)
-      }
-      this.log('bot', msg.text)
-      if (msg.audio) {
-        const a = new Audio(this.url(msg.audio))
-        a.onended = done
-        a.onerror = done
-        a.play().catch(done)
-        return
-      }
-      if (!window.speechSynthesis) return done()
-      const u = new SpeechSynthesisUtterance(msg.text)
-      u.rate = msg.rate || 1
-      u.lang = this.settings.language || 'en-US'
-      const want = (msg.voiceName || localStorage.getItem('botvoice.voice') || '').toLowerCase()
-      const v = this.voices.find((x) => want && x.name.toLowerCase().includes(want)) || this.voices.find((x) => x.lang === u.lang && /natural|neural|online/i.test(x.name)) || this.voices.find((x) => x.lang === u.lang)
-      if (v) u.voice = v
-      u.onend = done
-      u.onerror = done
-      window.speechSynthesis.speak(u)
+      this.playing = (this.playing || Promise.resolve()).then(() => this.playOne(msg))
+    }
+
+    playOne (msg) {
+      return new Promise((resolve) => {
+        this.speaking = true
+        try { this.rec?.abort() } catch {} // don't hear ourselves
+        const done = () => {
+          this.speaking = false
+          this.post('/voice/done', { id: msg.id })
+          if (this.mode === 'hands-free' && this.settings.stt === 'browser') setTimeout(() => this.listen(), 200)
+          resolve()
+        }
+        this.log('bot', msg.text)
+        if (msg.audio) {
+          const a = new Audio(this.url(msg.audio))
+          a.onended = done
+          a.onerror = done
+          a.play().catch(done)
+          return
+        }
+        if (!window.speechSynthesis) return done()
+        const u = new SpeechSynthesisUtterance(msg.text)
+        u.rate = msg.rate || 1
+        u.lang = this.settings.language || 'en-US'
+        const want = (msg.voiceName || localStorage.getItem('botvoice.voice') || '').toLowerCase()
+        const v = this.voices.find((x) => want && x.name.toLowerCase().includes(want)) || this.voices.find((x) => x.lang === u.lang && /natural|neural|online/i.test(x.name)) || this.voices.find((x) => x.lang === u.lang)
+        if (v) u.voice = v
+        u.onend = done
+        u.onerror = done
+        window.speechSynthesis.speak(u)
+      })
     }
   }
+
+  /** Float32 chunks at `rate` → a 16 kHz mono 16-bit WAV blob. */
+  function toWav (chunks, rate) {
+    const len = chunks.reduce((a, c) => a + c.length, 0)
+    const all = new Float32Array(len)
+    let o = 0
+    for (const c of chunks) { all.set(c, o); o += c.length }
+    const ratio = rate / 16000
+    const n = Math.floor(len / ratio)
+    const pcm = new Int16Array(n)
+    for (let i = 0; i < n; i++) {
+      const v = Math.max(-1, Math.min(1, all[Math.floor(i * ratio)]))
+      pcm[i] = v < 0 ? v * 0x8000 : v * 0x7fff
+    }
+    const buf = new ArrayBuffer(44 + pcm.length * 2)
+    const dv = new DataView(buf)
+    const str = (off, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(off + i, s.charCodeAt(i)) }
+    str(0, 'RIFF'); dv.setUint32(4, 36 + pcm.length * 2, true); str(8, 'WAVE'); str(12, 'fmt ')
+    dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true); dv.setUint32(24, 16000, true)
+    dv.setUint32(28, 32000, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true); str(36, 'data'); dv.setUint32(40, pcm.length * 2, true)
+    new Int16Array(buf, 44).set(pcm)
+    return new Blob([buf], { type: 'audio/wav' })
+  }
+  window.botVoiceToWav = toWav
 
   window.BotVoice = BotVoice
 })()

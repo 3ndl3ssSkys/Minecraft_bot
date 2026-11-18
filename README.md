@@ -603,8 +603,10 @@ Start it with `npm run viewer` and open **`/voice`** (e.g. http://localhost:3007
 - **Its answers are spoken** on that page, never typed in game chat. Its replies to its owner go to voice whenever a voice page is open.
 - **"Show me how…", "explain…", "how do I…":** it explains in a few spoken steps and does each one in the game as it says it (`explainAndShow`). It looks at what it's talking about and outlines it in the viewer, and the next line only starts when the step is done.
 - **Engines:**
-  - Speech recognition defaults to the browser's own (Chrome or Edge). That sends your audio to Google or Microsoft. For fully local recognition, run a Whisper server and set `voice.stt: "server"` and `voice.sttUrl` (any OpenAI-compatible `/v1/audio/transcriptions`, such as faster-whisper-server or whisper.cpp's server).
-  - Speech uses the PC's voices, or a TTS server with `voice.tts: "server"` and `voice.ttsUrl` (OpenAI-compatible `/v1/audio/speech`, such as Kokoro-FastAPI, or openedai-speech with Piper).
+  - **Browser (default):** Chrome or Edge recognition (your audio goes to Google or Microsoft) and the PC's voices. Nothing to install.
+  - **Local (recommended):** `npm run voice-server` runs Whisper (faster-whisper) and Kokoro on the bot's PC, on the CPU so the graphics card stays free for Ollama (SETUP.md → "Fully local speech"). Set `voice.stt`/`voice.tts` to `"server"` with the URLs.
+  - Any other OpenAI-compatible server works too: `/v1/audio/transcriptions` (whisper.cpp's server, speaches) and `/v1/audio/speech` (Kokoro-FastAPI, openedai-speech).
+  - The page records 16 kHz WAV, so servers don't need ffmpeg. Long answers are spoken sentence by sentence, so the first sentence plays while the next is being made.
 - **From another PC:** browsers only allow the microphone on https or on the same PC. Set `viewer.host` to `"0.0.0.0"`, a `viewer.password`, and `viewer.https: true`, then open `https://<bot-pc>:3007/voice?key=<password>`. Click through the certificate warning once (it's the bot's own certificate).
 - **In-game voice chat** (Simple Voice Chat, PlasmoVoice) isn't supported: there's no Node client for Simple Voice Chat, and public servers rarely have it.
 
@@ -616,7 +618,14 @@ Start it with `npm run viewer` and open **`/voice`** (e.g. http://localhost:3007
   - `useHotbarItem` (open the game selector), `readMenu`, `clickMenu` ("Bed Wars", "Solo", or a slot);
   - `serverCommand`: player commands only (/play, /hub, /party, /friend, /tpa...). Never admin ones.
   - `joinOwner`: walk to you if you're here, or ask you to invite it.
-- **Following you:** party, friend and teleport invites **from its owners** are accepted by themselves: it uses the clickable [ACCEPT] in the message or the command it names. So invite it to your party and it follows you into your game.
+- **`navigateMenus`:** gets somewhere through the menus by itself: "play Treasure Wars solo", "accept EndlessSkys's party invite", "create a party", "go to the hub".
+  - It picks the hotbar item that fits (game selector, party/friends menu...) and reads each menu.
+  - It clicks the entry that matches best and goes deeper, or backs out and tries another item when an entry leads nowhere.
+  - It reports the path it took: "Game Selector → Treasure Wars → Solo".
+- **Following you:** party, friend and teleport invites **from its owners** are accepted by themselves:
+  - **Java:** it uses the clickable [ACCEPT] or the command the message names, falling back to the menus if the server doesn't know the command.
+  - **Bedrock (The Hive), where chat can't be clicked:** it accepts through the menus (`network.inviteVia`: `auto`, `chat` or `menu`).
+- **Server notices:** "game starts in 10 seconds", your team, the queue, rewards. They go into its view of the game, so it knows what's happening on servers whose chat is just notifications.
 - **Quiet in public:** on a network it doesn't talk in public chat (`chat.publicChat: "auto"`). It talks to you privately, or out loud on the voice page.
 - **Limits:**
   - **Accounts:** public servers check accounts, so the bot needs its own Microsoft account with Minecraft (an offline account can't join), and many networks forbid bots, which can get its account banned.

@@ -243,6 +243,7 @@ You can also put the whole object inline: `"personality": { "name": "...", ... }
 **Public servers** (`network`, `chat.publicChat`):
 - **`network.public`:** `auto` (detects minigame networks) / `true` / `false`.
 - **`network.acceptInvites`:** follow its owners' party, friend and teleport invites by itself.
+- **`network.inviteVia`:** `auto` (Java: the clickable or named command, menus if that fails; Bedrock: menus), `chat`, or `menu`.
 - **`chat.publicChat`:** `auto` = no public chat on networks; `true`/`false` to force it.
 
 **Server manners** (`etiquette`):

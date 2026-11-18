@@ -8,3 +8,4 @@ data/
 mock-ollama.log
 test-config.json
 test-brain.json
+scripts/voice-models/

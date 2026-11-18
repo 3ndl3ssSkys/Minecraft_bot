@@ -361,7 +361,8 @@ const DEFAULT_CONFIG = {
   // Public server networks (network.js): lobbies, menus, parties, joining its owner.
   network: {
     public: 'auto', // auto (detect a minigame network from the scoreboard, named hotbar items, tab list) | true | false
-    acceptInvites: true // accept party / friend / teleport invites from its owners by itself
+    acceptInvites: true, // accept party / friend / teleport invites from its owners by itself
+    inviteVia: 'auto' // auto (Java: the clickable or named command, menus if that fails; Bedrock: menus) | chat | menu
   },
   // Being a decent member of a server (etiquette.js): rules people set, and leaving farms, pens, pets and towns alone.
   etiquette: {
