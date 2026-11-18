@@ -3059,12 +3059,31 @@ function instructionFromText (text) {
 }
 
 const threat = require('./threat')
+const routines = require('./routines')
+const normalizeArg = (v) => String(v || '').toLowerCase().trim().replace(/\s+/g, '_').replace(/^minecraft:/, '')
 
 /**
  * The state without its empty parts (nulls, [], {}, "", false flags): the model reads every token of it before each
  * decision, and "equipment: {hand: null, head: null, ...}" says nothing "you hold nothing" wouldn't. The inventory
  * stays even when empty, because "you carry nothing" matters.
  */
+/** The state's parts from slowest- to fastest-changing (see the decision prompt): the cache holds up to the first change. */
+const STATE_ORDER = ['rules', 'places', 'equipment', 'inventory', 'status', 'onlinePlayers', 'layout', 'surroundings', 'signs', 'nearbyBlocks', 'contraptions', 'server', 'world', 'senses', 'self', 'standingOn', 'lookingAt', 'nearbyEntities', 'recentEvents', 'recentChat', 'recentActions', 'hints']
+const STATUS_ORDER = ['skill', 'goals', 'goal', 'building', 'knownContainers', 'combatKit', 'task', 'queuedTasks', 'dangerZonesNearby', 'danger', 'threats', 'currentAction', 'feelings']
+function stableFirst (state) {
+  const order = (obj, keys) => {
+    const out = {}
+    for (const k of keys) if (k in obj) out[k] = obj[k]
+    for (const k of Object.keys(obj)) if (!(k in out)) out[k] = obj[k]
+    return out
+  }
+  const s = order(state, STATE_ORDER)
+  if (s.status && typeof s.status === 'object') s.status = order(s.status, STATUS_ORDER)
+  // The exact tick changes every decision; the hour (with the phase: dawn, day, dusk, night) is what a player knows.
+  if (s.world && Number.isFinite(s.world.timeOfDay)) s.world = { ...s.world, timeOfDay: Math.round(s.world.timeOfDay / 1000) * 1000 }
+  return s
+}
+
 function pruneState (v, key = '') {
   if (Array.isArray(v)) { const a = v.map((x) => pruneState(x)).filter((x) => x !== undefined); return a.length ? a : undefined }
   if (v === false) return key === 'ok' ? false : undefined // a failed action stays visible
@@ -3248,7 +3267,7 @@ ${said ? `${name} just said: ${said}
         if (this.paused || !agent.bot?.entity || agent.dead || agent.bot.isSleeping) { await this.idle(1000); continue }
         if (agent.reflexes?.busy) { await this.idle(100); continue } // the body is busy saving itself
 
-        let decision = this.forced.shift() || this.reflex() || this.gameStep() || this.resumeStep() || this.habitStep() || agent.tasks.nextForcedAction() || this.obtainStep() || this.nextPlanned() || this.autopilotStep()
+        let decision = this.forced.shift() || this.reflex() || this.gameStep() || this.resumeStep() || this.habitStep() || agent.tasks.nextForcedAction() || this.obtainStep() || this.seekStep() || this.nextPlanned() || this.autopilotStep()
         if (!decision) decision = await this.usePrethought()
         if (!decision) {
           // Throttle: never ask the LLM more often than minLlmIntervalMs.
@@ -3261,6 +3280,7 @@ ${said ? `${name} just said: ${said}
         }
 
         while (agent.reflexes?.busy && this.running) await this.idle(100) // a save in progress finishes first
+        decision = this.commit(decision) // "chop 20 logs" is chopped to 20 without asking again (routines.js)
         // Common sense before acting: no fourth crafting table, no wooden pickaxe next to an iron one (commonsense.js).
         const objection = decision.source === 'reflex' || decision.source === 'command' ? null : this.commonSense(decision)
         if (objection) {
@@ -3293,6 +3313,7 @@ ${said ? `${name} just said: ${said}
         this.trackPlan(decision, result)
         this.autopilot.onResult(decision, result)
         this.onObtainResult(decision, result)
+        this.onSeekResult(decision, result)
         if (!result.ok) this.prethought = null // it was planned assuming this worked
         if (config.logging.trainingData && decision.source === 'llm') this.recordTraining(decision, result)
 
@@ -3320,7 +3341,7 @@ ${said ? `${name} just said: ${said}
     const agent = this.agent
     if (agent.config.loop.prethink === false || this.prethought || decision.source === 'reflex') return
     if (/^(wait|chatMessage|emote|eatFood|equipItem|dropItems|placeTorch)$/.test(decision.action.name)) return
-    if (this.obtain || agent.tasks.active()) return // code is driving: no model needed next
+    if (this.obtain || this.seek || agent.tasks.active()) return // code is driving: no model needed next
     const started = { at: Date.now(), chat: agent.memory.chat.length, hp: agent.bot.health, goal: agent.memory.goal }
     const promise = this.decide({ upcoming: decision.action })
     promise.catch(() => {})
@@ -3587,10 +3608,10 @@ ${said ? `${name} just said: ${said}
    * is planned by acquire.js and done at full speed, without asking the model in between.
    * @returns {string} the item it's going for ("food" becomes a cooked meat the animals around give)
    */
-  startObtain (item, count = 1) {
+  startObtain (item, count = 1, { anyWood = false } = {}) {
     const s = this.agent.perception?.latest
     const target = item === 'food' ? foodTarget(this.mobsAround(s)) : item
-    this.obtain = { item: target, count, fails: 0, explores: 0, steps: 0, at: Date.now(), then: null, smelt: null }
+    this.obtain = { item: target, count, anyWood, fails: 0, explores: 0, steps: 0, at: Date.now(), then: null, smelt: null }
     this.agent.log.info(`Getting ${count} ${target}: planning every step myself.`)
     this.wake()
     return target
@@ -3609,7 +3630,7 @@ ${said ? `${name} just said: ${said}
     if (!o || !s || agent.dangerLevel() === 'high') return null
     const { bot, memory, log, executor, recipes } = agent
     const inv = s.inventory.items
-    const have = inv[o.item] || 0
+    const have = o.anyWood ? Object.entries(inv).filter(([n]) => /(_log|_stem)$/.test(n) && !n.startsWith('stripped_')).reduce((a, [, c]) => a + c, 0) : inv[o.item] || 0
     const stop = (text) => { memory.addEvent('obtain', text); log.info(text); this.obtain = null; return null }
     if (have >= o.count) return stop(`You got what you set out to get: ${have} ${o.item}.`)
     if (o.steps >= 80 || Date.now() - o.at > 25 * 60000) return stop(`You gave up on getting ${o.item} for now: it was taking too long.`)
@@ -3633,6 +3654,76 @@ ${said ? `${name} just said: ${said}
     if (!step) return stop(`You don't know how to get ${o.item} by yourself.`)
     if (step.unknown) return { ...this.helpStep(step.unknown), source: 'obtain' }
     return decide(step)
+  }
+
+  /**
+   * Commit to what the model chose, like a player does (routines.js). If the step it's on names an amount ("chop 20
+   * logs") and it chose to mine or craft toward it, getting all of it becomes a routine (obtainItem) instead of one
+   * call per stack. If it set off exploring to find something, it keeps exploring until it sees it. If it went strip
+   * mining, it keeps tunnelling until ore turns up. The model is asked again when that's done, stuck, or interrupted.
+   */
+  commit (decision) {
+    if (!decision?.action || !['llm', 'plan'].includes(decision.source)) return decision
+    const agent = this.agent
+    const { name, args = {} } = decision.action
+    const step = agent.goals?.current?.steps?.[agent.goals.current.now]?.text
+    const texts = [decision.subgoal, step, decision.goal].filter(Boolean)
+    if (/^(mineBlock|collectDrops|craftItem)$/.test(name) && !this.obtain && !agent.tasks.active()) {
+      const want = texts.map((t) => routines.stepCount(t, agent.bot.registry)).find(Boolean)
+      const arg = normalizeArg(args.blockType || args.itemName || '')
+      const related = want && arg && (want.item === arg || (want.anyWood && /(_log|^log|wood)$/.test(arg)) || want.item.replace(/^raw_/, '') === arg.replace(/_ore$/, '').replace(/^deepslate_/, '') || arg.includes(want.item.replace(/^raw_|_ingot$/g, '')))
+      const inv = agent.perception?.latest?.inventory?.items || {}
+      const have = want ? (want.anyWood ? Object.entries(inv).filter(([n]) => /(_log|_stem)$/.test(n)).reduce((a, [, c]) => a + c, 0) : inv[want.item] || 0) : 0
+      if (related && have < want.count && want.count > (Number(args.count) || 1)) {
+        agent.log.info(`Sticking with it: getting all ${want.count} ${want.anyWood ? 'logs' : want.item} for "${texts[0]}" without stopping to think.`)
+        const item = want.anyWood && /_log$/.test(arg) ? arg : want.item
+        this.startObtain(item, want.count, { anyWood: want.anyWood })
+        return this.obtainStep() || decision
+      }
+    }
+    if (name === 'explore' && !this.seek) {
+      const target = texts.concat(decision.thought || '').map((t) => routines.seekTarget(t)).find(Boolean)
+      if (target && !routines.seen(target, agent.perception?.latest)) {
+        this.seek = { ...target, left: 5, fails: 0, goal: agent.memory.goal, at: Date.now(), action: decision.action }
+        agent.log.info(`Looking for ${target.label}: exploring until it's in sight.`)
+      }
+    }
+    if (name === 'stripMine' && !this.seek) {
+      const ore = String(args.ore || 'diamond').toLowerCase().replace(/_ore$|^deepslate_/, '')
+      const item = { iron: 'raw_iron', gold: 'raw_gold', copper: 'raw_copper', diamond: 'diamond', coal: 'coal', redstone: 'redstone', lapis: 'lapis_lazuli', emerald: 'emerald' }[ore]
+      if (item) {
+        const inv = agent.perception?.latest?.inventory?.items || {}
+        this.seek = { label: ore, item, start: inv[item] || 0, left: 4, fails: 0, goal: agent.memory.goal, at: Date.now(), action: decision.action }
+      }
+    }
+    return decision
+  }
+
+  /** The next leg of a search or a mining run (see commit), or null when there's nothing to keep doing. */
+  seekStep () {
+    const k = this.seek
+    if (!k) return null
+    const agent = this.agent
+    const s = agent.perception?.latest
+    const end = (text) => { if (text) { agent.memory.addEvent('routine', text); agent.log.info(text) } this.seek = null; return null }
+    if (!s || agent.dangerLevel() === 'high') return null // danger first; carry on afterwards
+    if (agent.memory.goal !== k.goal || Date.now() - k.at > 12 * 60000) return end(null) // the plan changed: the model decides
+    if (k.item) {
+      const now = s.inventory.items[k.item] || 0
+      if (now > k.start) return end(`Found ${k.label}: you have ${now} ${k.item.replace(/_/g, ' ')} now.`)
+    } else {
+      const where = routines.seen(k, s)
+      if (where) return end(`Found ${k.label}: ${where}.`)
+    }
+    if (k.fails >= 2) return end(`Gave up looking for ${k.label} for now: it kept not working.`)
+    if (k.left-- <= 0) return end(`Didn't find ${k.label} yet, after a long look.`)
+    return { source: 'seek', thought: k.item ? `still tunnelling for ${k.label}` : `still looking for ${k.label}`, emotion: 'focused', emotionIntensity: 4, action: k.action }
+  }
+
+  onSeekResult (decision, result) {
+    if (!this.seek || decision.source !== 'seek') return
+    if (result.ok) this.seek.fails = 0
+    else if (result.code !== 'ABORTED') this.seek.fails++
   }
 
   onObtainResult (decision, result) {
@@ -3963,11 +4054,13 @@ ${said ? `${name} just said: ${said}
       { role: 'system', content: buildDecisionPrompt(agent, executor.describeTools(usesCompactPrompt(config))) },
       {
         role: 'user',
-        content: `Current state:\n${JSON.stringify(pruneState(agent.promptState(state)))}\n\n` +
-          `People you know (online):\n${social.peopleSummary(state.onlinePlayers.slice(0, 6)) || '- nobody else is online'}\n\n` +
+        // Slow-changing parts first, the state last (and inside it, what changes every second last): Ollama re-reads
+        // only from the first thing that differs from the previous decision, so this keeps most of it cached.
+        content: `People you know (online):\n${social.peopleSummary(state.onlinePlayers.slice(0, 6)) || '- nobody else is online'}\n\n` +
           `What you've learned from experience:\n${learned.map((l) => `- ${l}`).join('\n') || '- nothing yet'}\n\n` +
           `${remembered.length ? `Things you remember (from earlier):\n${remembered.map((l) => `- ${l}`).join('\n')}\n\n` : ''}` +
           `Minecraft know-how that might matter now:\n${knowhow.map((l) => `- ${l}`).join('\n') || '- (nothing in particular)'}\n\n` +
+          `Current state:\n${JSON.stringify(stableFirst(pruneState(agent.promptState(state)) || {}))}\n\n` +
           `${nudges.join('\n')}\nChoose your next action.`
       }
     ]
@@ -4764,4 +4857,4 @@ function main () {
 
 if (require.main === module) main()
 
-module.exports = { Agent, Brain, ChatResponder, Perception, ChatManager, EventReactor, OllamaClient, loadConfig, deepMerge, parsePluginChat, loginFor, fallbackServer, serverMods, errText, stripThinking, sampleDecisionPrompt, usesCompactPrompt, instructionFromText, pruneState, DEFAULT_CONFIG }
+module.exports = { Agent, Brain, ChatResponder, Perception, ChatManager, EventReactor, OllamaClient, loadConfig, deepMerge, parsePluginChat, loginFor, fallbackServer, serverMods, errText, stripThinking, sampleDecisionPrompt, usesCompactPrompt, instructionFromText, pruneState, stableFirst, DEFAULT_CONFIG }

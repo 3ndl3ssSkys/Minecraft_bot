@@ -31,7 +31,7 @@ You teach `qwen3:4b-instruct` to answer the way the bot needs, using examples of
 
 1. **Collect examples.** Turn on `"logging": { "trainingData": true }` in `config.local.json` and let the bot play, ideally with people around. Every decision is written to `data/training/decisions.jsonl` (or the bot save's own folder): the prompt, the answer, and whether the action worked.
    - Optional: use a much bigger model as a "teacher" for a few hours (a hosted one through `llm.provider: "openai"`) to get better examples. That's called distillation.
-2. **Keep the good ones.** Lines with `"ok": true` whose action made sense. Drop failures, and drop decisions that repeat the same thing.
+2. **Keep the good ones:** run `npm run training-set`. It keeps the decisions that worked and leaves out failures, repeats, plain waiting, broken answers and emojis. It writes `data/training/train.jsonl`, one chat per line (system, user, assistant), the format Unsloth's notebooks read. Skim it and delete anything you wouldn't want it to learn.
 3. **Fine-tune with LoRA.**
    - [Unsloth](https://github.com/unslothai/unsloth) has free Colab notebooks for Qwen3 models.
    - Use the `messages` plus the `answer` from each line as one chat example.

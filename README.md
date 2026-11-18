@@ -865,6 +865,14 @@ The bot knows Minecraft the way an experienced player does:
 
 ## Natural pacing
 
+- **It keeps at what it decided** (`routines.js`), so the model isn't asked again after every block:
+  - When the step it's on names an amount ("chop 20 logs", "mine 8 cobblestone") and it starts mining or crafting toward it, getting all of it becomes one routine (any kind of log counts for wood).
+  - When it sets off to find something ("find trees", "look for a village", "find cows"), it keeps exploring until that's in sight.
+  - When it goes strip mining, it keeps tunnelling until ore turns up.
+  - It thinks again when the routine is done or stuck, or something happens: danger, a request, the plan changing.
+- **Thinking while moving:** while an action runs, it already works out the next one (`loop.prethink`) and uses that answer if nothing changed meanwhile. Busy work fills the rest.
+- **Fast to re-read:** the decision prompt puts what changes slowly first and what changes every second last, so Ollama reuses most of it from its cache. In a test, the reusable share of the state went from 8% to about half.
+
 - **While it thinks:** during every LLM call it does something small and useful — picks up items lying around, checks an unchecked chest (and remembers its contents: `status.knownContainers`), mines a visible ore or something its task needs, or hops around doing parkour (more often for restless personalities: `restlessness`). It stops the moment the decision arrives, and skips all of this in danger.
 - **Typing:** it stops moving while it types, like a player with the chat box open (`chat.typingCharsPerSecond`, default 9; `chat.stopToType`). In testing, a walking bot stood still for the ~6 seconds a long message took, then carried on.
 - **In danger** (fighting, almost dead, just hit, something hostile right next to it):

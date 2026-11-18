@@ -664,6 +664,29 @@ It also had a stray line that reset the autopilot after nearly every action. Tha
 
 **Not verified:** real decision timings on the user's PC (the new log line will show them); stripMine and fights against real mobs on Paper; crafting on Paper 26.1 with the new check.
 
+## 29. Faster, smarter, more like a player; which model; fine-tuning
+
+**Asked:**
+- "It still takes a really long time to think: how could we make it faster, smarter, and more accurate to a player?"
+- "Can it still think while moving? What model would work best, and could we fine-tune it to be really good at Minecraft?"
+
+**Found:** the model was asked after almost every action, because code only drove obtainItem, tasks and the autopilot. Each call costs a few seconds on the 1660 Super: reading the new state, writing about 90 tokens, plus the cache refill after chat replies. The user part of the prompt began with the bot's position and the time of day, which change every decision, so Ollama re-read nearly all of it (8% reusable).
+
+**Built:**
+- `routines.js` + `Brain.commit` / `seekStep`:
+  - a mining or crafting decision toward a step's amount becomes one obtainItem routine for the whole amount;
+  - exploring to find something keeps going until it's in sight;
+  - strip mining keeps going until ore turns up.
+  - The model is asked again only when the routine is done, stuck or interrupted.
+  - Test: a 45 s search made 2 model calls instead of 13.
+- `stableFirst`: people, lessons and know-how first, then the state ordered slow → fast-changing, with the time rounded to the hour and feelings last. Reusable share of the state: 8% → ~48%.
+- `npm run training-set` (`scripts/training-set.js`): recorded decisions → `train.jsonl` for Unsloth (only decisions that worked; no repeats, waits or emojis).
+
+**Answered:**
+- Yes, it thinks while moving (prethink, busy work).
+- `qwen3:4b-instruct` stays the best fit for 6 GB, with `qwen3:1.7b` as the fast chat model. Larger models spill onto the CPU; a hosted API through `llm.provider: "openai"` is the only way to get much faster.
+- Fine-tuning: collect, then `npm run training-set`, then LoRA on a free Colab GPU (the 1660 is too small for 4B training with these prompt lengths), then GGUF, then Ollama. Optionally first distil from a big hosted model.
+
 ## Where it stands now
 
 **Next for the user:**
