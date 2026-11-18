@@ -687,6 +687,26 @@ It also had a stray line that reset the autopilot after nearly every action. Tha
 - `qwen3:4b-instruct` stays the best fit for 6 GB, with `qwen3:1.7b` as the fast chat model. Larger models spill onto the CPU; a hosted API through `llm.provider: "openai"` is the only way to get much faster.
 - Fine-tuning: collect, then `npm run training-set`, then LoRA on a free Colab GPU (the 1660 is too small for 4B training with these prompt lengths), then GGUF, then Ollama. Optionally first distil from a big hosted model.
 
+## 30. "It didn't get added": settings in config.local.json
+
+**Asked:** "are you sure it should be in config.local.json? It didn't get added."
+
+**Found:**
+- The loading is right: `config.local.json` is merged over the defaults, `--viewer` included.
+- But nothing caught the usual reasons a hand-made setting does nothing:
+  - put on the wrong level (`fastModel` at the top instead of inside `llm`);
+  - a misspelling;
+  - Notepad's byte-order mark, which made the whole file unreadable;
+  - the chat model never downloaded (setup asked for it but didn't pull it).
+- The README's speed example still named plain `qwen3:4b` (the thinking-only version).
+
+**Built:**
+- `npm run set -- llm.fastModel qwen3:1.7b` (`scripts/set.js`): writes the setting into the right section, checks the name, shows or removes a value.
+- At start, `Config: "fastModel" isn't a setting; did you mean llm.fastModel?` for any unknown key.
+- `readJson` accepts the BOM and reports a broken file by line and column.
+- Setup offers to download the chat model.
+- Docs fixed (README, START-HERE troubleshooting).
+
 ## Where it stands now
 
 **Next for the user:**

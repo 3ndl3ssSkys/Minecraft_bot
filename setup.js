@@ -108,6 +108,11 @@ async function main () {
     model = other
   }
 
+  // The chat model has to be downloaded too, or the bot falls back to sharing the big one.
+  if (fastModel && models.length && !models.some((m) => m === fastModel || m === `${fastModel}:latest`)) {
+    if (yes(await ask(`${fastModel} (for chat) isn't downloaded yet. Download it now?`, 'Y'))) spawnSync('ollama', ['pull', fastModel], { stdio: 'inherit', shell: process.platform === 'win32' })
+  }
+
   const config = {
     ...old,
     server: { ...(old.server || {}), host: host || 'localhost', port: Number(port) || 25565, username },

@@ -592,11 +592,38 @@ function errText (err) {
 }
 
 function readJson (file) {
+  const text = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '') // Notepad may save a byte-order mark first
   try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'))
+    return JSON.parse(text)
   } catch (err) {
-    throw new Error(`Could not read ${file}: ${err.message}`)
+    // Say where: "line 12, column 5", and the usual causes.
+    const at = Number(String(err.message).match(/position (\d+)/)?.[1])
+    const where = Number.isFinite(at) ? (() => { const before = text.slice(0, at).split('\n'); return ` (line ${before.length}, column ${before.at(-1).length + 1})` })() : ''
+    throw new Error(`Could not read ${file}${where}: ${err.message}. Usually a missing or extra comma, or a missing quote or brace near there. Or set things with: npm run set -- llm.fastModel qwen3:1.7b`)
   }
+}
+
+// Sections where any key is fine (names you choose, or whole objects passed through as they are).
+const FREE_FORM = new Set(['servers', 'personality', 'reactions.events', 'commands.permissions', 'obedience.players', 'mind.priorities', 'settings'])
+
+/** Settings in a config file that the bot doesn't know, with a guess at what was meant ("fastModel" → llm.fastModel). */
+function unknownSettings (user, defaults = DEFAULT_CONFIG, prefix = '') {
+  const out = []
+  const leaves = []
+  const collect = (obj, pre) => { for (const [k, v] of Object.entries(obj)) { const key = pre ? `${pre}.${k}` : k; leaves.push(key); if (isPlainObject(v) && !FREE_FORM.has(key)) collect(v, key) } }
+  if (!prefix) collect(DEFAULT_CONFIG, '')
+  const walk = (u, d, pre) => {
+    for (const [k, v] of Object.entries(u || {})) {
+      const key = pre ? `${pre}.${k}` : k
+      if (FREE_FORM.has(key) || FREE_FORM.has(pre)) continue
+      if (!d || !(k in d)) {
+        const guess = leaves.find((l) => l.split('.').pop().toLowerCase() === k.toLowerCase())
+        out.push(guess ? `"${key}" isn't a setting; did you mean ${guess}?` : `"${key}" isn't a setting the bot knows (ignored)`)
+      } else if (isPlainObject(v) && isPlainObject(d[k])) walk(v, d[k], key)
+    }
+  }
+  walk(user, defaults, prefix)
+  return out
 }
 
 function loadPersonality (spec, log) {
@@ -649,6 +676,7 @@ function loadConfig (log) {
     user = deepMerge(user, readJson(local))
     log.info(`Your settings: ${local}`)
   }
+  for (const w of unknownSettings(user)) log.warn(`Config: ${w}`)
   const config = deepMerge(DEFAULT_CONFIG, user)
   // A named server profile overrides the default server settings.
   if (cli.viewer) config.viewer.enabled = true
@@ -1292,7 +1320,7 @@ class OllamaClient {
     const cold = read > 1500 && prev && prev !== 'decision'
     if (cold) t.coldAfterChat++
     if (!this.cfg.fastModel && t.coldAfterChat >= 3) {
-      warn('evict', 'Chat replies on the same model wipe its memory of the decision prompt, so the next decision reads it all again (seconds each time). Faster: set llm.fastModel to "qwen3:1.7b" in config.local.json (plus OLLAMA_MAX_LOADED_MODELS=2), or OLLAMA_NUM_PARALLEL=2.')
+      warn('evict', 'Chat replies on the same model wipe its memory of the decision prompt, so the next decision reads it all again (seconds each time). Faster: ollama pull qwen3:1.7b, then npm run set -- llm.fastModel qwen3:1.7b (plus setx OLLAMA_MAX_LOADED_MODELS 2 and an Ollama restart), or OLLAMA_NUM_PARALLEL=2.')
     }
     this.log.info(`Thought for ${(ms / 1000).toFixed(1)} s (read ${read} new tokens${cold ? ', the cache was wiped by a chat reply' : ''}, wrote ${wrote}${wrote ? ` at ${writeTps.toFixed(0)}/s` : ''})`)
   }
@@ -4857,4 +4885,4 @@ function main () {
 
 if (require.main === module) main()
 
-module.exports = { Agent, Brain, ChatResponder, Perception, ChatManager, EventReactor, OllamaClient, loadConfig, deepMerge, parsePluginChat, loginFor, fallbackServer, serverMods, errText, stripThinking, sampleDecisionPrompt, usesCompactPrompt, instructionFromText, pruneState, stableFirst, DEFAULT_CONFIG }
+module.exports = { Agent, Brain, ChatResponder, Perception, ChatManager, EventReactor, OllamaClient, loadConfig, deepMerge, parsePluginChat, loginFor, fallbackServer, serverMods, errText, stripThinking, sampleDecisionPrompt, usesCompactPrompt, instructionFromText, pruneState, stableFirst, unknownSettings, readJson, DEFAULT_CONFIG }

@@ -180,9 +180,11 @@ MIND [curious 5/10] Nobody's around. I'll punch a tree to get started.
 | --- | --- |
 | `Connection error: connect ECONNREFUSED` and "Nothing is running at localhost:25565" | The Minecraft server isn't running (yet). Start it (step 4); the bot keeps retrying and joins once it's up. |
 | `Disconnected: socketClosed` straight after "Connecting to localhost:25565" | The server is up but closed the connection during login. Get the latest bot (`git pull`): an earlier version sent a voice-chat packet too early. If it still happens, check the server window for an error at that moment. |
+| `Could not read …config.local.json (line …, column …)` | The file has a typo there (usually a missing or extra comma or quote). Fix it in Notepad, or delete the line and use `npm run set -- <setting> <value>` instead. |
+| A setting you added does nothing | Look at the bot's first lines: `Config: "…" isn't a setting; did you mean …?` means it's in the wrong place. `npm run set -- <setting> <value>` puts it in the right one. |
 | `Could not read package.json` | You're not in the bot folder: `cd %USERPROFILE%\Minecraft_bot` |
 | `'git' / 'node' / 'ollama' is not recognized` | Close the Command Prompt and open a new one (installers only take effect in new windows). |
-| Answers are very slow | Each decision logs `Thought for … s (read … new tokens, wrote …)`. `ollama ps` while the bot runs must say 100% GPU (step 3). If the log says chat replies wipe the cache, add `"fastModel": "qwen3:1.7b"` under `llm` in `config.local.json` and run `setx OLLAMA_MAX_LOADED_MODELS 2` (then restart Ollama). If it says the model "keeps thinking", run `npm run setup` and take the model it offers. |
+| Answers are very slow | Each decision logs `Thought for … s (read … new tokens, wrote …)`. `ollama ps` while the bot runs must say 100% GPU (step 3). If the log says chat replies wipe the cache, run `ollama pull qwen3:1.7b`, `npm run set -- llm.fastModel qwen3:1.7b` and `setx OLLAMA_MAX_LOADED_MODELS 2`, then restart Ollama and the bot. The bot's start-up lines then include "chat model qwen3:1.7b". If it says the model "keeps thinking", run `npm run setup` and take the model it offers. |
 | `Failed to verify username` | That server checks Microsoft accounts. Use the test server from step 4, or see SETUP.md step 2 for other servers. |
 | `Kicked: You are not white-listed` | On your test server, type `whitelist add Wanderer` in the server window. |
 | It doesn't answer in chat | Say its name in the message. |

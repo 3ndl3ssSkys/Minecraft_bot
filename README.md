@@ -52,6 +52,7 @@ To update it, run `git pull` and then `npm install`. Your `config.local.json` an
 ## Configuring it
 
 - **`config.local.json`** holds your settings. `npm run setup` writes it, and you can edit it by hand. Anything in it overrides the defaults in `config.json` (don't edit that one; it's regenerated). Every option and its default is listed in `DEFAULT_CONFIG` at the top of `index.js`.
+- **Without editing JSON:** `npm run set -- llm.fastModel qwen3:1.7b` writes one setting into `config.local.json` (it makes the section if it's missing and checks the name). `npm run set -- llm.fastModel` shows the current value; `--remove` goes back to the default. When the bot starts, it warns about any setting in your files it doesn't know, with a guess ("fastModel" isn't a setting; did you mean llm.fastModel?). It also says where a broken file is broken (line and column).
 - **In game**, `!set <key> <value>` changes many settings live, and they're remembered until `!settings reset` ([Live settings](#commands)).
 - **[CONFIGURING.md](CONFIGURING.md)** explains, with examples:
   - goals, feelings and personality (or the presets in `personalities/`: friendly, grumpy-miner, hype-builder, shy-explorer, anarchist);
@@ -197,7 +198,7 @@ The bot runs alongside Ollama on any PC that can reach the Minecraft server; it 
   - `llm.keepAlive: "24h"` stops reloads;
   - `llm.think: false` turns off the slow "thinking" step of models like Qwen3.
 
-**Speed settings that matter most (put in `config.local.json`):** `{ "llm": { "model": "qwen3:4b", "think": false, "compactPrompt": true, "maxTokens": 300, "fastModel": "qwen3:1.7b" } }`. A 7B model with the full prompt and no fast model takes 15-20 s per decision. Run `ollama pull qwen3:4b` and `ollama pull qwen3:1.7b`, and set `OLLAMA_MAX_LOADED_MODELS=2`.
+**Speed settings that matter most (in `config.local.json`):** `{ "llm": { "model": "qwen3:4b-instruct", "think": false, "compactPrompt": true, "maxTokens": 300, "fastModel": "qwen3:1.7b" } }`. A 7B model with the full prompt and no fast model takes 15-20 s per decision. Run `ollama pull qwen3:4b-instruct` and `ollama pull qwen3:1.7b`, set `OLLAMA_MAX_LOADED_MODELS=2`, and `npm run set -- llm.fastModel qwen3:1.7b`. Not plain `qwen3:4b`: in Ollama that's a thinking-only version that reasons for pages before every answer.
 
 **Smarter and faster on a small model:** set `llm.fastModel` (`qwen3:1.7b`) and `OLLAMA_MAX_LOADED_MODELS=2` so chat never waits for a decision (without it, a chat reply now cancels a running decision and the decision restarts after). The decision prompt asks for fewer tokens, the model can promise up to 2 follow-up actions that run without asking again (`next`), a fresh goal is kept for 2 minutes, and its previous thought is fed back to it. A 4B model cannot know real-world events: for that use a hosted model as `fastModel` (see below).
 
