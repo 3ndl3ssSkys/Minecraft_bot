@@ -214,7 +214,7 @@ You can also put the whole object inline: `"personality": { "name": "...", ... }
 - **`mind.thinkLike`:** a free-text role model ("a speedrunner", "a cautious farmer").
 - **`mind.playstyle`:** one of `balanced`, `survivalist`, `builder`, `explorer`, `fighter`, `helper`, `trader` or `miner`.
 - **`priorities`:** above 1 matters more, below 1 less, 0 not at all.
-- **`riskTolerance`** and **`curiosity`:** 0-1.
+- **`riskTolerance`** and **`curiosity`:** 0-1. `riskTolerance` also sets how much of its health it will bet on a fight it wants (threat.js): 0.2 backs off from anything close, 0.9 takes on a group of zombies with a stone sword.
 - **`instructions`:** standing rules it always follows.
 - **In game:** `!mind like a speedrunner`, `!mind style explorer`, `!mind risk 0.2`, `!mind curious 0.9`, `!mind add always sleep at night`, `!mind clear`.
 
@@ -244,6 +244,7 @@ You can also put the whole object inline: `"personality": { "name": "...", ... }
 - **`network.public`:** `auto` (detects minigame networks) / `true` / `false`.
 - **`network.acceptInvites`:** follow its owners' party, friend and teleport invites by itself.
 - **`network.inviteVia`:** `auto` (Java: the clickable or named command, menus if that fails; Bedrock: menus), `chat`, or `menu`.
+- **`network.discoverCommands`:** after joining, ask the server which commands exist (like typing "/" and looking at the list). On by default; the flying-squid test server crashes on it, so test configs turn it off.
 - **`chat.publicChat`:** `auto` = no public chat on networks; `true`/`false` to force it.
 
 **In-game voice chat** (`svc`, Simple Voice Chat):

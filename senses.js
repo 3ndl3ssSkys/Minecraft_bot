@@ -24,6 +24,9 @@
  */
 
 const { Vec3 } = require('vec3')
+const { facePoints } = require('./reach')
+
+const BLOCK_NORMALS = [new Vec3(0, 1, 0), new Vec3(0, -1, 0), new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1)]
 
 /** Ways of perceiving that count as actually seeing something. */
 const SEEN = new Set(['sight', 'close', 'armor', 'swirls', 'tracked', 'tracked (invisible)', 'name tag through wall'])
@@ -124,7 +127,7 @@ class Senses {
     bot.on('blockBreakProgressObserved', (block, stage, entity) => {
       if (!this.cfg.particles || !bot.entity || stage !== 1 || !block?.position) return
       const center = block.position.offset(0.5, 0.5, 0.5)
-      if (center.distanceTo(bot.entity.position) > 20 || !this.canSee(bot, center)) return
+      if (center.distanceTo(bot.entity.position) > 20 || !this.canSeeBlock(bot, block.position)) return
       const miner = entity && this.perceive(bot, 48).some((p) => p.entity === entity && SEEN.has(p.how))
       const entry = { at: Date.now(), name: 'cracks', text: `cracks spreading on ${block.name.replace(/_/g, ' ')} (someone mining)`, pos: block.position, source: miner ? entity.username || entity.name : null, explained: Boolean(miner) }
       this.seen.push(entry)
@@ -162,6 +165,43 @@ class Senses {
     } catch {
       return true
     }
+  }
+
+  /**
+   * Can it see any part of a block? A face counts if a line from the eyes reaches a point on it with nothing opaque
+   * in between (glass and leaves don't hide it). The block's own face is the target, so the ray stopping there is
+   * a sighting, not an obstruction.
+   */
+  canSeeBlock (bot, pos) {
+    const eye = bot.entity.position.offset(0, bot.entity.eyeHeight ?? 1.62, 0)
+    const opaque = (b) => b.boundingBox === 'block' && !SEE_THROUGH.test(b.name)
+    for (const n of BLOCK_NORMALS) {
+      const centre = pos.offset(0.5 + n.x * 0.5, 0.5 + n.y * 0.5, 0.5 + n.z * 0.5)
+      if (eye.minus(centre).dot(n) <= 0.01) continue // the far side
+      for (const p of facePoints(pos, n)) {
+        const d = p.minus(eye)
+        const dist = d.norm()
+        if (dist < 0.5) return true
+        let hit
+        try { hit = bot.world.raycast(eye, d.scaled(1 / dist), dist + 0.05, opaque) } catch { return true }
+        if (!hit || hit.position.equals(pos)) return true
+      }
+    }
+    return false
+  }
+
+  /** How much of an entity it can see: the share of points on its body (head, middle, feet, sides) in line of sight. */
+  visibleShare (bot, e) {
+    const h = e.height || 1
+    const w = (e.width || 0.6) * 0.45
+    const eye = bot.entity.position.offset(0, bot.entity.eyeHeight ?? 1.62, 0)
+    const side = new Vec3(-(e.position.z - eye.z), 0, e.position.x - eye.x)
+    const len = Math.hypot(side.x, side.z) || 1
+    const s = side.scaled(w / len)
+    const pts = [e.position.offset(0, h * 0.85, 0), e.position.offset(0, h * 0.5, 0), e.position.offset(0, 0.2, 0), e.position.offset(0, h * 0.5, 0).plus(s), e.position.offset(0, h * 0.5, 0).minus(s)]
+    let seen = 0
+    for (const p of pts) if (this.canSee(bot, p)) seen++
+    return seen / pts.length
   }
 
   /** Angle (radians) between where the bot looks and a point. */
@@ -268,6 +308,7 @@ class Senses {
       if (d > radius) continue
       const head = e.position.offset(0, (e.height || 1) * 0.85, 0)
       let how = null
+      let partial = false
       const invisible = this.isInvisible(e)
       if (!realistic || throughWalls) how = invisible ? 'tracked (invisible)' : 'tracked'
       else if (d <= 1.6) how = 'close'
@@ -276,9 +317,12 @@ class Senses {
         const inFront = d <= 8 && this.angleTo(bot, head) < 0.6
         if (gear && this.canSee(bot, head)) how = 'armor'
         else if (inFront && this.hasSwirls(bot, e) && this.canSee(bot, head)) how = 'swirls'
-      } else if (d <= 3 || this.canSee(bot, head) || this.canSee(bot, e.position.offset(0, 0.2, 0))) {
-        // Things far away at the edge of attention can go unnoticed by weaker players.
-        how = d < 12 || Math.random() < attention + 0.3 ? 'sight' : null
+      } else {
+        // Any part of it counts: a zombie's legs under a leaf, a head over a wall. Barely visible and far away is
+        // easier to miss, more so for weaker players.
+        const share = d <= 3 ? 1 : this.visibleShare(bot, e)
+        if (share > 0) how = d < 12 || Math.random() < attention + 0.3 + share * 0.3 ? 'sight' : null
+        if (how && share < 0.5) partial = true
       }
       // Vanilla draws players' name tags through walls unless they sneak.
       if (!how && e.type === 'player' && !invisible && !e.crouching && d <= 64 && this.tagAllowed(bot, e.username)) how = 'name tag through wall'
@@ -291,7 +335,7 @@ class Senses {
         const tag = this.readTag(bot, e, how, d)
         const prev = this.lastSeen.get(e.id)
         this.lastSeen.set(e.id, { at: Date.now(), pos: e.position.clone(), name: e.username || e.name, identified: Boolean(tag?.name) || prev?.identified, tag })
-        out.push({ entity: e, how, invisible, tag, identified: e.type !== 'player' || Boolean(tag?.name) || Boolean(prev?.identified && Date.now() - prev.at < 3000) })
+        out.push({ entity: e, how, invisible, tag, partial, identified: e.type !== 'player' || Boolean(tag?.name) || Boolean(prev?.identified && Date.now() - prev.at < 3000) })
       }
     }
     // Things we lost sight of a moment ago: remembered position.

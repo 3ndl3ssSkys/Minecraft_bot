@@ -74,7 +74,7 @@ function review (decision, v) {
       return {
         code: 'ALREADY_HAVE',
         message: STATIONS.test(item)
-          ? `You already carry ${have} ${nice(item)}${have > 1 ? 's' : ''}, and one is all anyone needs: it is reused forever. craftItem and smeltItem place it by themselves when a recipe needs it. Make the thing you wanted it for instead.`
+          ? `You already carry ${have} ${nice(item)}${have > 1 ? 's' : ''}, and one is all anyone needs: it is reused forever. craftItem and smeltItem place it by themselves when a recipe needs it. Make the thing you wanted it for instead${nextTool(inv) ? `: probably craftItem ${nextTool(inv)}` : ''}.`
           : `You already have ${have} ${nice(item)}${have > 1 ? 's' : ''}; one is enough. Do something with it, or move on to the next step.`
       }
     }
@@ -151,7 +151,21 @@ function carryHints (inv, items) {
   if (stations.length) out.push(`You carry ${stations.map((n) => `${inv[n]} ${nice(n)}`).join(' and ')}: never craft another; craftItem/smeltItem place it when needed.`)
   const best = ['pickaxe', 'axe', 'sword', 'shovel'].map((k) => bestOf(items, k)).filter(Boolean)
   if (best.length) out.push(`Your best tools: ${best.map((b) => `${nice(b.name)}${b.left < 0.15 ? ' (almost broken: make a new one)' : ''}`).join(', ')}. Don't craft worse ones.`)
+  const next = nextTool(inv)
+  if (next) out.push(`Next step for your tools: craftItem ${next} (you have what it takes; the table is placed for you).`)
   return out
 }
 
-module.exports = { review, carryHints, KEEP_ONE, TOOL, ARMOR, TIER, bestOf }
+/** The pickaxe a player would make next from what it carries (for "make the thing you wanted it for"). */
+function nextTool (inv) {
+  const has = (re) => Object.keys(inv).some((n) => re.test(n) && inv[n] > 0)
+  const count = (re) => Object.entries(inv).filter(([n]) => re.test(n)).reduce((a, [, c]) => a + c, 0)
+  if (has(/_pickaxe$/)) {
+    if (!has(/^(stone|iron|diamond|netherite)_pickaxe$/) && count(/^(cobblestone|cobbled_deepslate|blackstone)$/) >= 3) return 'stone_pickaxe'
+    if (!has(/^(iron|diamond|netherite)_pickaxe$/) && (inv.iron_ingot || 0) >= 3) return 'iron_pickaxe'
+    return ''
+  }
+  return count(/_planks$/) >= 3 || count(/(_log|_stem)$/) >= 1 ? 'wooden_pickaxe' : ''
+}
+
+module.exports = { review, carryHints, nextTool, KEEP_ONE, TOOL, ARMOR, TIER, bestOf }

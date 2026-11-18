@@ -365,7 +365,8 @@ const DEFAULT_CONFIG = {
     public: 'auto', // auto (detect a minigame network from the scoreboard, named hotbar items, tab list) | true | false
     acceptInvites: true, // accept party / friend / teleport invites from its owners by itself
     inviteVia: 'auto', // auto (Java: the clickable or named command, menus if that fails; Bedrock: menus) | chat | menu
-    pvpGames: true // in PvP minigames (duels, SkyWars, Bed Wars...) fight the other side by itself once the game is on
+    pvpGames: true, // in PvP minigames (duels, SkyWars, Bed Wars...) fight the other side by itself once the game is on
+    discoverCommands: true // ask the server which commands exist (tab-complete) after joining, like typing "/" and looking
   },
   // Being a decent member of a server (etiquette.js): rules people set, and leaving farms, pens, pets and towns alone.
   etiquette: {
@@ -874,7 +875,7 @@ class Perception {
       if (!block) return
       const dist = bot.entity.position.distanceTo(pos)
       const k = `${pos.x},${pos.y},${pos.z}`
-      let visible = dist <= 3 || this.agent.senses.canSee(bot, pos.offset(0.5, 0.5, 0.5))
+      let visible = dist <= 3 || this.agent.senses.canSeeBlock(bot, pos)
       if (visible) this.blockMemory.set(k, { name: block.name, at: Date.now() })
       else if (realistic) {
         const m = this.blockMemory.get(k)
@@ -975,7 +976,7 @@ class Perception {
     const { bot } = this
     if (!this.signCache || Date.now() - this.signCache.at > 6000) {
       const list = this.agent.containers.signsNear(bot, bot.entity.position.floored(), 10, 8)
-        .filter((sg) => this.agent.senses.canSee(bot, sg.pos.offset(0.5, 0.5, 0.5)))
+        .filter((sg) => this.agent.senses.canSeeBlock(bot, sg.pos))
         .slice(0, 5)
         .map((sg) => `(${sg.pos.x}, ${sg.pos.y}, ${sg.pos.z}): "${sg.text}"`)
       this.signCache = { at: Date.now(), list }
@@ -1074,6 +1075,7 @@ class Perception {
         feelings: emotions.describe(),
         ...this.agent.tasks.statusForPrompt(),
         danger: this.agent.dangerLevel(),
+        threats: (() => { const l = threat.describe(this.agent.threat()); return l.length ? l : undefined })(), // per creature: danger, worth, verdict
         combatKit: combat.describeKit(bot),
         building: this.agent.builder.current ? building.describePlan(this.agent.builder.current) : null,
         knownContainers: this.agent.containers.nearest(e.position),
@@ -1247,6 +1249,7 @@ class OllamaClient {
         if (!content) throw Object.assign(new Error(`${who} returned an empty message.`), { retryable: true })
         const parsed = parseJsonLoose(content)
         this.log.debug(`${label}: ${Date.now() - started}ms, ${data.eval_count ?? data.usage?.completion_tokens ?? '?'} tokens${job.lane === 'fast' ? ' (fast model)' : ''}`)
+        if (!openai) this.noteTiming(job, data, Date.now() - started)
         return parsed
       } catch (err) {
         if (job.preempted && job.ctrl?.signal.aborted) { job.preempted = false; throw Object.assign(new Error('preempted'), { preempted: true }) }
@@ -1262,6 +1265,36 @@ class OllamaClient {
       throw new Error(openai ? `Cannot reach the LLM API at ${url}.` : `Cannot reach Ollama at ${url}. Is "ollama serve" running?`)
     }
     throw lastErr
+  }
+
+  /**
+   * Where the time goes, from Ollama's own numbers: one line per decision ("thought 4.1 s: read 820 new tokens, wrote
+   * 95"), and a one-time explanation when something fixable is slowing it down (model reloads, the prompt cache wiped
+   * by chat replies on the same model, a model spilling onto the CPU).
+   */
+  noteTiming (job, data, ms) {
+    const s = (ns) => (Number(ns) || 0) / 1e9
+    const read = data.prompt_eval_count || 0
+    const wrote = data.eval_count || 0
+    const writeTps = wrote / Math.max(0.001, s(data.eval_duration))
+    const lane = this.lanes[job.lane] || {}
+    const prev = lane.lastLabel
+    lane.lastLabel = job.label
+    this.timings ||= { decisions: 0, coldAfterChat: 0, warned: new Set() }
+    const t = this.timings
+    const warn = (key, text) => { if (!t.warned.has(key)) { t.warned.add(key); this.log.warn(text) } }
+    if (s(data.load_duration) > 1.5 && (lane.requests = (lane.requests || 0) + 1) > 1) {
+      warn('reload', `Ollama had to load the model again (${s(data.load_duration).toFixed(1)} s): something pushed it out of the graphics card. ${this.cfg.fastModel ? 'With two models, set OLLAMA_MAX_LOADED_MODELS=2 and make sure both fit (ollama ps).' : 'Check that nothing else uses Ollama, and that OLLAMA_KEEP_ALIVE / llm.keepAlive is long.'}`)
+    }
+    if (wrote >= 20 && writeTps < 12) warn('cpu', `The model writes only ${writeTps.toFixed(0)} tokens/s: it's probably partly on the CPU. Run "ollama ps" while the bot runs: it should say 100% GPU. A smaller model (npm run setup) fixes that.`)
+    if (job.label !== 'decision') return
+    t.decisions++
+    const cold = read > 1500 && prev && prev !== 'decision'
+    if (cold) t.coldAfterChat++
+    if (!this.cfg.fastModel && t.coldAfterChat >= 3) {
+      warn('evict', 'Chat replies on the same model wipe its memory of the decision prompt, so the next decision reads it all again (seconds each time). Faster: set llm.fastModel to "qwen3:1.7b" in config.local.json (plus OLLAMA_MAX_LOADED_MODELS=2), or OLLAMA_NUM_PARALLEL=2.')
+    }
+    this.log.info(`Thought for ${(ms / 1000).toFixed(1)} s (read ${read} new tokens${cold ? ', the cache was wiped by a chat reply' : ''}, wrote ${wrote}${wrote ? ` at ${writeTps.toFixed(0)}/s` : ''})`)
   }
 
   async healthCheck () {
@@ -1512,10 +1545,11 @@ ${mindBlock(agent)}
 
 ## How you play
 - Each turn: you get the state JSON and choose ONE action; its result comes next turn. Use exact coordinates, names and entity ids from the state, never invented ones. If an action failed, read the error and try something different.
-- Keep "thought" under 20 words. Play like a real survival player: wood → tools → stone → ores, food, armor, shelter. Once you have enough of something (status.hints says when), move on to the next step; never keep collecting what you already have plenty of. Eat when hungry, avoid lava, deep falls and status.dangerZonesNearby, be careful at night, sleep in beds. Your body handles falls, lava and sudden hits by itself.
+- Keep "thought" under 12 words (every word you write costs time). Play like a real survival player: wood → tools → stone → ores, food, armor, shelter. Once you have enough of something (status.hints says when), move on to the next step; never keep collecting what you already have plenty of. Eat when hungry, avoid lava, deep falls and status.dangerZonesNearby, be careful at night, sleep in beds. Your body handles falls, lava and sudden hits by itself.
 - status.task is something you agreed to do for a player: work on it (items are handed over automatically once you have enough). taskUpdate.status: working, done (non-item tasks), gave_up (with a note) or none.
 - Goals (status.goals): overall → long-term → current goal → steps. Aim each action at the current step. Report goal, subgoal (the step you're on) and goalStatus: working, subgoal_done, goal_done, blocked or new_goal (you changed your mind; not for goals set for you). Urgent things are detours: name them as the goal with "working".
 - Your senses are realistic: you only know what's in nearbyEntities and status.senses. Odd sounds with nobody around → be careful and check it out.
+- status.threats sizes up each creature you see: its danger to you with your gear and health, whether fighting it is worth it, and a verdict (fight / hunt / avoid / flee / leave). Go with it unless you have a good reason: don't pick fights that aren't worth it, and don't run from ones you'd easily win.
 - Be a good guest: don't break other players' builds, never take from someone's private chest (inspectContainer tells you whose it is), follow rules on signs and in chat.
 - People: nearbyEntities shows your trust in each player and how they seem. Generous with friends, guarded with strangers, keep away from people who hurt you. Fight players only if they attack you or ask for a duel (sparring: true).
 - layout tells you the shape of the place (outdoors/underground, blocked sides, drop-offs, doors, darkness). Walking uses doors by itself and only digs through natural blocks when there's no easier way, never through other players' builds.
@@ -1555,6 +1589,7 @@ ${mindBlock(agent)}
 - To get an item (tools, armor, food, torches, materials), use obtainItem: it does the whole chain itself (wood, tools, mining, crafting, smelting, hunting) much faster than you choosing each step. Use mineBlock/craftItem only for a single specific step.
 - Use the game's systems: smelt ores and cook food (smeltItem), store loot in chests (status.knownContainers remembers what's where), sleep in a bed at night, open doors, fish, and useItem for potions, pearls, buckets, bone meal and the like. If you're unsure how something works or how to get an item, use knowledge — but you only know what a player of your skill knows; otherwise experiment or ask.
 - Your senses are realistic: nearbyEntities is what you can see or hear ("perceived" says how; "last seen" means it went out of sight). status.senses lists sounds and particles; "source unseen" means you can't see what made it. If something sounds wrong (footsteps, a chest opening, mining, with nobody visible), be cautious and check it out — less so if you know other players are around.
+- status.threats sizes up each creature you see: its danger to you with your gear and health, whether fighting it is worth it (drops you want, food, it will chase you anyway, protecting someone) or not (neutral mobs you'd only provoke, animals you don't need, protected farms and pets), and a verdict (fight / hunt / avoid / flee / leave). Go with it unless you have a good reason: don't pick fights that aren't worth it, and don't run from ones you'd easily win.
 - Name tags: you know who a player is only from their name tag ("unknown player" = you can't read it — they're invisible, too far, or their tag is hidden). Tags show through walls unless the player sneaks, so "name tag through wall" means you know they're there. A nameTag field shows ranks or prefixes like [Admin] and the names of named mobs and pets; "tamed" means it has a collar (someone's pet).
 - Read signs (status.signs, readSigns): they tell you whose place it is, rules, and directions. Chests: inspectContainer tells you whose chest it is (yours, community, someone's private chest, unlooted or looted loot chest). Never take from other players' private chests; loot chests and community chests are fine (take fairly from community ones).
 - On other people's servers be a good guest: don't break or dig through other players' builds, don't take their things, and follow any rules you see in chat or on signs.
@@ -2001,8 +2036,28 @@ ${speaker}'s latest message${said.length > 1 ? 's' : ''}: ${said.map((m) => `"${
     emotions.fromLabel(out.emotion, out.emotionIntensity)
     // A promise is something THEY say they will do ("I'll bring you iron"): an instruction to us ("you need to place a table") is not one.
     if (out.promise?.made && !/\b(i|i'll|ill|i will|i'm|im|i am|i can|let me|we'll)\b/i.test(said.join(' '))) out.promise = { ...out.promise, made: false }
+    const text = said.join(' ')
+    const inCharge = ['owner', 'admin'].includes(social.role(speaker))
+    if (!INSULT.test(text)) {
+      // Being told what to do, or how to do it ("staircase instead"), isn't rudeness, least of all from someone in charge.
+      if (Number(out.trustImpact) < 0) out.trustImpact = inCharge ? 0 : Math.max(-1, Number(out.trustImpact))
+      if (inCharge && Number(out.likeImpact) < 0) out.likeImpact = 0
+      if (inCharge && ['rude', 'threatening', 'manipulative'].includes(out.playerIntent)) out.playerIntent = 'request'
+    }
     social.onChatAnalysis(speaker, out)
     memory.lastTalkedWith.set(speaker, Date.now())
+    // Directions the code can carry out itself ("mine down", "look for iron"): never lost to a misread.
+    const instruction = inCharge && !out.rule?.made ? instructionFromText(text) : null
+    if (instruction) {
+      const cur = tasks.active()
+      if (cur?.plan && cur.from === speaker && cur.plan.name === instruction.plan.name) {
+        // More detail on what it is already doing ("staircase instead", "look for iron while you're at it").
+        if (instruction.item && instruction.item !== cur.item) Object.assign(cur, { item: instruction.item, plan: instruction.plan, description: instruction.description, startCount: tasks.countItem(instruction.item) })
+        cur.lastProgressAt = Date.now()
+        return this.sayNaturally(speaker, `${speaker} said: "${text}". You're already on it (${cur.description}) and you'll do it that way. Say ok briefly, in character.`, whisper)
+      }
+      return this.handleRequest(speaker, { ...(out.request || {}), ...instruction }, { whisper, message: text, dangerNote })
+    }
     const recalled = out.remindsOfTask ? tasks.recall(speaker) : null
 
     if (out.rule?.made && (out.rule.what || out.rule.acts?.length)) return this.handleRule(speaker, out.rule, { whisper, message: said.join(' ') })
@@ -2044,7 +2099,7 @@ ${speaker}'s latest message${said.length > 1 ? 's' : ''}: ${said.map((m) => `"${
     const agent = this.agent
     const { tasks, personality, bot, emotions, social, log } = agent
     // Asked for something it's already doing (or that is its own plan anyway)? Just say so: no new task, no dice roll.
-    const fit = tasks.alignment(speaker, rawReq)
+    const fit = rawReq.plan ? null : tasks.alignment(speaker, rawReq) // a direction the code carries out is always its own task
     if (fit) return this.answerAligned(speaker, fit, { whisper, message, dangerNote })
     const decision = tasks.appraise(speaker, rawReq)
     const req = decision.req
@@ -2795,6 +2850,7 @@ class EventReactor {
         .filter((e) => e !== bot.entity && e.kind === 'Hostile mobs' && e.position.distanceTo(bot.entity.position) < 6)
         .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0]
       if (mob) {
+        agent.lastMobHit = { id: mob.id, at: Date.now() }
         emotions.stimulate({ fear: 0.1, anger: 0.05 }, `a ${mob.name} is attacking you`)
         agent.reflexes?.onHurt({ attacker: mob, serious: true })
       } else if (agent.recentFallSpeed < -0.6) {
@@ -2979,6 +3035,52 @@ function armorTier (name) {
 }
 
 // Classified as hostile by minecraft-data, but they leave you alone unless provoked.
+const { NEEDS: ORE_PICKAXE } = require('./skills')
+const PICK_TIERS = ['wooden', 'stone', 'iron', 'golden', 'diamond', 'netherite']
+const ORE_ITEMS = { iron: 'raw_iron', gold: 'raw_gold', copper: 'raw_copper', diamond: 'diamond', coal: 'coal', redstone: 'redstone', lapis: 'lapis_lazuli', emerald: 'emerald' }
+const INSULT = /\b(idiot|stupid|dumb|moron|shut up|stfu|hate you|useless|trash|garbage|loser|kys|fuck(ing)? (you|off)|screw you|noob)\b/i
+
+/**
+ * A plain direction from someone in charge that the code can carry out by itself, so it never gets lost when the
+ * model reads it as small talk (or as rude): "mine down", "look for iron", "go find diamonds", "staircase down".
+ * Returns a request ({ kind, description, item, count, plan }) or null.
+ */
+function instructionFromText (text) {
+  const t = String(text || '').toLowerCase()
+  const oreWord = t.match(/\b(iron|diamonds?|gold|coal|redstone|lapis|copper|emeralds?)\b/)?.[1]
+  const ore = oreWord?.replace(/s$/, '')
+  const down = /\b(mine|dig|go|head|tunnel|stair ?case|stairs?)\b[^.!?]*\b(down|deeper|underground|below)\b|\bstair ?case\b|\b(strip|branch) ?min(e|ing)\b|\bgo mining\b/.test(t)
+  const seek = /\b(look|search|find|hunt|get|mine|dig|grab|collect|gather)\b/.test(t)
+  if (ore && (seek || down)) {
+    return { kind: 'other', description: `${down ? 'mine down and ' : ''}look for ${ore}`.slice(0, 80), item: ORE_ITEMS[ore], count: 3, effort: 'medium', risk: 'low', plan: { name: 'stripMine', args: { ore, minutes: 3 }, needs: `${ORE_PICKAXE[ore]}_pickaxe` } }
+  }
+  if (down) return { kind: 'other', description: 'mine down (staircase, like a player)', item: '', count: 0, effort: 'medium', risk: 'low', plan: { name: 'stripMine', args: { ore: 'iron', minutes: 3 }, needs: 'stone_pickaxe' } }
+  return null
+}
+
+const threat = require('./threat')
+
+/**
+ * The state without its empty parts (nulls, [], {}, "", false flags): the model reads every token of it before each
+ * decision, and "equipment: {hand: null, head: null, ...}" says nothing "you hold nothing" wouldn't. The inventory
+ * stays even when empty, because "you carry nothing" matters.
+ */
+function pruneState (v, key = '') {
+  if (Array.isArray(v)) { const a = v.map((x) => pruneState(x)).filter((x) => x !== undefined); return a.length ? a : undefined }
+  if (v === false) return key === 'ok' ? false : undefined // a failed action stays visible
+  if (v === null || v === undefined || v === '') return undefined
+  if (typeof v !== 'object') return v
+  const out = {}
+  for (const [k, val] of Object.entries(v)) {
+    const p = pruneState(val, k)
+    if (p !== undefined) out[k] = p
+  }
+  if (!Object.keys(out).length) return key === 'inventory' || key === 'items' ? {} : undefined
+  return out
+}
+const ARMOR_POINTS = { leather: [1, 3, 2, 1], golden: [2, 5, 3, 1], chainmail: [2, 5, 4, 1], iron: [2, 6, 5, 2], diamond: [3, 8, 6, 3], netherite: [3, 8, 6, 3], turtle: [2, 0, 0, 0] } // helmet, chestplate, leggings, boots
+const TIER_RANK = { wooden: 1, golden: 1, stone: 2, iron: 3, diamond: 4, netherite: 5 }
+
 const NEUTRAL_MOBS = new Set(['enderman', 'zombified_piglin', 'piglin', 'spider', 'bee', 'wolf', 'polar_bear', 'llama', 'goat', 'iron_golem'])
 
 class Brain {
@@ -3502,7 +3604,9 @@ ${said ? `${name} just said: ${said}
     const o = this.obtain
     const agent = this.agent
     const s = agent.perception?.latest
-    if (!o || !s || agent.dangerLevel() === 'high' || agent.tasks.active()) return null // danger and promises come first; it carries on afterwards
+    // Real danger comes first, it carries on afterwards. (A task the code can't plan, like "mine down" read by the model,
+    // isn't a reason to stall: tasks with their own steps already ran before this in the loop.)
+    if (!o || !s || agent.dangerLevel() === 'high') return null
     const { bot, memory, log, executor, recipes } = agent
     const inv = s.inventory.items
     const have = inv[o.item] || 0
@@ -3557,6 +3661,27 @@ ${said ? `${name} just said: ${said}
     const ask = people && chat.allows('tool') && recipes.canAsk(item) && Math.random() < chance
     const action = ask ? { name: 'askForHelp', args: { itemName: item } } : { name: 'experimentCrafting', args: { itemName: item, tries: 6 } }
     return { source: 'auto', thought: ask ? `I don't know how to make ${nice}; I'll ask.` : `I don't know how to make ${nice}; I'll try things out.`, emotion: 'curious', emotionIntensity: 4, action }
+  }
+
+  /**
+   * A task the code knows how to do (t.plan, e.g. stripMine for "mine down and look for iron"): first the pickaxe it
+   * needs (made the usual way, acquire.js), then the plan itself, again each turn until the task is done.
+   */
+  planStep (t) {
+    const { bot } = this.agent
+    const need = t.plan.needs
+    if (need) {
+      const tier = (n) => PICK_TIERS.indexOf(String(n).split('_')[0])
+      const best = Math.max(-1, ...bot.inventory.items().filter((i) => /_pickaxe$/.test(i.name)).map((i) => tier(i.name)))
+      if (best < tier(need)) {
+        t.prep ||= { item: need, count: 1, kind: 'craft' }
+        const step = this.acquireStep(t.prep)
+        if (step) return { ...step, why: `${step.why || `getting a ${need.replace(/_/g, ' ')}`} (first, for ${t.from}'s "${t.description}")` }
+        return null // can't work out how: the model decides, with the task in front of it
+      }
+    }
+    t.prep = null
+    return { name: t.plan.name, args: t.plan.args, why: `${t.from} asked: ${t.description}` }
   }
 
   /** The step toward a gather/craft task's exact item (see acquire.js), or null to let the model decide. */
@@ -3709,9 +3834,13 @@ ${said ? `${name} just said: ${said}
     if (!bot.entity || bot.isSleeping) return null
     const ready = (key, ms = 30000) => Date.now() - (this.reflexCooldowns.get(key) || 0) > ms
     const me = bot.entity.position
+    // Only what it actually perceives (or what is right on top of it): a zombie behind a wall isn't a reason to swing.
+    const perceived = new Set((safe(() => this.agent.senses.perceive(bot, 12)) || []).filter((p) => p.how !== 'memory').map((p) => p.entity.id))
     const hostiles = Object.values(bot.entities)
-      .filter((e) => e.kind === 'Hostile mobs' && e.isValid && e.position.distanceTo(me) < 10)
+      .filter((e) => e.kind === 'Hostile mobs' && e.isValid && e.position.distanceTo(me) < 10 && (perceived.has(e.id) || e.position.distanceTo(me) < 2))
       .sort((a, c) => a.position.distanceTo(me) - c.position.distanceTo(me))
+    const th = this.agent.threat()
+    const judged = (e) => th.list.find((x) => x.id === e?.id)
     const nearest = hostiles[0]
     const dist = nearest ? nearest.position.distanceTo(me) : Infinity
     const recentlyHurt = Date.now() - (this.agent.lastHurtAt || 0) < 5000
@@ -3762,14 +3891,28 @@ ${said ? `${name} just said: ${said}
       return make('keepAway', `${threat.username} is coming at me armed. Not sticking around.`, 'nervous', { name: 'retreat', args: { entityId: threat.id, distance: 14 } })
     }
 
-    if (nearest && (bot.health <= b.fleeHealthBelow || (nearest.name === 'creeper' && dist < 5)) && ready('flee', 5000)) {
+    // Sized up (threat.js): more than it can take with this gear and health → get away from the worst of it.
+    const worst = th.list.filter((x) => x.hostile && x.distance < 12 && bot.entities[x.id]).sort((a, c) => c.danger - a.danger)[0]
+    if (worst && th.verdict === 'flee' && ready('flee', 5000)) {
+      const many = th.list.filter((x) => x.hostile && x.distance < 12).length
+      return make('flee', many > 1 ? `Too many of them for what I've got — getting out of here.` : `That ${worst.name} is more than I can handle right now — getting away.`, 'scared', { name: 'retreat', args: { entityId: worst.id, distance: 16 } })
+    }
+    if (nearest && (bot.health <= b.fleeHealthBelow || (nearest.name === 'creeper' && dist < 5 && judged(nearest)?.verdict !== 'fight')) && ready('flee', 5000)) {
       return make('flee', `Too dangerous — getting away from the ${nearest.name}.`, 'scared', { name: 'retreat', args: { entityId: nearest.id, distance: 16 } })
     }
     // Neutral mobs are only fought back against, never engaged just for being close.
     const provoked = recentlyHurt && dist < 5
-    const tooClose = dist < 2.5 && !NEUTRAL_MOBS.has(nearest?.name) && !safe(() => this.agent.etiquette.protectedMob(nearest)) // a zombie in an iron farm stays put
-    if (b.selfDefense && nearest && nearest.name !== 'creeper' && (provoked || tooClose) && ready('defend', 5000)) {
-      return make('defend', `A ${nearest.name} is attacking me, fighting back!`, 'determined', { name: 'attackTarget', args: { entityId: nearest.id, maxSeconds: 15 } })
+    const view = judged(nearest)
+    // One worth fighting gets dealt with before it lands the first hit; others only when they're right there.
+    const reach = view?.verdict === 'fight' ? 4.5 : 2.5
+    const tooClose = dist < reach && view?.verdict !== 'leave' && view?.verdict !== 'avoid' && !NEUTRAL_MOBS.has(nearest?.name) && !safe(() => this.agent.etiquette.protectedMob(nearest)) // a zombie in an iron farm stays put
+    if (b.selfDefense && nearest && (nearest.name !== 'creeper' || view?.verdict === 'fight') && (provoked || tooClose) && ready('defend', 5000)) {
+      const why = view?.verdict === 'fight' && !provoked ? `A ${nearest.name} coming at me — I can take it.` : `A ${nearest.name} is attacking me, fighting back!`
+      return make('defend', why, 'determined', { name: 'attackTarget', args: { entityId: nearest.id, maxSeconds: 15 } })
+    }
+    // Not worth a fight (or too much for this gear) and getting close: keep away.
+    if (nearest && view?.verdict === 'avoid' && dist < 6 && !recentlyHurt && ready('avoid', 8000)) {
+      return make('avoid', `Not taking on that ${nearest.name} like this. Keeping my distance.`, 'nervous', { name: 'retreat', args: { entityId: nearest.id, distance: 10 } })
     }
     // Something odd we heard or saw with nobody around: go have a careful look.
     const inv = this.agent.investigation
@@ -3820,7 +3963,7 @@ ${said ? `${name} just said: ${said}
       { role: 'system', content: buildDecisionPrompt(agent, executor.describeTools(usesCompactPrompt(config))) },
       {
         role: 'user',
-        content: `Current state:\n${JSON.stringify(agent.promptState(state))}\n\n` +
+        content: `Current state:\n${JSON.stringify(pruneState(agent.promptState(state)))}\n\n` +
           `People you know (online):\n${social.peopleSummary(state.onlinePlayers.slice(0, 6)) || '- nobody else is online'}\n\n` +
           `What you've learned from experience:\n${learned.map((l) => `- ${l}`).join('\n') || '- nothing yet'}\n\n` +
           `${remembered.length ? `Things you remember (from earlier):\n${remembered.map((l) => `- ${l}`).join('\n')}\n\n` : ''}` +
@@ -3964,19 +4107,70 @@ class Agent {
     const feet = bot.blockAt(me)
     if (feet && /lava|fire/.test(feet.name)) return { level: 'high', reason: 'burning' }
     let medium = null
+    // Players who've hurt us: by being there.
     for (const e of Object.values(bot.entities)) {
-      if (e === bot.entity || !e.position) continue
+      if (e === bot.entity || !e.position || e.type !== 'player' || !this.social.isHostile(e.username)) continue
       const d = e.position.distanceTo(me)
-      const hostile = e.kind === 'Hostile mobs' || (e.type === 'player' && this.social.isHostile(e.username))
-      if (!hostile) continue
-      if (d < 6) return { level: 'high', reason: `a ${e.username || e.name} is right next to you` }
-      if (d < 14) medium = `a ${e.username || e.name} is nearby`
+      if (d < 6) return { level: 'high', reason: `${e.username} is right next to you` }
+      if (d < 14) medium = `${e.username} is nearby`
     }
+    // Creatures: by what they could actually do to it (a zombie against full iron is no emergency), and only ones it perceives.
+    const th = this.threat()
+    const close = th.list.filter((x) => x.hostile && x.distance < 6).sort((a, b) => b.danger - a.danger)[0]
+    if (th.verdict === 'flee' || (close && close.danger >= 0.25)) return { level: 'high', reason: close ? `a ${close.name} is right next to you` : 'too many monsters around' }
+    const near = th.list.find((x) => x.hostile && x.distance < 14)
+    if (!medium && near) medium = `a ${near.name} is nearby`
     if (medium || bot.health <= 10) return { level: 'medium', reason: medium || 'low on health' }
     return { level: 'none', reason: '' }
   }
 
   dangerLevel () { return this.dangerInfo().level }
+
+  /**
+   * Sizing up the creatures it perceives (not ones hidden behind walls): danger and worth per creature and a verdict
+   * (threat.js). Cached for half a second.
+   */
+  threat () {
+    const bot = this.bot
+    if (!bot?.entity) return { list: [], danger: 0, verdict: 'safe' }
+    if (this._threat && Date.now() - this._threat.at < 500) return this._threat.value
+    const me = bot.entity.position
+    const kit = safe(() => combat.readKit(bot)) || {}
+    const slots = ['head', 'torso', 'legs', 'feet'].map((d) => safe(() => bot.inventory.slots[bot.getEquipmentDestSlot(d)]?.name) || '')
+    const armor = slots.reduce((a, n, i) => a + (ARMOR_POINTS[n.split('_')[0]]?.[i] || 0), 0)
+    const foods = bot.registry.foodsByName || {}
+    const foodCount = bot.inventory.items().filter((i) => foods[i.name] && !/rotten|spider_eye|poisonous|pufferfish/.test(i.name)).reduce((a, i) => a + i.count, 0)
+    const weapon = kit.mace ? 'mace' : [kit.sword, kit.axe].filter(Boolean).sort((a, b) => (TIER_RANK[b.name.split('_')[0]] || 0) - (TIER_RANK[a.name.split('_')[0]] || 0))[0]?.name
+    const prof = this.intelligence.combatProfile()
+    const friends = Object.values(bot.players).filter((p) => p.entity && p.username !== bot.username && ['owner', 'admin', 'trusted'].includes(this.social.role(p.username)))
+    const hit = this.lastMobHit && Date.now() - this.lastMobHit.at < 15000 ? this.lastMobHit.id : null
+    const mobs = []
+    for (const p of safe(() => this.senses.perceive(bot, 24)) || []) {
+      const e = p.entity
+      if (!e?.position || e.type === 'player' || e.type === 'object' || e.type === 'orb' || !e.name || e.name === 'item') continue
+      if (!threat.MOBS[e.name] && e.kind !== 'Hostile mobs') continue
+      const near = friends.find((f) => f.entity.position.distanceTo(e.position) < 6)
+      mobs.push({
+        id: e.id,
+        name: e.name,
+        distance: e.position.distanceTo(me),
+        protected: safe(() => this.etiquette.protectedMob(e)) || null,
+        hurtMe: e.id === hit,
+        nearFriend: near?.username || null,
+        baby: Boolean(safe(() => e.metadata?.[16] === true))
+      })
+    }
+    const wants = new Set([this.tasks.active()?.item, this.brain?.obtain?.item].filter(Boolean))
+    const tod = bot.time?.timeOfDay ?? 6000
+    const value = threat.assess(mobs, {
+      health: bot.health, armor, weapon, shield: Boolean(kit.shield) && this.intelligence.can('shieldBlock', 'combat'), bow: Boolean(kit.bow || kit.crossbow), arrows: kit.arrows, skill: prof.skill, food: bot.food, foodCount, totem: Boolean(kit.totem)
+    }, {
+      wants, risk: this.config.mind.riskTolerance, fear: this.emotions.values?.fear || 0, aggression: this.emotions.modifiers().aggression,
+      day: tod < 12500 || tod > 23500, wearingGold: slots.some((n) => /^golden_/.test(n))
+    })
+    this._threat = { at: Date.now(), value }
+    return value
+  }
 
   /** survival | creative | adventure | spectator, as the server says. */
   gameMode () { return this.bot?.game?.gameMode || 'survival' }
@@ -4568,4 +4762,4 @@ function main () {
 
 if (require.main === module) main()
 
-module.exports = { Agent, Brain, ChatResponder, Perception, ChatManager, EventReactor, OllamaClient, loadConfig, deepMerge, parsePluginChat, loginFor, fallbackServer, serverMods, errText, stripThinking, sampleDecisionPrompt, usesCompactPrompt, DEFAULT_CONFIG }
+module.exports = { Agent, Brain, ChatResponder, Perception, ChatManager, EventReactor, OllamaClient, loadConfig, deepMerge, parsePluginChat, loginFor, fallbackServer, serverMods, errText, stripThinking, sampleDecisionPrompt, usesCompactPrompt, instructionFromText, pruneState, DEFAULT_CONFIG }

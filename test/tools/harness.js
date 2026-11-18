@@ -3,7 +3,7 @@
  * Live scenario checks against a test server (drives the real Agent by hand).
  *
  *   node test/tools/harness.js <scenario> <config.json>
- *   scenarios: typing | sight | hearing | nametags | fall | startle
+ *   scenarios: typing | sight | hearing | nametags | fall | startle | place
  *   (fall: LEVEL=mediocre|complicated|... picks the intelligence level)
  *
  * Setup: start test/tools/test-server.js, then this harness, then
@@ -60,6 +60,21 @@ async function buildWall (bot, target) {
 }
 
 const scenarios = {
+  // Placing like a player: never through leaves. A table is asked for behind a leaf wall: it walks to where it can see
+  // the spot (or says it can't); then it crafts at a table it can reach.
+  async place (bot) {
+    const p = bot.entity.position.floored()
+    for (const item of ['crafting_table 2', 'oak_planks 8', 'stick 4']) { bot.chat(`/give ${bot.username} ${item}`); await wait(400) }
+    for (const dz of [-1, 0, 1]) for (const dy of [0, 1, 2]) { bot.chat(`/setblock ${p.x + 2} ${p.y + dy} ${p.z + dz} oak_leaves`); await wait(120) }
+    await wait(1500)
+    console.log('leaves at x+2:', bot.blockAt(p.offset(2, 0, 0))?.name, '| holding', bot.inventory.items().map((i) => `${i.count} ${i.name}`).join(', '))
+    const target = p.offset(3, 0, 0)
+    const r = await agent.executor.execute('placeBlock', { blockType: 'crafting_table', x: target.x, y: target.y, z: target.z })
+    const me = bot.entity.position
+    console.log('place behind the leaves →', r.ok ? 'ok' : r.code, '|', r.message, '| stood at', me.floored().toString(), '| table there:', bot.blockAt(target)?.name)
+    const c = await agent.executor.execute('craftItem', { itemName: 'wooden_pickaxe', count: 1 })
+    console.log('craft wooden pickaxe →', c.ok ? 'ok' : c.code, '|', c.message)
+  },
   // Does the bot stand still while it types? Samples distance travelled.
   async typing (bot) {
     const start = bot.entity.position.clone()

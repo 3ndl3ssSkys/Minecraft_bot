@@ -610,6 +610,52 @@ It also had a stray line that reset the autopilot after nearly every action. Tha
 - It now starts with "What it does" (grouped), "Using it" (setup, doctor, start commands, talking to it, `!` commands, updating), "Configuring it" (`config.local.json`, `!set`, CONFIGURING.md, profiles, environment variables) and a table of the other documents.
 - Troubleshooting entries for `socketClosed` were added to the README and START-HERE.
 
+## 28. Underground: what it can see and reach, sizing up mobs, owner directions, speed
+
+**Asked (with a log from a real session underground on the local server):**
+- It placed a crafting table on the other side of tree leaves, and interacts with things it can't see.
+- It should recognise things that are in sight range, not only straight ahead.
+- It should judge the danger and the reasons to fight for the creatures around it.
+- It takes a long time to think.
+- The log: obtainItem cobbled_deepslate repeated with "planning every step myself" and nothing happening; "mine down please", "look for iron", "staircase instead…" ignored; trust 79 → 76 "was rude to you"; mineBlock without a pickaxe failing after two minutes; a fourth crafting table "to make tools".
+
+**Found:**
+- **Block sight was broken:** the sight ray went to a block's centre and hit the block's own face, so beyond 3 blocks only leaves and glass ever counted as seen. Distant logs, ores, tables and signs were unknown unless it had been close.
+- Placing, opening and using had no line-of-sight check at all.
+- `obtainStep` refused to run while any task was active or while any hostile mob within 6 blocks existed, including ones behind walls. Underground that is nearly always, so the plan never ran and the model ordered it again.
+- The chat analysis read the owner's directions as rude, so no task and no reply. Nothing caught that.
+- The flying-squid test server crashes on the bot's tab-complete and then stops sending it chat, which hid chat problems in tests.
+
+**Built:**
+- **Sight:** `canSeeBlock` uses points on the faces turned towards it. `visibleShare` samples five points on a creature's body; partly visible counts. With realistic sight, mineBlock skips blocks sealed in rock.
+- **`reach.js` (clicking like a crosshair):**
+  - placing picks a support face it can see, else walks to one (GoalPlaceBlock with LOS), else NOT_IN_VIEW; `placeNearby` tries visible spots first;
+  - opening, using and crafting tables go through `goNextTo` (GoalLookAtBlock) and click the visible face;
+  - crafting puts down its own table when the nearest one can't be reached;
+  - mining digs the visible face and punches through leaves or grass in the way.
+- **`threat.js`:** danger (expected share of health lost, from mob stats against weapon, armour, shield, skill, totem and knockback) and worth (drops wanted, food, it'll chase anyway, protecting friends, revenge; minus provoking neutral mobs, unneeded animals, babies, protected mobs).
+  - Verdicts per creature and for the group go into `status.threats`.
+  - The reflexes use them: flee, deal early with one worth fighting, avoid. So does `dangerInfo`.
+  - Only perceived mobs count.
+- **Owner directions:**
+  - `instructionFromText` turns mining directions into a task with a code plan (pickaxe for that ore first via acquire, then stripMine). Follow-ups refine the running task.
+  - Directions without insults never cost trust or liking from owners and admins, and at most -1 trust from others.
+  - The obtain guard no longer stalls on tasks, and its danger check is the real threat.
+  - mineBlock fails at once without a harvesting tool and names the obtainItem to use. The crafting-table guard and hints name the next pickaxe to make.
+- **Speed:**
+  - Each decision logs `Thought for X s (read N new tokens, wrote M at T/s)`.
+  - One-time warnings: chat replies wiping the cache (suggests fastModel or OLLAMA_NUM_PARALLEL), model reloads, a model on the CPU.
+  - The state sent to the model drops empty fields, and the thought is under 12 words.
+- `network.discoverCommands` (default on; test configs off).
+
+**Tested:**
+- Unit tests: `sight.test.js`, `threat.test.js`, `instructions.test.js`.
+- Live on flying-squid 1.21.4:
+  - the owner's three directions with the mock misreading them as rude gave a task "look for iron" with stripMine after a stone pickaxe, a reply, and unchanged trust;
+  - a table asked for behind a leaf wall was placed after walking to a spot with a clear view.
+
+**Not verified:** real decision timings on the user's PC (the new log line will show them); stripMine and fights against real mobs on Paper.
+
 ## Where it stands now
 
 **Next for the user:**

@@ -48,7 +48,9 @@ http.createServer((req, res) => {
       const last = user.slice(user.lastIndexOf('latest message'))
       const req = /get me|bring|gather/i.test(last) ? { ...none, kind: 'gather', description: 'get some dirt', item: 'dirt', count: 5, effort: 'small' }
         : /come here/i.test(last) ? { ...none, kind: 'come', description: 'come over', effort: 'trivial' } : null
-      out = { reply: req ? '' : 'hey!', emotion: 'happy', emotionIntensity: 5, playerEmotion: 'friendly', playerIntent: req ? 'request' : 'friendly', trustImpact: 0, likeImpact: 1, remindsOfTask: false, isRequest: Boolean(req), request: req || none, promise: noPromise }
+      // Like the real small model once did: mining directions read as rude chat instead of a request.
+      const bossy = !req && /mine down|staircase|look for/i.test(last)
+      out = { reply: req || bossy ? '' : 'hey!', emotion: 'happy', emotionIntensity: 5, playerEmotion: bossy ? 'annoyed' : 'friendly', playerIntent: req ? 'request' : bossy ? 'rude' : 'friendly', trustImpact: bossy ? -3 : 0, likeImpact: bossy ? -2 : 1, remindsOfTask: false, isRequest: Boolean(req), request: req || none, promise: noPromise }
     } else if (props.includes('lesson')) {
       out = { lesson: '' }
     } else {

@@ -129,6 +129,7 @@ class TaskManager {
       effort: EFFORTS.includes(raw.effort) ? raw.effort : 'medium',
       risk: RISKS.includes(raw.risk) ? raw.risk : 'low'
     }
+    if (raw.plan?.name) req.plan = { name: raw.plan.name, args: { ...(raw.plan.args || {}) }, needs: raw.plan.needs || '' } // the code knows how to do it
     if (['gather', 'craft', 'give_item'].includes(kind) && !req.count) req.count = 1
     if (['come', 'follow', 'protect'].includes(kind) && !req.target) req.target = from
     if (req.target.toLowerCase() === 'me') req.target = from
@@ -410,6 +411,8 @@ class TaskManager {
       count: req.count,
       target: req.target,
       sparring: Boolean(req.sparring),
+      plan: req.plan || null,
+      planRuns: 0,
       effort: req.effort,
       minutes: req.minutes,
       commitCount: decision.commitCount ?? req.count,
@@ -633,6 +636,11 @@ class TaskManager {
       const item = bot.inventory.items().find((i) => i.name === t.item || i.name.includes(t.item))
       return this.forced(t, `bringing ${t.from} their ${t.item}`, { name: 'giveItem', args: { playerName: t.from, itemName: item?.name || t.item, count: Math.min(owed, have) } })
     }
+    // Something the code knows how to do (stripMine for "mine down" / "look for iron"): get the tool it needs first, then do it.
+    if (t.plan && t.status === 'active' && this.agent.brain?.planStep) {
+      const step = this.agent.brain.planStep(t)
+      if (step) return this.forced(t, step.why, { name: step.name, args: step.args }, false)
+    }
     // "Get me <item>": plan the exact item (mine that block, get a pickaxe first, craft it from what it knows).
     if (['gather', 'craft'].includes(t.kind) && t.status === 'active' && t.item && this.agent.brain?.acquireStep) {
       const step = this.agent.brain.acquireStep(t)
@@ -664,6 +672,13 @@ class TaskManager {
     const t = this.active()
     if (!t) return
     if (result.ok) t.lastProgressAt = now()
+    if (t.plan && name === t.plan.name) {
+      if (result.ok) {
+        t.planRuns++
+        const gained = t.item ? this.countItem(t.item) - t.startCount : 0
+        if (t.planRuns >= (t.plan.runs || 5) || (t.item && gained >= Math.max(3, t.commitCount || 0))) { this.finish(t, 'done'); return }
+      } else if (result.code !== 'ABORTED' && ++t.attempts >= 3) { this.wrapUp(t, result.message || 'it kept not working'); return }
+    }
     if (result.ok && ['gather', 'craft'].includes(t.kind) && t.item) {
       if (name === 'mineBlock') {
         const m = String(result.message || '').match(/Mined (\d+)\/\d+ ([a-z_]+)/)
@@ -675,6 +690,7 @@ class TaskManager {
       }
     }
     if (['gather', 'craft'].includes(t.kind) && ['mineBlock', 'craftItem', 'experimentCrafting', 'askForHelp'].includes(name)) t.acqFails = result.ok ? 0 : (t.acqFails || 0) + 1
+    if (t.prep && ['mineBlock', 'craftItem', 'smeltItem', 'experimentCrafting', 'askForHelp', 'explore'].includes(name)) t.prep.acqFails = result.ok ? 0 : (t.prep.acqFails || 0) + 1
     if (name === 'moveToPlayer' && t.kind === 'come' && result.ok && args.playerName?.toLowerCase() === t.from.toLowerCase()) return this.finish(t, 'done')
     if (name === 'followPlayer' && t.kind === 'follow' && result.ok) return this.finish(t, 'done')
   }

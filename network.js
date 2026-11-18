@@ -73,7 +73,7 @@ class Network {
       try { this.onMessage(msg, position) } catch { /* not an invite */ }
     })
     bot.on('login', () => { this.commands = null; this.window = null }) // a new server on the network: learn its commands again
-    bot.once('spawn', () => setTimeout(() => this.discoverCommands().catch(() => {}), 4000))
+    if (this.agent.config.network?.discoverCommands !== false) bot.once('spawn', () => setTimeout(() => this.discoverCommands().catch(() => {}), 4000))
   }
 
   // --------------------------------------------------------------------------------------------------------------

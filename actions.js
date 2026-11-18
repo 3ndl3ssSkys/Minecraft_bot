@@ -18,6 +18,7 @@
 
 const { goals } = require('mineflayer-pathfinder')
 const { Vec3 } = require('vec3')
+const { clickableFace, obstacle } = require('./reach')
 const { once } = require('events')
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)]
 
@@ -168,29 +169,44 @@ async function placeNearby (ctx, itemName) {
   let tries = 0
   let lastErr = null
   // A placement the server doesn't confirm (lag, protection plugins, a spot it won't allow) is retried on another spot.
+  //
+  // Free spots on solid ground next to us, the ones we can see the ground of first (no placing behind a tree).
+  const spots = []
   for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1], [2, 0], [-2, 0], [0, 2], [0, -2]]) {
     for (const dy of [0, 1, -1]) {
       const p = base.offset(dx, dy, dz)
       const here = bot.blockAt(p); const below = bot.blockAt(p.offset(0, -1, 0)); const above = bot.blockAt(p.offset(0, 1, 0))
       if (!(here && here.boundingBox === 'empty' && !/water|lava/.test(here.name) && below && below.boundingBox === 'block' && (!above || above.boundingBox === 'empty'))) continue
-      const item = findInventoryItem(bot, itemName)
-      if (!item) throw new ActionError('MISSING_ITEM', `No "${itemName}" in inventory.`)
-      try {
-        await placeAt(ctx, p, item)
-      } catch (err) {
-        if (err.code === 'ABORTED') throw err
-        lastErr = err
-      }
-      for (let i = 0; i < 10; i++) { // the block update can arrive a few ticks later
-        if (bot.blockAt(p)?.name === item.name) return p
-        await sleep(100)
-      }
-      if (++tries >= 3) break
+      spots.push({ p, seen: Boolean(clickableFace(bot, below, { normal: new Vec3(0, 1, 0) })), order: spots.length })
     }
-    if (tries >= 3) break
+  }
+  spots.sort((a, b) => (b.seen - a.seen) || a.order - b.order)
+  for (const { p } of spots) {
+    const item = findInventoryItem(bot, itemName)
+    if (!item) throw new ActionError('MISSING_ITEM', `No "${itemName}" in inventory.`)
+    try {
+      await placeAt(ctx, p, item)
+    } catch (err) {
+      if (err.code === 'ABORTED') throw err
+      lastErr = err
+    }
+    for (let i = 0; i < 10; i++) { // the block update can arrive a few ticks later
+      if (bot.blockAt(p)?.name === item.name) return p
+      await sleep(100)
+    }
+    if (++tries >= 3) break
   }
   const left = inventorySummary(bot)[normalizeName(itemName)] || 0
   throw new ActionError('PLACE_FAILED', `Couldn't put the ${itemName.replace(/_/g, ' ')} down here${lastErr ? ` (${lastErr.message})` : ''}. You still carry ${left}: don't make another. Move to open, flat ground (or somewhere you're allowed to build) and try again.`)
+}
+
+/** Has the block a side you could see: a neighbour that's air, water, or something you see through? */
+function exposed (bot, pos) {
+  for (const d of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
+    const n = bot.blockAt(pos.offset(...d))
+    if (!n || n.boundingBox === 'empty' || /glass|leaves|ice$|slab|stairs|fence|bars|pane|door|trapdoor|torch|ladder|vine|scaffolding/.test(n.name)) return true
+  }
+  return false
 }
 
 function resolveBlockIds (bot, rawName) {
@@ -432,13 +448,26 @@ function findNearestBlock (bot, names, maxDistance = 32) {
 }
 
 /** Walk until a block is within interaction reach. */
+/**
+ * Walk to where the block can really be clicked (in reach, with a clear line to one of its faces, like a crosshair:
+ * not through leaves or a wall). Returns that face ({ normal, point }); throws NOT_IN_VIEW if no such spot was found.
+ */
 async function goNextTo (ctx, block, label) {
   const { bot } = ctx
-  if (bot.entity.position.distanceTo(block.position.offset(0.5, 0.5, 0.5)) <= 4) return
+  let face = clickableFace(bot, block)
+  if (face) return face
   const dist = bot.entity.position.distanceTo(block.position)
-  await gotoGoal(ctx, new goals.GoalNear(block.position.x, block.position.y, block.position.z, 2), {
-    timeoutMs: travelTimeout(ctx, dist), label
-  })
+  try {
+    await gotoGoal(ctx, new goals.GoalLookAtBlock(block.position, bot.world, { reach: 4 }), { timeoutMs: travelTimeout(ctx, dist), label })
+  } catch (err) {
+    if (err.code === 'ABORTED') throw err
+    // No spot with a clear view: at least get close (it may still open up from there).
+    await gotoGoal(ctx, new goals.GoalNear(block.position.x, block.position.y, block.position.z, 2), { timeoutMs: travelTimeout(ctx, dist), label }).catch((e) => { if (e.code === 'ABORTED') throw e })
+  }
+  face = clickableFace(bot, block)
+  if (face) return face
+  const inWay = obstacle(bot, block)
+  throw new ActionError('NOT_IN_VIEW', `You can't get a clear look at the ${String(label || block.name).replace(/_/g, ' ')} at ${fmtPos(block.position)}${inWay ? `: ${inWay.name.replace(/_/g, ' ')} is in the way` : ''}. Clear the way or use another one.`)
 }
 
 const CONTAINERS = ['chest', 'trapped_chest', 'barrel']
@@ -525,30 +554,39 @@ async function placeAt (ctx, pos, item, { clearSoft = true } = {}) {
   const faces = sidesFirst
     ? [new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1), down, new Vec3(0, 1, 0)]
     : [down, new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1), new Vec3(0, 1, 0)]
-  let reference = null
-  let faceVector = null
-  for (const dir of faces) {
-    const b = bot.blockAt(pos.plus(dir))
-    if (b && b.boundingBox === 'block') { reference = b; faceVector = dir.scaled(-1); break }
+  const supports = faces.map((dir) => ({ dir, b: bot.blockAt(pos.plus(dir)) })).filter((x) => x.b && x.b.boundingBox === 'block')
+  if (!supports.length) throw new ActionError('NO_SUPPORT', `Nothing solid next to ${fmtPos(pos)} to place against.`)
+  // Only a face the crosshair can land on, like a player: never through leaves, glass or a wall.
+  const pick = () => {
+    for (const { dir, b } of supports) {
+      const face = clickableFace(bot, b, { reach: 4.5, normal: dir.scaled(-1) })
+      if (face) return { reference: b, faceVector: dir.scaled(-1), face }
+    }
+    return null
   }
-  if (!reference) throw new ActionError('NO_SUPPORT', `Nothing solid next to ${fmtPos(pos)} to place against.`)
-
-  if (bot.entity.position.distanceTo(pos.offset(0.5, 0.5, 0.5)) > 4.2 || bot.entity.position.floored().equals(pos) || bot.entity.position.offset(0, 1, 0).floored().equals(pos)) {
+  const inCell = () => bot.entity.position.floored().equals(pos) || bot.entity.position.offset(0, 1, 0).floored().equals(pos)
+  let choice = inCell() ? null : pick()
+  if (!choice) {
     try {
-      await gotoGoal(ctx, new goals.GoalPlaceBlock(pos, bot.world, { range: 4 }), {
+      await gotoGoal(ctx, new goals.GoalPlaceBlock(pos, bot.world, { range: 4, LOS: true }), {
         timeoutMs: travelTimeout(ctx, bot.entity.position.distanceTo(pos)), label: `placement spot for ${fmtPos(pos)}`
       })
     } catch (err) {
       if (err.code === 'ABORTED') throw err
-      if (bot.entity.position.distanceTo(pos) > 4.5) throw err // maybe already close enough
     }
+    choice = inCell() ? null : pick()
   }
+  if (!choice) {
+    const blocking = obstacle(bot, supports[0].b)
+    throw new ActionError('NOT_IN_VIEW', `You can't see a side to place against at ${fmtPos(pos)} from anywhere close${blocking ? ` (${blocking.name.replace(/_/g, ' ')} in the way)` : ''}. Pick a spot you can see.`)
+  }
+  const { reference, faceVector, face } = choice
 
   await bot.equip(item, 'hand')
   const sneak = INTERACTABLE.test(reference.name)
   if (sneak) bot.setControlState('sneak', true)
   try {
-    await bot.lookAt(reference.position.offset(0.5, 0.5, 0.5).plus(faceVector.scaled(0.5)), true)
+    await bot.lookAt(face.point, true)
     await bot.placeBlock(reference, faceVector)
   } catch (err) {
     // placeBlock sometimes times out waiting for the server update even though it worked.
@@ -741,12 +779,24 @@ const ACTIONS = {
         if (dropName && have >= Math.max(16, count * 3)) return `You already carry ${have} ${dropName}: no need to mine more.`
       }
       const anyLog = !exact && /_log$/.test(normalizeName(blockType)) ? allLogIds(bot) : null
+      // No tool that can harvest any of these: say so at once, before searching and walking.
+      const harvestable = ids.some((id) => {
+        const def = bot.registry.blocks[id]
+        return !def?.harvestTools || bot.inventory.items().some((i) => def.harvestTools[i.type])
+      })
+      if (!harvestable) {
+        const def = bot.registry.blocks[ids[0]]
+        const needed = Object.keys(def.harvestTools).map((id) => bot.registry.items[id]?.name).filter(Boolean)
+        const cheapest = needed.find((n) => /^wooden_/.test(n)) || needed.find((n) => /^stone_/.test(n)) || needed[0]
+        throw new ActionError('NO_SUITABLE_TOOL', `Mining ${blockType} by hand drops nothing: it needs a ${needed.slice(0, 3).join(' / ')}. Get one first: obtainItem ${cheapest} (it makes everything on the way).`)
+      }
 
       const skip = new Set() // positions we failed to reach/mine this action
       let mined = 0
       let failures = 0
       const failureNotes = []
       const maxFailures = 3
+      let sealed = 0 // matches buried in rock, out of sight
 
       while (mined < count && failures < maxFailures) {
         throwIfAborted(signal)
@@ -760,6 +810,13 @@ const ACTIONS = {
           widened = true
           maxDistance = 64
           candidates = bot.findBlocks({ matching: ids, maxDistance, count: 64 }).filter((pos) => !skip.has(pos.toString()))
+        }
+        // Realistic sight: only blocks with a side open to the air can be known about (no ores through solid rock).
+        if (ctx.config.senses?.realisticSight !== false && !(ctx.config.intelligence?.allowXray && ctx.intel?.can?.('seeThroughWalls', 'senses'))) {
+          const hidden = candidates.filter((p) => !exposed(bot, p))
+          hidden.forEach((p) => skip.add(p.toString()))
+          sealed += hidden.length
+          candidates = candidates.filter((p) => !hidden.includes(p))
         }
         if (candidates.length === 0) break
         const pos = candidates[0] // findBlocks returns nearest first
@@ -776,22 +833,31 @@ const ACTIONS = {
           if (!block.diggable) throw new ActionError('UNBREAKABLE', `${block.name} cannot be mined.`)
           await equipToolFor(ctx, block)
 
-          // Walk until a face of the block is visible and within reach.
-          if (!bot.canDigBlock(block)) {
+          // Walk until a face of the block is in reach with a clear line to it (the crosshair can land on it).
+          if (!clickableFace(bot, block)) {
             const dist = bot.entity.position.distanceTo(pos)
             await gotoGoal(ctx, new goals.GoalLookAtBlock(pos, bot.world, { reach: 4 }), {
               timeoutMs: travelTimeout(ctx, dist), label: `${block.name} at ${fmtPos(pos)}`
             })
           }
 
-          const fresh = bot.blockAt(pos)
+          let fresh = bot.blockAt(pos)
           if (!fresh || !ids.includes(fresh.type)) { skip.add(pos.toString()); continue } // someone else mined it
-          if (!bot.canDigBlock(fresh)) throw new ActionError('OUT_OF_REACH', `Could not get within reach of ${fresh.name} at ${fmtPos(pos)}.`)
+          let face = clickableFace(bot, fresh)
+          // Leaves or grass in the way: punch through them like anyone would (never someone's build).
+          for (let i = 0; !face && i < 3; i++) {
+            const inWay = obstacle(bot, fresh)
+            if (!inWay || !/leaves|^(short_|tall_)?grass$|fern|vine|snow$|dead_bush|azalea$/.test(inWay.name) || inWay.position.distanceTo(bot.entity.position) > 5) break
+            await digWithAbort(ctx, inWay)
+            fresh = bot.blockAt(pos)
+            face = fresh && clickableFace(bot, fresh)
+          }
+          if (!face) throw new ActionError('NOT_IN_VIEW', `Could not get a clear look at ${fresh.name} at ${fmtPos(pos)}${obstacle(bot, fresh) ? ` (${obstacle(bot, fresh).name.replace(/_/g, ' ')} in the way)` : ''}.`)
 
           await equipToolFor(ctx, fresh) // inventory may have changed while walking
           const toolBefore = bot.heldItem
           throwIfAborted(signal)
-          await digWithAbort(ctx, fresh)
+          await digWithAbort(ctx, fresh, face.normal)
           mined++
           const broke = describeToolBreak(ctx, toolBefore)
           if (broke) failureNotes.push(broke.trim())
@@ -809,7 +875,7 @@ const ACTIONS = {
       const notes = failureNotes.length ? ` Notes: ${[...new Set(failureNotes)].slice(0, 3).join(' | ')}` : ''
       if (mined === 0) {
         throw new ActionError(failures ? 'MINING_FAILED' : 'NOT_FOUND',
-          failures ? `Could not mine any ${blockType}.${notes}` : `No ${blockType} found within ${maxDistance} blocks.`)
+          failures ? `Could not mine any ${blockType}.${notes}` : `No ${blockType} in sight within ${maxDistance} blocks${sealed ? ' (any there may be is buried in rock where you can\'t see it: for ores, stripMine digs to them)' : ''}.`)
       }
       return `Mined ${mined}/${count} ${blockType}.${notes}`
     }
@@ -1062,10 +1128,13 @@ const ACTIONS = {
       let win
       let opened = null
       if (table && (args.told || Math.random() < 0.6)) {
-        if (bot.entity.position.distanceTo(table.position) > 3.5) {
-          await gotoGoal(ctx, new goals.GoalNear(table.position.x, table.position.y, table.position.z, 2), { timeoutMs: travelTimeout(ctx, bot.entity.position.distanceTo(table.position)), label: 'crafting table' })
+        let face = await goNextTo(ctx, table, 'crafting table').catch((err) => { if (err.code !== 'NOT_IN_VIEW' || !findInventoryItem(bot, 'crafting_table')) throw err; return null })
+        if (!face) { // can't get at that one (behind a wall or a tree): put down the one it carries
+          table = bot.blockAt(await placeNearby(ctx, 'crafting_table'))
+          face = await goNextTo(ctx, table, 'crafting table')
         }
-        bot.activateBlock(table)
+        await bot.lookAt(face.point, true)
+        bot.activateBlock(table, face.normal, face.point.minus(table.position)).catch(() => {})
         ;[opened] = await Promise.race([once(bot, 'windowOpen'), sleep(4000).then(() => [null])])
         if (opened) win = { window: opened, w: 3, h: 3, first: 1, result: 0, invStart: opened.inventoryStart, invEnd: opened.inventoryEnd }
       }
@@ -1153,11 +1222,9 @@ const ACTIONS = {
         }
         recipe = tableRecipes[0]
         table = tableBlock
-        if (bot.entity.position.distanceTo(table.position) > 3.5) {
-          await gotoGoal(ctx, new goals.GoalNear(table.position.x, table.position.y, table.position.z, 2), {
-            timeoutMs: travelTimeout(ctx, bot.entity.position.distanceTo(table.position)), label: 'crafting table'
-          })
-        }
+        // Where it can really reach the table (a clear line, not through leaves); bot.craft opens it from here.
+        const face = await goNextTo(ctx, table, 'crafting table')
+        await bot.lookAt(face.point, true)
       }
 
       // Craft as many times as materials allow, up to `count`.
@@ -1375,10 +1442,10 @@ const ACTIONS = {
         throw new ActionError('NOT_INTERACTABLE', `${block.name} isn't something you toggle. Use smeltItem/storeItems/sleepInBed/craftItem for workstations.`)
       }
       assertTravelDistance(ctx, bot.entity.position.distanceTo(pos))
-      await goNextTo(ctx, block, block.name)
-      await bot.lookAt(pos.offset(0.5, 0.5, 0.5), true)
+      const face = await goNextTo(ctx, block, block.name)
+      await bot.lookAt(face.point, true)
       try {
-        await bot.activateBlock(block)
+        await bot.activateBlock(block, face.normal, face.point.minus(block.position))
       } catch (err) {
         throw new ActionError('USE_FAILED', `Could not use ${block.name}: ${err.message}`)
       }
@@ -1462,11 +1529,11 @@ const ACTIONS = {
       if (point) {
         const block = bot.blockAt(point)
         if (!block) throw new ActionError('NOT_LOADED', `${fmtPos(point)} isn't loaded.`)
-        await goNextTo(ctx, block, block.name)
+        const face = await goNextTo(ctx, block, block.name)
         await combat.hold(bot, item)
-        await bot.lookAt(point.offset(0.5, 0.5, 0.5), true)
+        await bot.lookAt(face.point, true)
         if (/bucket$/.test(n)) bot.activateItem()
-        else await bot.activateBlock(block)
+        else await bot.activateBlock(block, face.normal, face.point.minus(block.position))
         return `Used ${n} on ${block.name} at ${fmtPos(point)}.${how}`
       }
       if (n === 'water_bucket') { await combat.douse(bot, item); return 'Splashed water at your feet and picked it back up.' }
@@ -1827,12 +1894,12 @@ function findDrop (bot, radius, minDrop) {
 // ---------------------------------------------------------------------------
 
 /** bot.dig that stops digging when the action is aborted. */
-async function digWithAbort (ctx, block) {
+async function digWithAbort (ctx, block, face = null) {
   const { bot, signal } = ctx
   const onAbort = () => bot.stopDigging()
   signal?.addEventListener('abort', onAbort, { once: true })
   try {
-    await bot.dig(block, true)
+    await bot.dig(block, true, face || 'auto') // face: the side it can see (reach.js), so it never digs through another block
   } catch (err) {
     if (signal?.aborted) throw abortError(signal)
     throw new ActionError('DIG_FAILED', `Digging ${block.name} failed: ${err.message}`)

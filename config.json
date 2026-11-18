@@ -251,7 +251,8 @@
     "public": "auto",
     "acceptInvites": true,
     "inviteVia": "auto",
-    "pvpGames": true
+    "pvpGames": true,
+    "discoverCommands": true
   },
   "etiquette": {
     "enabled": true,

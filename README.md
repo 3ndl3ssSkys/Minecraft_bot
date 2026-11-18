@@ -449,7 +449,9 @@ In game (owner): `!mind like a medieval knight`, `!mind style explorer`, `!mind 
 
 - **Sight** (`realisticSight`): it only perceives entities it has line of sight to (glass and leaves don't block), or ones right next to it. Things it loses sight of are remembered for 20 seconds ("last seen…").
   - **Invisibility works**, unless the invisible player's armor or held item shows, their potion swirls are visible close in front of it, or they're bumping into it.
-  - It only knows about ores and other blocks it has actually seen.
+  - **Any part counts:** a block is seen if any part of a face it's turned towards is in view (the top of a chest over a low wall, a log behind a gap in the leaves), anywhere within range, not only what it looks straight at. A creature is seen if its head, middle, feet or either side shows (a zombie's legs under a leaf canopy). Barely visible things far away are easier to miss for weaker players.
+  - It only knows about ores and other blocks it has actually seen. A block sealed in rock with no open side is unknown to it (mineBlock skips it; stripMine digs to find ores).
+  - **Seeing isn't reaching** (`reach.js`): to place, open, use or mine something it needs a clear line from its eyes to a face of it, like a crosshair. It never places a table through leaves or opens a chest through a wall. It walks to where it can see the spot, punches through leaves and grass when they're in the way of something it's mining, and otherwise says what's blocking it.
   - Impossible tracks every entity the server sends, even through walls.
   - Players' name tags also show through walls unless they sneak (see [Name tags](#name-tags)).
 - **Hearing** (`hearing`): every sound the server sends (about 16 blocks, through walls) is sorted into mob noises, footsteps, chests/barrels/doors opening, blocks breaking or being placed, combat (bows, crits, shields, splash potions), anvils, spawners, and the **creeper hiss**. A hiss makes it back away even if it can't see the creeper. World-wide sounds (a wither spawning, the dragon dying) are noticed too.
@@ -460,6 +462,25 @@ In game (owner): `!mind like a medieval knight`, `!mind style explorer`, `!mind 
   - Tested live: with nobody known nearby, a chest opening behind a wall pushed suspicion to "high" and set an investigation at that spot. With a player who had just gone behind the wall, the same sound stayed below the threshold.
 
 `!senses` shows what it has heard and noticed recently.
+
+### Sizing up creatures (`threat.js`)
+
+For every creature it perceives, it works out two things and a verdict, the way a player glances at a mob and knows whether to swing or back off:
+
+- **Danger:** how much of its health it would expect to lose killing it, from the creature's damage, attack speed and health against its own weapon, armour, shield, health, totem and skill. Several at once add up: they all hit while it kills them one by one. A creeper is judged by its blast (a bow makes it safe), and a warden is never worth it.
+- **Worth:** what a fight gets it:
+  - drops it wants (for its task or what it's getting), food when it's hungry or out of food;
+  - ending a threat that will chase it anyway, protecting a friend nearby, getting back at what hit it.
+  - Fights it would only start are not worth it: neutral mobs it would provoke (endermen, piglins when it wears gold, iron golems, wolves), animals it doesn't need, babies, and anything protected (pets, named mobs, farm mobs: "leave").
+- **Verdict:** fight, hunt, avoid (keep away), flee (get out now), leave, or ignore. Braver personalities (`mind.riskTolerance`), anger and fear move the line.
+
+The verdicts go into the decision prompt (`status.threats`, e.g. `zombie 4m: danger some, worth fighting (it will come for you anyway) → fight`). The instant reactions use them too:
+- it deals with a zombie it can easily take before the first hit;
+- it keeps away from one it can't (bare hands, low health);
+- it gets out when there are too many;
+- danger in chat (short replies) is about real danger, so one zombie against full iron isn't an emergency.
+
+Only creatures it actually perceives count, never ones hidden behind a wall.
 
 ## Name tags
 
@@ -574,6 +595,8 @@ The outcome is one of:
 - **do part of it** — "I can grab you 20 or so", for big jobs;
 - **later** — the task goes on its queue;
 - **no**.
+
+**Directions from owners and admins** that the code knows how to do itself are never lost to a misread. "mine down", "look for iron", "go find diamonds" and "staircase down" become a task even when the model takes them for small talk. The task first gets the pickaxe that ore needs, then runs `stripMine`: a staircase down to the best depth, then tunnels. A follow-up like "staircase instead" or "look for iron while you're at it" updates the task it's on. Being told what to do, or how to do it, is never counted as rude from someone in charge (only real insults are), and from others it costs at most a little trust.
 
 Only after deciding does the LLM write the reply, in character, from the decision and its reason. Refusals follow the personality's `refusalStyle` and mood: friendly "ah not rn, maybe after this?", grumpy "do it yourself kid", shy "um... sorry, i cant", hype "NAH im busy cooking". Assistant-speak ("I'm unable to assist…") is caught and replaced before it's sent.
 
@@ -1132,7 +1155,11 @@ Without them setting anything up:
 - **`ECONNREFUSED` / "Nothing is running at …"**: the server isn't up yet or the port is wrong. The bot keeps retrying.
 - **"Cannot reach Ollama"**: start it with `ollama serve`, or set `llm.url` / `OLLAMA_URL`.
 - **"Server version … is not supported" / "Outdated client"**: see [Minecraft 26.3 and other newer versions](#minecraft-263-and-other-newer-versions).
-- **Slow decisions**: use a smaller model, lower `llm.numCtx`, or raise `loop.minLlmIntervalMs`.
+- **Slow decisions**: every decision logs `Thought for 4.1 s (read 820 new tokens, wrote 95 at 45/s)`.
+  - **Many tokens read each time**, with "the cache was wiped by a chat reply": chat replies on the same model push the decision prompt out of Ollama's cache. Set `llm.fastModel` to `qwen3:1.7b` (with `OLLAMA_MAX_LOADED_MODELS=2`), or set `OLLAMA_NUM_PARALLEL=2`. The bot says so once in the log when it sees this happening.
+  - **A low writing speed** (under ~15/s): the model is partly on the CPU (`ollama ps`).
+  - **"had to load the model again"**: something pushed the model out of the graphics card.
+  - Otherwise use a smaller model, lower `llm.numCtx`, or raise `loop.minLlmIntervalMs`.
 - **Kicked for spam**: raise `chat.minSecondsBetweenMessages` and lower `chat.maxMessagesPerMinute`.
 - **Builds stall** with "missing materials": give it the materials, or let it gather them. `!build` shows what's left, and `!build cancel` drops the plan.
 - **Online-mode servers** ("Failed to verify username"): the offline account was refused. Use a Java account email as `username`, ask the host about FastLogin (SETUP.md 6D), or set a Bedrock `server.fallback`.
