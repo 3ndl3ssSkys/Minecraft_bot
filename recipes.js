@@ -215,7 +215,8 @@ async function tryLayout (bot, win, cells, { wait = 220 } = {}) {
       await bot.clickWindow(src, 0, 0) // put the rest back
       placed.push(gridSlot(i))
     }
-    await new Promise((resolve) => setTimeout(resolve, wait)) // the server tells us what comes out
+    // The server tells us what comes out (mineflayer doesn't guess this slot): give it up to `wait` ms.
+    for (let t = 0; t < wait && !window.slots[result]; t += 50) await new Promise((resolve) => setTimeout(resolve, 50))
     const out = window.slots[result]
     if (!out) return null
     const found = { name: out.name, count: out.count }

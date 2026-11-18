@@ -3,7 +3,7 @@
  * Live scenario checks against a test server (drives the real Agent by hand).
  *
  *   node test/tools/harness.js <scenario> <config.json>
- *   scenarios: typing | sight | hearing | nametags | fall | startle | place
+ *   scenarios: typing | sight | hearing | nametags | fall | startle | place | craft
  *   (fall: LEVEL=mediocre|complicated|... picks the intelligence level)
  *
  * Setup: start test/tools/test-server.js, then this harness, then
@@ -60,6 +60,25 @@ async function buildWall (bot, target) {
 }
 
 const scenarios = {
+  // Crafting that is checked: a normal 2x2 craft, then one where bot.craft "succeeds" but the server never makes the
+  // item (what Paper 26.1 did): the leftovers go back and it crafts by hand.
+  async craft (bot) {
+    bot.chat(`/give ${bot.username} birch_log 4`)
+    await wait(1500)
+    const count = (n) => bot.inventory.items().filter((i) => i.name === n).reduce((a, i) => a + i.count, 0)
+    const grid = () => [1, 2, 3, 4].map((s) => bot.inventory.slots[s] ? `${bot.inventory.slots[s].count} ${bot.inventory.slots[s].name}` : '-').join(' | ')
+    let r = await agent.executor.execute('craftItem', { itemName: 'birch_planks', count: 1 })
+    console.log('normal craft →', r.ok ? 'ok' : r.code, '|', r.message, '| planks', count('birch_planks'), '| grid', grid())
+    const real = bot.craft
+    bot.craft = async (recipe) => { // only fills the grid, like the failed crafts: the result is never taken
+      const src = bot.inventory.items().find((i) => i.type === recipe.inShape?.[0]?.[0]?.id || i.type === recipe.ingredients?.[0]?.id)
+      await bot.clickWindow(src.slot, 0, 0); await bot.clickWindow(1, 1, 0); await bot.putSelectedItemRange(9, 45, bot.inventory, null)
+    }
+    r = await agent.executor.execute('craftItem', { itemName: 'birch_planks', count: 1 })
+    bot.craft = real
+    await wait(500)
+    console.log('craft the server ignored →', r.ok ? 'ok' : r.code, '|', r.message, '| planks', count('birch_planks'), '| logs', count('birch_log'), '| grid', grid())
+  },
   // Placing like a player: never through leaves. A table is asked for behind a leaf wall: it walks to where it can see
   // the spot (or says it can't); then it crafts at a table it can reach.
   async place (bot) {

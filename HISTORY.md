@@ -654,7 +654,15 @@ It also had a stray line that reset the autopilot after nearly every action. Tha
   - the owner's three directions with the mock misreading them as rude gave a task "look for iron" with stripMine after a stone pickaxe, a reply, and unchanged trust;
   - a table asked for behind a leaf wall was placed after walking to a spot with a clear view.
 
-**Not verified:** real decision timings on the user's PC (the new log line will show them); stripMine and fights against real mobs on Paper.
+**Then (screenshot from the viewer):**
+- The 2x2 crafting grid held 4 + 4 birch planks and 3 birch logs, with nothing made: the bot "placed the logs in the crafting slot but didn't craft".
+- Cause: Mineflayer's `bot.craft` never waits for the server. It writes the result into the output slot itself, takes it, and considers the grid empty. The server made nothing and kept the ingredients.
+- Fix: `craftVerified` checks the real inventory afterwards, puts grid leftovers back, and crafts by hand when nothing came out (lay out the recipe, wait for the result the server shows, take it).
+  - Grid items don't count as carried, so the grid is emptied 3 s after spawning, which clears what's stuck now.
+  - Also fixed: the reachable-table fallback had landed in experimentCrafting, where it would crash; it's now in craftItem.
+- Tested with `test/craft.test.js` (a fake inventory that behaves like a vanilla server). flying-squid can't do inventory clicks at all.
+
+**Not verified:** real decision timings on the user's PC (the new log line will show them); stripMine and fights against real mobs on Paper; crafting on Paper 26.1 with the new check.
 
 ## Where it stands now
 

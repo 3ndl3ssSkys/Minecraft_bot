@@ -118,7 +118,7 @@ async function craftIntermediates (ctx, itemDef, crafts) {
       const r = planksDef && bot.recipesFor(planksDef.id, null, 1, null)[0]
       if (r) {
         const times = Math.min(log[1], Math.ceil((planksWanted - held()) / 4))
-        await bot.craft(r, times, null)
+        await craftVerified(ctx, r, times, null)
         did = true
       }
     }
@@ -127,9 +127,83 @@ async function craftIntermediates (ctx, itemDef, crafts) {
     if (ctx.recipes && !ctx.recipes.knows('stick')) throw unknownRecipe('stick')
     const stickDef = bot.registry.itemsByName.stick
     const r = bot.recipesFor(stickDef.id, null, 1, null)[0]
-    if (r) { await bot.craft(r, Math.min(Math.ceil(sticksToMake / 4), Math.floor(held() / 2)), null); did = true }
+    if (r) { await craftVerified(ctx, r, Math.min(Math.ceil(sticksToMake / 4), Math.floor(held() / 2)), null); did = true }
   }
   return did
+}
+
+/**
+ * Craft and make sure it really happened. Mineflayer's bot.craft fills the grid, then writes the result into the output
+ * slot itself and takes it, without waiting for the server. When the server doesn't agree, the ingredients stay in the
+ * grid and nothing is made, but the craft "succeeds" (seen on Paper 26.1: planks and logs left in the 2x2 grid). So:
+ * read the real inventory afterwards (the server corrects it within a tick), put anything left in the grid back, and if
+ * the item didn't arrive, craft it the way a player does: lay it out, wait for what the server shows, take it.
+ * Returns how many of the item were made.
+ */
+async function craftVerified (ctx, recipe, count, table) {
+  const { bot } = ctx
+  const name = bot.registry.items[recipe.result.id]?.name
+  const want = (recipe.result.count || 1) * count
+  await returnGrid(ctx)
+  const before = inventorySummary(bot)[name] || 0
+  let failure = null
+  try { await bot.craft(recipe, count, table) } catch (err) { failure = err }
+  await sleep(400) // the server's corrections arrive
+  await returnGrid(ctx)
+  let got = (inventorySummary(bot)[name] || 0) - before
+  if (got >= want) return got
+  ctx.log?.debug?.(`craft of ${name}: expected ${want}, got ${got}${failure ? ` (${failure.message})` : ''}; crafting by hand`)
+  got += await craftByHand(ctx, recipe, Math.ceil((want - Math.max(0, got)) / (recipe.result.count || 1)), table)
+  await returnGrid(ctx)
+  if (got <= 0) throw failure || new Error(`the server didn't make any ${name}`)
+  return got
+}
+
+/** The recipe laid out cell by cell, waiting for the server's result each time (recipes.js tryLayout). */
+async function craftByHand (ctx, recipe, crafts, table) {
+  const { bot, signal } = ctx
+  const nameOf = (id) => bot.registry.items[id]?.name || null
+  let win
+  let opened = null
+  if (table) {
+    const face = clickableFace(bot, table) || await goNextTo(ctx, table, 'crafting table')
+    await bot.lookAt(face.point, true)
+    bot.activateBlock(table, face.normal, face.point.minus(table.position)).catch(() => {})
+    ;[opened] = await Promise.race([once(bot, 'windowOpen'), sleep(4000).then(() => [null])])
+    if (!opened) return 0
+    win = { window: opened, w: 3, h: 3, first: 1, result: 0, invStart: opened.inventoryStart, invEnd: opened.inventoryEnd }
+  } else {
+    win = { window: bot.inventory, w: 2, h: 2, first: 1, result: 0, invStart: bot.inventory.inventoryStart, invEnd: bot.inventory.inventoryEnd }
+  }
+  const cells = new Array(win.w * win.h).fill(null)
+  if (recipe.inShape) {
+    recipe.inShape.forEach((row, y) => row.forEach((ing, x) => { if (ing && ing.id !== -1) cells[y * win.w + x] = nameOf(ing.id) }))
+  } else {
+    (recipe.ingredients || []).forEach((ing, i) => { cells[i] = nameOf(ing.id) })
+  }
+  let made = 0
+  try {
+    for (let i = 0; i < crafts; i++) {
+      throwIfAborted(signal)
+      const out = await tryLayout(bot, win, cells, { wait: 1500 }).catch(() => null)
+      if (!out) break
+      made += out.count
+    }
+  } finally {
+    if (opened) { try { bot.closeWindow(opened) } catch { /* already closed */ } }
+  }
+  return made
+}
+
+/** Anything left in the 2x2 grid (or on the cursor) goes back into the inventory, like closing the inventory screen. */
+async function returnGrid (ctx) {
+  const { bot } = ctx
+  const inv = bot.inventory
+  try {
+    if (inv.selectedItem) await bot.putSelectedItemRange(inv.inventoryStart, inv.inventoryEnd, inv, null)
+    for (let s = 1; s <= 4; s++) if (inv.slots[s]) await bot.clickWindow(s, 0, 1) // shift-click back
+    if ([1, 2, 3, 4].some((s) => inv.slots[s])) bot.closeWindow(inv) // the server returns the grid when the screen closes
+  } catch (err) { ctx.log?.debug?.(`couldn't empty the crafting grid: ${err.message}`) }
 }
 
 function unknownRecipe (name) {
@@ -1124,7 +1198,7 @@ const ACTIONS = {
       if (target && !bot.registry.itemsByName[target]) throw new ActionError('UNKNOWN_ITEM', `"${target}" is not a known item.`)
       if (Object.keys(inventorySummary(bot)).length === 0) throw new ActionError('NOTHING_TO_TRY', 'You are carrying nothing to experiment with. Collect some materials first.')
       // 3x3 at a nearby crafting table (about half the time, when there is one), else the 2x2 inventory grid.
-      const table = bot.findBlock({ matching: bot.registry.blocksByName.crafting_table.id, maxDistance: 16 })
+      let table = bot.findBlock({ matching: bot.registry.blocksByName.crafting_table.id, maxDistance: 16 })
       let win
       let opened = null
       if (table && (args.told || Math.random() < 0.6)) {
@@ -1212,7 +1286,7 @@ const ACTIONS = {
             await craftIntermediates(ctx, tableDef, 1)
             const r = bot.recipesFor(tableDef.id, null, 1, null)[0]
             if (!r) throw new ActionError('NEED_CRAFTING_TABLE', `${name} needs a crafting table and you don't have the wood for one (4 planks). Mine a log first.`)
-            await bot.craft(r, 1, null)
+            await craftVerified(ctx, r, 1, null)
           }
           const at = await placeNearby(ctx, 'crafting_table')
           tableBlock = bot.blockAt(at)
@@ -1223,7 +1297,11 @@ const ACTIONS = {
         recipe = tableRecipes[0]
         table = tableBlock
         // Where it can really reach the table (a clear line, not through leaves); bot.craft opens it from here.
-        const face = await goNextTo(ctx, table, 'crafting table')
+        let face = await goNextTo(ctx, table, 'crafting table').catch((err) => { if (err.code !== 'NOT_IN_VIEW' || !findInventoryItem(bot, 'crafting_table')) throw err; return null })
+        if (!face) { // can't get at that one (behind a wall or a tree): put down the one it carries
+          table = bot.blockAt(await placeNearby(ctx, 'crafting_table'))
+          face = await goNextTo(ctx, table, 'crafting table')
+        }
         await bot.lookAt(face.point, true)
       }
 
@@ -1232,13 +1310,14 @@ const ACTIONS = {
       let crafts = count
       while (crafts > 1 && bot.recipesFor(itemDef.id, null, crafts * perCraft, table).length === 0) crafts--
       await ctx.uiPause?.('craft')
+      let made
       try {
-        await bot.craft(recipe, crafts, table)
+        made = await craftVerified(ctx, recipe, crafts, table)
       } catch (err) {
         throw new ActionError('CRAFT_FAILED', `Crafting ${name} failed: ${err.message}`)
       }
       const have = inventorySummary(bot)[name] || 0
-      return `Crafted ${name} x${crafts * perCraft}. You now have ${have}.`
+      return `Crafted ${name} x${made}. You now have ${have}.`
     }
   },
 
@@ -2224,6 +2303,8 @@ require('./tech').install(ACTIONS, { argNumber, argString, ActionError, sleep, g
 
 module.exports = {
   ACTIONS,
+  returnGrid,
+  craftVerified,
   ActionExecutor,
   ActionError,
   describeToolList,

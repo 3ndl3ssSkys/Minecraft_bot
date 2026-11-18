@@ -27,7 +27,7 @@ const mineflayer = require('mineflayer')
 const mc = require('minecraft-protocol')
 const minecraftData = require('minecraft-data')
 const { pathfinder, Movements } = require('mineflayer-pathfinder')
-const { ActionExecutor, ACTIONS, describeToolList, performGesture, inventorySummary, durabilityLeft } = require('./actions')
+const { ActionExecutor, ACTIONS, describeToolList, performGesture, inventorySummary, durabilityLeft, returnGrid } = require('./actions')
 const { EmotionEngine, LABEL_TO_CORE } = require('./emotions')
 const { SocialModel, WEAPON, PROMISE_KINDS } = require('./social')
 const { Learning, COMBAT_STYLES } = require('./learning')
@@ -4443,6 +4443,8 @@ ${s?.contraptions?.length ? `Contraptions here: ${s.contraptions.join(' | ')}
 
     bot.once('spawn', () => this.onFirstSpawn())
     bot.on('spawn', () => { this.dead = false })
+    // Items left in the 2x2 crafting grid (a craft the server didn't finish) don't count as carried: put them back.
+    bot.once('spawn', () => setTimeout(() => { if (this.bot === bot) returnGrid({ bot, log: this.log }) }, 3000))
     bot.on('death', () => {
       this.dead = true
       this.executor.abort('died')
