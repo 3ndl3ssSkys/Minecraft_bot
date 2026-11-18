@@ -162,6 +162,22 @@ class Goals {
     }
   }
 
+  /**
+   * Just joined with no current goal: pick the obvious one from what it carries, so it gets going at once instead of
+   * waiting for the planner (which refines it later; a self-made goal isn't fixed).
+   */
+  ensureStart (inv = {}) {
+    if (this.current || !this.cfg.selfDirected) return null
+    const has = (re) => Object.keys(inv).some((n) => re.test(n) && inv[n] > 0)
+    let goal
+    if (!has(/_pickaxe$/)) goal = ['get basic tools', ['chop some logs', 'make a wooden pickaxe', 'mine cobblestone', 'make stone tools']]
+    else if (!has(/^(iron|diamond|netherite)_pickaxe$/)) goal = ['get iron tools', ['find iron ore', 'mine iron', 'smelt the iron', 'make an iron pickaxe']]
+    else if (!has(/_bed$/)) goal = ['get set up for the night', ['find sheep', 'get 3 wool', 'make a bed']]
+    else goal = ['find diamonds', ['go down to diamond level', 'strip mine for diamonds']]
+    this.agent.log.info(`Starting off: "${goal[0]}" (until the plan is worked out).`)
+    return this.setCurrent(goal[0], 'self', { steps: goal[1] })
+  }
+
   setCurrent (text, source = 'self', { steps = null, parent = null } = {}) {
     const t = clean(text)
     if (!t) { this.current = null; this.dirty(); return null }

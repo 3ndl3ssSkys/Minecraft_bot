@@ -137,6 +137,7 @@ const DEFAULT_CONFIG = {
     fastProvider: '',
     fastUrl: '',
     fastApiKey: '',
+    fastNumCtx: 4096, // context for the chat model (its prompts are short; less memory, so both models fit on a 6 GB card)
     think: null, // thinking models (Qwen3 and the like): false = answer straight away (much faster); null = model default
     maxTokens: 400, // cap on each answer (a decision is ~150 tokens); stops rambling from eating seconds
     // Shorter decision prompt (same rules and tools, tersely): ~1.4k instead of ~3.4k tokens. A small GPU reads
@@ -1175,6 +1176,11 @@ class OllamaClient {
         cur.job.preempted = true
         cur.ctrl.abort()
       }
+      // Background thinking (planning, lessons, notes) never holds up what to do next: it restarts afterwards.
+      if (priority <= PRIORITY.decision && cur && cur.job.priority >= PRIORITY.reflect && !cur.job.preempted) {
+        cur.job.preempted = true
+        cur.ctrl.abort()
+      }
       this.pump(lane)
     })
   }
@@ -1224,7 +1230,8 @@ class OllamaClient {
       stream: false,
       format: schema && this.jsonSchemaSupported ? schema : 'json',
       keep_alive: this.cfg.keepAlive,
-      options: { temperature: temp, num_ctx: this.cfg.numCtx }
+      // The chat model's prompts are short: a smaller context leaves room on the card for both models.
+      options: { temperature: temp, num_ctx: lane === 'fast' && this.cfg.fastModel ? Math.min(this.cfg.numCtx, this.cfg.fastNumCtx || 4096) : this.cfg.numCtx }
     }
     if (this.cfg.maxTokens) body.options.num_predict = this.cfg.maxTokens
     if (typeof this.cfg.think === 'boolean' && this.thinkSupported) body.think = this.cfg.think
@@ -1323,6 +1330,21 @@ class OllamaClient {
       warn('evict', 'Chat replies on the same model wipe its memory of the decision prompt, so the next decision reads it all again (seconds each time). Faster: ollama pull qwen3:1.7b, then npm run set -- llm.fastModel qwen3:1.7b (plus setx OLLAMA_MAX_LOADED_MODELS 2 and an Ollama restart), or OLLAMA_NUM_PARALLEL=2.')
     }
     this.log.info(`Thought for ${(ms / 1000).toFixed(1)} s (read ${read} new tokens${cold ? ', the cache was wiped by a chat reply' : ''}, wrote ${wrote}${wrote ? ` at ${writeTps.toFixed(0)}/s` : ''})`)
+  }
+
+  /**
+   * Load the models before they're needed (an empty chat makes Ollama load a model without answering), so the first
+   * decision after joining doesn't also wait for the model to load. Fire and forget.
+   */
+  warmup () {
+    if (this.warmedUp) return
+    this.warmedUp = true
+    for (const lane of this.cfg.fastModel ? ['main', 'fast'] : ['main']) {
+      const { provider, url, model } = this.target(lane)
+      if (provider === 'openai') continue
+      fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, messages: [], keep_alive: this.cfg.keepAlive }), signal: AbortSignal.timeout(120000) })
+        .then(() => this.log.debug(`${model} loaded`)).catch(() => {})
+    }
   }
 
   async healthCheck () {
@@ -1573,7 +1595,7 @@ ${mindBlock(agent)}
 
 ## How you play
 - Each turn: you get the state JSON and choose ONE action; its result comes next turn. Use exact coordinates, names and entity ids from the state, never invented ones. If an action failed, read the error and try something different.
-- Keep "thought" under 12 words (every word you write costs time). Play like a real survival player: wood → tools → stone → ores, food, armor, shelter. Once you have enough of something (status.hints says when), move on to the next step; never keep collecting what you already have plenty of. Eat when hungry, avoid lava, deep falls and status.dangerZonesNearby, be careful at night, sleep in beds. Your body handles falls, lava and sudden hits by itself.
+- Keep "thought" under 12 words (every word you write costs time). Play like a real survival player: wood → tools → stone → ores, food, armor, shelter. It's your game: never stand around waiting for a task or for someone to tell you what to do; work on your goal (wait only when someone asked you to, or to sit out danger). Once you have enough of something (status.hints says when), move on to the next step; never keep collecting what you already have plenty of. Eat when hungry, avoid lava, deep falls and status.dangerZonesNearby, be careful at night, sleep in beds. Your body handles falls, lava and sudden hits by itself.
 - status.task is something you agreed to do for a player: work on it (items are handed over automatically once you have enough). taskUpdate.status: working, done (non-item tasks), gave_up (with a note) or none.
 - Goals (status.goals): overall → long-term → current goal → steps. Aim each action at the current step. Report goal, subgoal (the step you're on) and goalStatus: working, subgoal_done, goal_done, blocked or new_goal (you changed your mind; not for goals set for you). Urgent things are detours: name them as the goal with "working".
 - Your senses are realistic: you only know what's in nearbyEntities and status.senses. Odd sounds with nobody around → be careful and check it out.
@@ -1606,7 +1628,7 @@ ${mindBlock(agent)}
 
 ## How you play
 - Each turn you get your current state as JSON and choose exactly ONE action. You'll see its result next turn.
-- Keep "thought" under 20 words. Play like a thoughtful human survival player: punch trees → craft planks, sticks, a crafting table and tools → mine stone and ores → get food, armor and shelter. Move on to the next step as soon as you have enough of something (status.hints tells you); don't keep gathering what you already have plenty of. Pursue your goal and ambitions, but stay flexible.
+- Keep "thought" under 20 words. Play like a thoughtful human survival player: punch trees → craft planks, sticks, a crafting table and tools → mine stone and ores → get food, armor and shelter. It's your game: never stand around waiting for a task or for someone to tell you what to do; work on your goal (wait only when someone asked you to, or to sit out danger). Move on to the next step as soon as you have enough of something (status.hints tells you); don't keep gathering what you already have plenty of. Pursue your goal and ambitions, but stay flexible.
 - Use exact coordinates, block names and entity ids from the state. Never invent ids or coordinates you have not seen.
 - Read recentActions: if an action failed, understand the error code and try something different instead of repeating it.
 - If a player asked you for something and you agreed (see status.task / recentChat), prioritise it.
@@ -3148,6 +3170,7 @@ class Brain {
   start () {
     if (this.running) return
     this.running = true
+    this.startedAt = Date.now()
     this.loop().catch((err) => this.agent.log.error(`Brain loop crashed: ${err.stack || err}`))
   }
 
@@ -3308,6 +3331,7 @@ ${said ? `${name} just said: ${said}
         }
 
         while (agent.reflexes?.busy && this.running) await this.idle(100) // a save in progress finishes first
+        decision = this.noIdle(decision) // a player doesn't stand around waiting to be told what to do
         decision = this.commit(decision) // "chop 20 logs" is chopped to 20 without asking again (routines.js)
         // Common sense before acting: no fourth crafting table, no wooden pickaxe next to an iron one (commonsense.js).
         const objection = decision.source === 'reflex' || decision.source === 'command' ? null : this.commonSense(decision)
@@ -3580,7 +3604,9 @@ ${said ? `${name} just said: ${said}
     const { bot, config, memory, executor } = agent
     if (config.behavior.autopilot === false || !agent.perception?.latest || this.obtain) return null
     if (/creative|spectator|adventure/.test(bot.game?.gameMode || '')) return null // survival routines (tools, food, night) don't apply
-    if (agent.dangerLevel() !== 'none' || agent.builder?.current || agent.tasks.active()) return null
+    // Just joined: get going at once, like a player does, while the model warms up and plans. Only real danger waits.
+    const starting = Date.now() - (this.startedAt || 0) < 180000
+    if ((starting ? agent.dangerLevel() === 'high' : agent.dangerLevel() !== 'none') || agent.builder?.current || agent.tasks.active()) return null
     // Nightfall: a bed if it has one; otherwise dig in, unless it's a skilled, armed player who'd rather keep going.
     const t = bot.time?.timeOfDay ?? 6000
     const night = t > 12900 && t < 23000
@@ -3614,7 +3640,8 @@ ${said ? `${name} just said: ${said}
       return this.obtainStep()
     }
     if ((bot.food ?? 20) <= 6 || bot.health <= 8) return null
-    if (memory.chat.length && Date.now() - memory.chat.at(-1).at < 20000 && !memory.chat.at(-1).self) return null // someone just spoke: let the reply and the model deal with it
+    // Someone just spoke: let the reply and the model deal with it (requests become tasks, which come first anyway).
+    if (!starting && memory.chat.length && Date.now() - memory.chat.at(-1).at < 20000 && !memory.chat.at(-1).self) return null
     const s = agent.perception.latest
     const step = this.autopilot.step({ inventory: s.inventory.items, nearbyBlocks: s.nearbyBlocks })
     // After the stone pickaxe: a sword before anything else (then the model is in charge, with obtainItem).
@@ -3725,6 +3752,29 @@ ${said ? `${name} just said: ${said}
       }
     }
     return decision
+  }
+
+  /**
+   * The model chose to wait with nothing to wait for (no danger, no task, nobody asked it to wait, not hiding for
+   * the night): do something useful instead, like a player who just joined and gets going. The early-game routine
+   * first, then the next better pickaxe, otherwise a look around.
+   */
+  noIdle (decision) {
+    if (!decision?.action || decision.source !== 'llm' || decision.action.name !== 'wait') return decision
+    const agent = this.agent
+    const seconds = Number(decision.action.args?.seconds) || 5
+    if (seconds <= 3 || agent.dangerLevel() !== 'none' || agent.tasks.active() || this.obtain || this.seek) return decision
+    const asked = agent.memory.chat.slice(-6).some((c) => !c.self && Date.now() - c.at < 120000 && /\b(wait|stay|stop|hold on|don'?t move|stand still|afk)\b/i.test(c.text))
+    const t = agent.bot.time?.timeOfDay ?? 6000
+    const sheltering = t > 12900 && t < 23000 && !/^outdoors/.test(agent.perception?.latest?.layout || '')
+    if (asked || sheltering) return decision
+    const step = this.autopilotStep()
+    if (step) { agent.log.info(`Not standing around: ${step.thought}`); return step }
+    const inv = agent.perception?.latest?.inventory?.items || {}
+    const next = require('./commonsense').nextTool(inv)
+    if (next) { this.startObtain(next, 1); const o = this.obtainStep(); if (o) { agent.log.info(`Not standing around: making a ${next.replace(/_/g, ' ')}.`); return o } }
+    agent.log.info('Not standing around: having a look around.')
+    return { source: 'auto', thought: 'nothing to wait for; looking around', emotion: 'curious', emotionIntensity: 4, action: { name: 'explore', args: { distance: 32 } } }
   }
 
   /** The next leg of a search or a mining run (see commit), or null when there's nothing to keep doing. */
@@ -4500,6 +4550,7 @@ ${s?.contraptions?.length ? `Contraptions here: ${s.contraptions.join(' | ')}
 
   async connect () {
     const s = this.config.server
+    this.llm.warmup() // loading the model takes seconds: do it while connecting
     const version = await this.resolveVersion()
     const login = loginFor(s, this.offlineOnly)
     this.log.info(`Connecting to ${s.realm ? `realm ${s.realm}` : `${s.host}:${s.port}`} as ${login.username} (${login.auth === 'microsoft' ? 'Microsoft account' : 'offline account'})${version ? ` (protocol ${version})` : ''}...`)
@@ -4799,6 +4850,8 @@ ${s?.contraptions?.length ? `Contraptions here: ${s.contraptions.join(' | ')}
 
     this.brain.start()
     this.smalltalk.start()
+    // Something to work toward from the first second; the planner refines it when it gets round to it.
+    setTimeout(() => safe(() => this.goals.ensureStart(inventorySummary(bot))), 1500)
   }
 
   onEnd (reason) {

@@ -29,6 +29,7 @@
     "fastProvider": "",
     "fastUrl": "",
     "fastApiKey": "",
+    "fastNumCtx": 4096,
     "think": null,
     "maxTokens": 400,
     "compactPrompt": "auto",
