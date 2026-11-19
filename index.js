@@ -1592,7 +1592,9 @@ function decisionExample (agent, lean = false) {
   const name = String(agent?.bot?.username || '')
   let h = 0
   for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0
-  const ex = { ...DECISION_EXAMPLES[h % DECISION_EXAMPLES.length] }
+  const base = DECISION_EXAMPLES[h % DECISION_EXAMPLES.length]
+  // "choose" right after the thought: the number of one of the good options it's given (0 = its own action below).
+  const ex = { thought: base.thought, choose: 0, ...base }
   if (lean) { delete ex.emotion; delete ex.emotionIntensity; delete ex.taskUpdate } // ~35 fewer tokens to generate every turn
   return JSON.stringify(ex)
 }
@@ -1635,6 +1637,7 @@ ${toolDocs}
 ONLY a JSON object, keys in this order. Think first, then pick the action, then fill in ALL its arguments (from the list above):
 ${decisionExample(agent, true)}
 ${EXAMPLE_NOTE}
+"choose": when the turn lists good options, the number of the one you take (its action is filled in for you); 0 when you do something else. Most turns one of them is right.
 "next": up to 2 follow-up actions you are SURE you will do right after this one (they run without asking you again); [] when unsure. Optional extras, only when they change: "queue" (up to 3 things you want to do later: [{"goal":"short text","priority":1-10}]; the engine keeps a backlog and does the most important first), "emotion" (one of ${EMOTIONS.join(', ')}) with "emotionIntensity" 1-10, and "taskUpdate" (only if status.task exists).`
 }
 
@@ -1647,7 +1650,7 @@ function buildTrainedPrompt (agent, toolNames) {
   const p = agent.personality || {}
   const lvl = safe(() => agent.intelligence.levelName?.()) || agent.config.intelligence?.level || ''
   return `You are ${agent.bot.username}, playing Minecraft${lvl ? ` (${lvl} player)` : ''}. ${String(p.description || '').slice(0, 240)}
-Answer with one JSON decision: thought, goal, subgoal, goalStatus, action {name, args}, next.
+Answer with one JSON decision: thought, choose (a good option's number, or 0), goal, subgoal, goalStatus, action {name, args}, next.
 Actions: ${String(toolNames).split('\n').join(' ')}`
 }
 
@@ -1691,6 +1694,7 @@ ${toolDocs}
 Reply with ONLY a JSON object, no other text, keys in this order (think first, then the action with ALL its arguments filled in), e.g.:
 ${decisionExample(agent)}
 ${EXAMPLE_NOTE}
+"choose": when the turn lists good options, the number of the one you take (its action is filled in for you); 0 when you do something else. Most turns one of them is right.
 "next": up to 2 follow-up actions you are SURE you will do right after this one (they run without asking you again); [] when unsure.
 "queue": optional, up to 3 things you want to do later: [{"goal":"short text","priority":1-10}] (the engine keeps a backlog and does the most important first).
 emotion is one of: ${EMOTIONS.join(', ')}. goalStatus: working|subgoal_done|goal_done|blocked|new_goal. taskUpdate.status: none|working|done|gave_up.`
@@ -3142,6 +3146,7 @@ function instructionFromText (text) {
 
 const threat = require('./threat')
 const routines = require('./routines')
+const strategy = require('./strategy')
 const normalizeArg = (v) => String(v || '').toLowerCase().trim().replace(/\s+/g, '_').replace(/^minecraft:/, '')
 
 /**
@@ -3817,6 +3822,8 @@ ${said ? `${name} just said: ${said}
     const inv = agent.perception?.latest?.inventory?.items || {}
     const next = require('./commonsense').nextTool(inv)
     if (next) { this.startObtain(next, 1); const o = this.obtainStep(); if (o) { agent.log.info(`Not standing around: making a ${next.replace(/_/g, ' ')}.`); return o } }
+    const best = agent.strategyOptions()[0]
+    if (best) { agent.log.info(`Not standing around: ${best.why}.`); return { source: 'auto', thought: best.why, emotion: 'focused', emotionIntensity: 4, action: { ...best.action } } }
     agent.log.info('Not standing around: having a look around.')
     return { source: 'auto', thought: 'nothing to wait for; looking around', emotion: 'curious', emotionIntensity: 4, action: { name: 'explore', args: { distance: 32 } } }
   }
@@ -4148,11 +4155,11 @@ ${said ? `${name} just said: ${said}
     const agent = this.agent
     const { log, executor, config, emotions } = agent
     agent.goals.maybePlan() // step back and plan in the background when it's time
-    const { messages, tools } = this.decisionMessages({ upcoming })
+    const { messages, tools, options } = this.decisionMessages({ upcoming })
     const out = await agent.llm.chat(messages, { schema: config.llm.decisionSchema ? decisionSchema(tools) : undefined, priority: PRIORITY.decision, label: 'decision', temperature: config.mind.decisionTemperature ?? undefined })
     // The short system prompt a fine-tuned model would get instead (TRAINING.md): kept with each example.
     this.lastExchange = { messages, out, at: Date.now(), short: safe(() => buildTrainedPrompt(agent, executor.describeTools('names'))) }
-    return this.finishDecision(out, tools)
+    return this.finishDecision(out, tools, options)
   }
 
   /** The decision prompt as the model would get it right now (also used to record the code's own decisions). */
@@ -4178,6 +4185,9 @@ ${said ? `${name} just said: ${said}
     if (!memory.goal) nudges.push('You have no current goal: pick a sensible one based on your ambitions and situation.')
     const carried = Object.entries(state.inventory.items).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([n, c]) => `${c} ${n}`)
     nudges.push(`Before gathering or crafting anything, check what you already carry: ${carried.join(', ') || 'nothing'}.`)
+    // The best concrete options right now, worked out in code (strategy.js): a small model picks better than it invents.
+    const options = agent.strategyOptions()
+    if (options.length) nudges.push(`Good options right now (worked out for you):\n${strategy.describe(options).join('\n')}\nIf one fits, answer "choose" with its number (its action is filled in for you). Otherwise "choose": 0 and your own action.`)
     const lastThought = memory.actions.at(-1)?.thought
     if (lastThought) nudges.push(`Your previous thought: "${lastThought}" Stay on your plan and keep your goal text the same unless something changed.`)
 
@@ -4195,11 +4205,11 @@ ${said ? `${name} just said: ${said}
           `${nudges.join('\n')}\nChoose your next action.`
       }
     ]
-    return { messages, tools }
+    return { messages, tools, options }
   }
 
   /** Turn the model's answer into a decision (and let goals, feelings and tasks hear about it). */
-  finishDecision (out, tools) {
+  finishDecision (out, tools, options = []) {
     const agent = this.agent
     const { log, memory, config, emotions } = agent
     const decision = {
@@ -4212,10 +4222,22 @@ ${said ? `${name} just said: ${said}
     decision.next = (Array.isArray(out.next) ? out.next : []).slice(0, 2)
       .map((n) => ({ name: String(n?.name || ''), args: isPlainObject(n?.args) ? n.args : {} }))
       .filter((n) => tools.includes(n.name) && n.name !== decision.action.name && !['attackTarget', 'chatMessage'].includes(n.name) && Object.keys(n.args).length > 0)
+    // It picked one of the options: take that option's ready action (vetted, arguments filled in).
+    const pickN = Number(out.choose)
+    if (Number.isInteger(pickN) && pickN >= 1 && options[pickN - 1]) {
+      decision.action = { ...options[pickN - 1].action }
+      decision.chosen = options[pickN - 1].id
+    }
     if (!tools.includes(decision.action.name)) {
-      log.warn(`LLM chose invalid action "${decision.action.name}"; waiting instead.`)
       memory.addEvent('error', `You tried to use "${decision.action.name}", which is not an available action.`)
-      decision.action = { name: 'wait', args: { seconds: 2 } }
+      if (options[0]) { // the best option instead of standing around
+        log.warn(`LLM chose invalid action "${decision.action.name}"; doing the best option instead: ${options[0].action.name}.`)
+        decision.action = { ...options[0].action }
+        decision.chosen = options[0].id
+      } else {
+        log.warn(`LLM chose invalid action "${decision.action.name}"; waiting instead.`)
+        decision.action = { name: 'wait', args: { seconds: 2 } }
+      }
     }
     agent.goals.onDecision(out) // progress, detours, changed minds
     emotions.fromLabel(decision.emotion, decision.emotionIntensity)
@@ -4353,6 +4375,34 @@ class Agent {
   }
 
   dangerLevel () { return this.dangerInfo().level }
+
+  /** The best few concrete options right now (strategy.js), from what it perceives and knows. */
+  strategyOptions () {
+    const bot = this.bot
+    const s = this.perception?.latest
+    if (!bot?.entity || !s) return []
+    const slot = (d) => safe(() => bot.inventory.slots[bot.getEquipmentDestSlot(d)]?.name) || ''
+    const step = this.goals?.current?.steps?.[this.goals.current.now]?.text
+    const goalItem = [step, this.goals?.current?.text].map((t) => routines.stepCount(t, bot.registry)).find(Boolean) || null
+    const view = {
+      inv: s.inventory.items,
+      equipped: { head: slot('head'), torso: slot('torso'), legs: slot('legs'), feet: slot('feet'), offHand: slot('off-hand') },
+      health: bot.health,
+      food: bot.food,
+      time: bot.time?.timeOfDay,
+      dim: String(bot.game?.dimension || 'overworld').replace('minecraft:', '').replace(/^the_/, ''),
+      layout: s.layout,
+      tier: this.intelligence.knowledgeTier(),
+      freeSlots: bot.inventory.emptySlotCount(),
+      bedKnown: Boolean(this.places?.bed),
+      homeKnown: Boolean(this.places?.home),
+      chestKnown: Boolean(s.status?.knownContainers?.length),
+      threat: safe(() => this.threat()),
+      tools: new Set(this.executor.availableTools()),
+      goalItem: goalItem && (s.inventory.items[goalItem.item] || 0) < goalItem.count ? goalItem : null
+    }
+    return safe(() => strategy.options(view)) || []
+  }
 
   /**
    * Sizing up the creatures it perceives (not ones hidden behind walls): danger and worth per creature and a verdict

@@ -37,8 +37,8 @@ http.createServer((req, res) => {
     if (props.includes('action') || /## (Available actions|Actions)\n|Answer with one JSON decision/.test(system)) { // decisions come without a schema now
       // Script entries are actions, optionally with goal fields: { name, args, goal, subgoal, goalStatus }
       const step = script[turn++] || { name: 'wait', args: { seconds: 3 } }
-      const { goal = 'testing', subgoal = '', goalStatus = 'working', ...action } = step
-      out = { thought: `scripted turn ${turn}`, emotion: 'calm', emotionIntensity: 4, goal, subgoal, goalStatus, action, taskUpdate: { status: 'none', note: '' } }
+      const { goal = 'testing', subgoal = '', goalStatus = 'working', choose = 0, ...action } = step
+      out = { thought: `scripted turn ${turn}`, choose, emotion: 'calm', emotionIntensity: 4, goal, subgoal, goalStatus, action, taskUpdate: { status: 'none', note: '' } }
     } else if (props.includes('longTerm')) {
       out = { overarching: 'have a cozy base and good gear', longTerm: [{ text: 'build a cozy base', status: 'active' }], current: 'gather 20 oak logs', steps: ['find trees', 'chop 20 oak logs'], why: 'wood first, then a base' }
     } else if (props.includes('decision')) {

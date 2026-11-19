@@ -817,6 +817,36 @@ It also had a stray line that reset the autopilot after nearly every action. Tha
 
 **Not verified:** the notebook on Colab (written from Unsloth's current API; cells compile), real fine-tune quality, and the new aim on a real server.
 
+## 34. As smart as possible on a small model
+
+**Asked:** "Currently the existing bot and model aren't too smart, make it as smart as physically possible."
+
+**Reasoning:** on a 6 GB card the model can't get bigger, so the gain has to come from what it's asked. A small model chooses well among a few sensible options and plans badly from a long rulebook. Past stone tools and a sword, the code had no idea what a player does next, so the model was on its own.
+
+**Found while building it** (acquire.js, the item-getter behind obtainItem and tasks):
+- **Bed:** it went looking for skeletons. Re-dyeing a bed it doesn't have (bone meal plus a bed) counted as fewer missing items than wool plus planks.
+- **Torch:** it planned to mine a `wall_torch`, someone's placed torch. With that fixed, charcoal came from breaking a campfire.
+- **Wool:** it came from crafting string mined from cobwebs, with a sheep in sight.
+- **Sticks:** it mined dead bushes for them while carrying wood.
+
+**Built:**
+- **`strategy.js`:** each decision gets a menu of up to 5 ready actions.
+  - Urgent first: flee or fight by threat verdict, eat, cook, food, a bed or shelter at dusk and night, a torch in a dark cave, store or drop when full.
+  - Then the next two progression milestones the bot knows about (by knowledge tier), from the first pickaxe to a diamond pickaxe and a base.
+  - Then its current step's item.
+  - The model answers `choose: n`, or 0 and its own action. Invalid actions and idle waits fall back to the best option.
+- **acquire.js:**
+  - placed forms and crafted blocks are never sources when there's another way;
+  - an animal in sight comes first for its drops; with none in sight, it goes looking for one;
+  - it crafts first when everything needed is carried;
+  - recipes are weighed by how hard their missing items are.
+
+**Tested:**
+- `test/strategy.test.js`: the menus at each stage and the urgent cases, plus the item-planning fixes.
+- Live with the mock: the prompt lists the options, and "choose 1" ran obtainItem wooden_pickaxe as a routine.
+
+**Not verified:** how often the real qwen3 uses `choose`, and whether the menu makes its play visibly better in a real session.
+
 ## Where it stands now
 
 **Next for the user:**

@@ -297,7 +297,18 @@ You can also pin a version with `"server": { "version": "26.1" }`. If you're kic
    - notable blocks, the block it's looking at, time and weather;
    - its goal, feelings, the task it's doing for someone (with progress and remaining patience), tasks it said it would do later, and nearby danger zones;
    - recent actions with results, events and chat.
-2. **Decide.** The snapshot goes to Ollama together with a summary of the people online and what it has learned. A JSON schema forces a reply like:
+2. **Decide.** The snapshot goes to Ollama together with a summary of the people online and what it has learned, plus **a short menu of good options** worked out in code (`strategy.js`). A small model picks well from a few sensible choices but plans poorly from scratch, so the menu holds the 3–5 best concrete actions, with their arguments filled in:
+   - **Urgent first:** a fight worth taking or one to get away from (threat.js), eating when hungry, cooking raw food, getting food when there's none, a bed or a shelter at dusk and at night, a torch in a dark cave, and storing or dropping junk when the inventory is full.
+   - **Then the next steps of a player's progression:** tools → food → a bed → an iron pickaxe → torches → an iron sword → a shield → iron armor → a bucket → diamonds → a diamond pickaxe → a base. These are limited by what this player knows, so a beginner doesn't think of shields yet, and only what isn't done yet.
+   - **Then its current goal,** when the step it's on names something to get.
+
+   It answers with the number of one (`"choose": 2`) and the action runs as listed, or `0` and its own action. When its own answer is unusable (an action that doesn't exist, or standing around with nothing to wait for), the best option is taken instead.
+
+   The item-getter behind most of these (`obtainItem`, acquire.js) plans the way a player does:
+   - wool from the sheep in sight (or it goes looking for sheep), not from string;
+   - a bed from wool and planks, not by re-dyeing a bed it doesn't have;
+   - torches from coal or charcoal, never by breaking someone's wall torch or campfire;
+   - sticks from its own planks. A JSON schema forces a reply like:
    ```json
    {"thought": "Steve killed me last time and he's got a sword out. Not going near him.", "emotion": "nervous",
     "emotionIntensity": 7, "goal": "mine iron away from spawn", "action": {"name": "explore", "args": {"direction": "east"}}}
