@@ -48,6 +48,25 @@ server.listen(0, async () => {
   assert.equal(ollamaBody.options.num_predict, 400)
   console.log('ok')
 
+  console.log('\n== a split-second pick: forced onto the small model, few tokens, given up at its deadline ==')
+  await client.chat([{ role: 'user', content: 'pick' }], { schema, priority: 2, fast: true, maxTokens: 12 })
+  const quick = seen.at(-1).body
+  assert.equal(quick.model, 'tiny')
+  assert.equal(quick.options.num_predict, 12)
+  const n = seen.length
+  const late = client.chat([{ role: 'user', content: 'too slow' }], { schema, priority: 2, signal: AbortSignal.timeout(100) })
+  await assert.rejects(late, /gave up/)
+  assert.equal(seen.length, n + 1, 'no retry after giving up')
+  // Given up while still queued: never sent.
+  const blocker = client.chat([{ role: 'user', content: 'decide' }], { schema, priority: 2 })
+  const ctrl = new AbortController()
+  const queued = client.chat([{ role: 'user', content: 'queued' }], { schema, priority: 2, signal: ctrl.signal })
+  ctrl.abort()
+  await assert.rejects(queued, /gave up/)
+  await blocker
+  assert.ok(!seen.some((s) => s.body.messages[0].content === 'queued'))
+  console.log('ok')
+
   console.log('\n== one lane without a fast model ==')
   const single = new OllamaClient(deepMerge(DEFAULT_CONFIG, { llm: { url: `${base}/api/chat`, model: 'slow-big' } }), log)
   const t1 = Date.now()

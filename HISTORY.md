@@ -847,6 +847,47 @@ It also had a stray line that reset the autopilot after nearly every action. Tha
 
 **Not verified:** how often the real qwen3 uses `choose`, and whether the menu makes its play visibly better in a real session.
 
+## 35. A good model without good data; thinking time by situation; recording the user's play
+
+**Asked:** the user can't train a model on data that isn't good, and the current model is slow and not smart. How to get a model that (A) makes realistic player decisions, (B) plays, moves and acts like a player, and (C) decides fast and changes how long it thinks, acting in under 300 ms for fights and live events.
+
+**Answer given:** one model can't do all three on a 6 GB card. Split it like a player: hands are code at 20 Hz (reflexes, combat, look.js), quick picks are a tiny prompt to the small model, slow thinking is the full decision. Good data comes from the user's own play first, then a big teacher model, then the code's own decisions, all filtered by outcome.
+
+**Built:**
+- **Thinking time by situation** (`Brain.thinkingBudget`, `loop.thinking`):
+  - **instant:** high danger with an urgent option, or only one sensible option: the best option, no model;
+  - **quick:** an urgent option with a real choice: `Brain.quickChoice` sends a tiny prompt (~1 KB) to the fast lane (`llm.chat({ fast: true, maxTokens: 12, signal })`) for `{"choose": n}`, giving up after `quickMs` (1.5 s) and taking options[0];
+  - **full:** calm: the normal decision; past `fullMs` (12 s) the best option runs and the late answer becomes `this.prethought`, used right after if nothing changed;
+  - while thinking, `dangerLevel() === 'high'` is checked every 200 ms and a reflex interrupts.
+  - `OllamaClient.chat` takes `fast`, `maxTokens` and `signal`; a given-up request leaves the queue, or is aborted without retrying.
+- **`observe.js`:** one compact description of the moment (~250–500 tokens): health, food, place, time, layout, held and worn items, inventory, notable blocks in sight, creatures with ids, threats, goal and step, task, chat, recent events and actions, options.
+  - Used as the user message in `llm.trained` mode.
+  - Stored as `compact` with every recorded example.
+  - `training-set --short` builds user messages from it.
+  - `trainedPrompt()` is the shared short system prompt.
+- **`npm run record` (scripts/record.js):** a TCP pass-through on port 25566 to the user's offline-mode server.
+  - Bytes are forwarded untouched. Server→client bytes feed a silent minecraft-protocol client plus a mineflayer bot (physics off, writes dropped) for the world, inventory and health. Client→server packets are parsed with its own state machine (login → configuration → play).
+  - Acts become the bot's actions: mineBlock (counted), placeBlock (rows of the same block count as one decision), craftItem (result-slot clicks plus the inventory gain), smeltItem, eatFood (use_item, then food going up), attackTarget, storeItems/takeItems (inventory diff when a chest closes), equipItem, useItem, fish, activateBlock (doors, levers), sleepInBed, dropItems, chatMessage, and explore (a long walk with nothing else).
+  - Each decision is dated back to when the previous one ended, and the snapshot nearest that moment is used (one a second).
+  - `goal: ...` in chat sets the goal annotation.
+  - Decisions followed by dying within 15 s are marked bad.
+  - Output: `data/training/demos/*.jsonl` and `data/training/motion/*.jsonl` (look/move at packet rate, keys from `player_input`, swings, hits with target positions, nearby players and hostiles every second).
+- **`npm run analyze-motion`:** finds flicks (bursts of turning between stills), splits submovements at speed dips, fits Fitts' law on the primary movement, and turns the 60° turn time into an aim skill.
+  - The skill comes from a calibration curve made by running the same analysis on look.js's own flicks at skills 0…1. On unseen synthetic flicks it recovers 0.9 → 0.92 and 0.15 → 0.18.
+  - It also measures CPS, strafing while hitting, sprinting and jumps.
+  - `behavior.aimProfile` feeds `aimSkill` to look.js.
+
+**Gotcha:** minecraft-protocol's `createClient({ stream })` with an offline account emits `connect` before `setProtocol` is attached, so the client stays in the handshaking state. Emit `connect` again after creating it.
+
+**Tested:**
+- `test/thinking.test.js`: budgets, the quick pick, its deadline and interruption, the calm deadline and prethought.
+- `test/llm.test.js`: fast lane, `num_predict`, giving up while queued or running.
+- `test/record.test.js`: frames and compression, the handshake, aim recovery, the compact state, demos in the training set.
+- Live on flying-squid 1.21.4: a scripted player through the recorder gave 3 decisions (mine 3 grass, a dirt row, a chat line) with the goal from chat, through the configuration state.
+- Live with a 14 s mock: after 12 s it started obtainItem wooden_pickaxe instead of standing still.
+
+**Not verified:** the recorder against Paper 26.1 and a real vanilla client; crafting, furnace and chest detection (flying-squid can't do windows); the quick lane's real speed on the 1660 Super.
+
 ## Where it stands now
 
 **Next for the user:**
@@ -855,6 +896,7 @@ It also had a stray line that reset the autopilot after nearly every action. Tha
 3. `npm run doctor`, to see the new real timings with the compact prompt.
 4. Set up the local Paper test server (START-HERE step 4: Java 21, Paper 1.21.4, EULA, `online-mode=false` on that fresh world only).
 5. `npm start`, then join and talk to it.
+6. For good training data: `npm run record -- --server localhost:25565 --level advanced`, join `localhost:25566`, play, say `goal: ...` in chat (TRAINING.md). Then `npm run analyze-motion`.
 
 **After that:**
 - Watch real play and tune prompts from the real logs. Nothing has run on a real server or with a real model yet; every live test used flying-squid and a mock LLM.

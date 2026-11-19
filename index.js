@@ -284,6 +284,7 @@ const DEFAULT_CONFIG = {
     menuTime: true, // crafting, furnaces, chests and armor take time in the menu, longer for beginners
     sprintJump: true, // experienced players (parkour level 3+) sprint-jump along long straight flat paths, like real players do
     humanKeys: true, // walk paths with WASD like a person: the camera leads, W+A/D curve around corners (look.js)
+    aimProfile: '', // a recording of your own aim (npm run record, then npm run analyze-motion): the bot turns at your speed and accuracy
     smoothTurning: true, // turn the head over a few ticks like a person instead of snapping (aiming and fights stay instant)
     nightShelter: true, // at nightfall: bed if it has one, otherwise dig in (skilled, armed players keep playing)
     autopilot: true, // early-game basics (logs, wooden and stone pickaxe) by rules, not by asking the model: fast and reliable
@@ -480,6 +481,10 @@ const DEFAULT_CONFIG = {
     minLlmIntervalMs: 1000, // never call the LLM for decisions more often than this
     postActionDelayMs: 150, // pause between actions (players don't stop between things)
     prethink: true, // think about the next move while the current one runs, so there's no wait when it ends
+    // How long a decision may take, by situation (Brain.thinkingBudget). Danger with one sensible answer: none (code).
+    // Danger or something urgent with a choice: quickMs for the small model to pick an option number (0 = never ask).
+    // Calm: a full decision; after fullMs the best option goes ahead and the answer is used right after (0 = wait).
+    thinking: { enabled: true, quickMs: 1500, fullMs: 12000 },
     maxActionMs: 180000, // hard safety timeout for any single action
     errorBackoffMs: 3000,
     maxErrorBackoffMs: 60000,
@@ -1164,11 +1169,21 @@ class OllamaClient {
   }
 
   /** Queue a chat request. Resolves to the parsed JSON object the model produced. */
-  chat (messages, { schema, priority = PRIORITY.decision, temperature, label = 'llm' } = {}) {
+  chat (messages, { schema, priority = PRIORITY.decision, temperature, label = 'llm', maxTokens, fast = false, signal } = {}) {
     return new Promise((resolve, reject) => {
-      const lane = this.laneFor(priority)
+      // fast: a split-second choice (Brain.quickChoice) goes to the small model whatever its priority.
+      const lane = fast && this.cfg.fastModel && !this.fastOff ? 'fast' : this.laneFor(priority)
       const q = this.lanes[lane].queue
-      q.push({ messages, schema, priority, temperature, label, lane, resolve, reject, at: Date.now() })
+      const job = { messages, schema, priority, temperature, label, lane, maxTokens, resolve, reject, at: Date.now() }
+      if (signal) {
+        // Given up on (its deadline passed): out of the queue, or cut off mid-answer.
+        if (signal.aborted) return reject(Object.assign(new Error('gave up'), { name: 'AbortError' }))
+        signal.addEventListener('abort', () => {
+          const i = q.indexOf(job)
+          if (i >= 0) { q.splice(i, 1); job.reject(Object.assign(new Error('gave up'), { name: 'AbortError' })) } else job.ctrl?.abort()
+        }, { once: true })
+      }
+      q.push(job)
       q.sort((a, b) => a.priority - b.priority || a.at - b.at)
       // One model for everything: a player's message shouldn't wait out a slow decision. Cancel the decision
       // (it restarts right after the reply); with a separate fast model this never happens.
@@ -1214,12 +1229,13 @@ class OllamaClient {
     }
   }
 
-  body ({ messages, schema, temperature, lane }) {
+  body ({ messages, schema, temperature, lane, maxTokens }) {
     const { provider, model } = this.target(lane)
     const temp = temperature ?? this.cfg.temperature
+    const cap = maxTokens || this.cfg.maxTokens
     if (provider === 'openai') {
       const body = { model, messages, temperature: temp, stream: false }
-      if (this.cfg.maxTokens) body.max_tokens = this.cfg.maxTokens
+      if (cap) body.max_tokens = cap
       body.response_format = schema && this.jsonSchemaSupported
         ? { type: 'json_schema', json_schema: { name: 'answer', schema } }
         : { type: 'json_object' }
@@ -1234,7 +1250,7 @@ class OllamaClient {
       // The chat model's prompts are short: a smaller context leaves room on the card for both models.
       options: { temperature: temp, num_ctx: lane === 'fast' && this.cfg.fastModel ? Math.min(this.cfg.numCtx, this.cfg.fastNumCtx || 4096) : this.cfg.numCtx }
     }
-    if (this.cfg.maxTokens) body.options.num_predict = this.cfg.maxTokens
+    if (cap) body.options.num_predict = cap
     // A prompt longer than the context is cut silently by Ollama (the rules at the start go first): say so once.
     const chars = messages.reduce((a, m) => a + String(m.content || '').length, 0)
     if (chars / 3.3 > body.options.num_ctx - (this.cfg.maxTokens || 400) && !this.warnedCtx) {
@@ -1295,6 +1311,7 @@ class OllamaClient {
         return parsed
       } catch (err) {
         if (job.preempted && job.ctrl?.signal.aborted) { job.preempted = false; throw Object.assign(new Error('preempted'), { preempted: true }) }
+        if (job.ctrl?.signal.aborted) throw Object.assign(new Error('gave up'), { name: 'AbortError' }) // its deadline passed: no retry
         lastErr = err
         const retryable = err.retryable !== false || err.name === 'TimeoutError' || err.cause?.code === 'ECONNREFUSED'
         if (!retryable || attempt === this.cfg.maxRetries) break
@@ -1648,10 +1665,8 @@ ${EXAMPLE_NOTE}
  */
 function buildTrainedPrompt (agent, toolNames) {
   const p = agent.personality || {}
-  const lvl = safe(() => agent.intelligence.levelName?.()) || agent.config.intelligence?.level || ''
-  return `You are ${agent.bot.username}, playing Minecraft${lvl ? ` (${lvl} player)` : ''}. ${String(p.description || '').slice(0, 240)}
-Answer with one JSON decision: thought, choose (a good option's number, or 0), goal, subgoal, goalStatus, action {name, args}, next.
-Actions: ${String(toolNames).split('\n').join(' ')}`
+  const level = safe(() => agent.intelligence.name) || agent.config.intelligence?.level || ''
+  return observe.trainedPrompt({ name: agent.bot.username, level, description: p.description, toolNames })
 }
 
 function buildDecisionPrompt (agent, toolDocs) {
@@ -3147,6 +3162,7 @@ function instructionFromText (text) {
 const threat = require('./threat')
 const routines = require('./routines')
 const strategy = require('./strategy')
+const observe = require('./observe')
 const normalizeArg = (v) => String(v || '').toLowerCase().trim().replace(/\s+/g, '_').replace(/^minecraft:/, '')
 
 /**
@@ -3363,8 +3379,12 @@ ${said ? `${name} just said: ${said}
           if (wait > 0) await this.idle(wait)
           if (!this.running || this.paused || agent.dead) continue
           if (this.forced.length) continue // a command arrived while we waited
-          this.lastLlmAt = Date.now()
-          decision = await this.thinkWhileBusy()
+          // How long may this take? Danger: no model at all, or a split-second pick from the options on the small
+          // model. Calm: a full decision, with a deadline after which the best option goes ahead (loop.thinking).
+          const budget = this.thinkingBudget()
+          if (budget.mode === 'instant') decision = this.optionDecision(budget.options[0], `no time to think: ${budget.why}`)
+          else if (budget.mode === 'quick') decision = await this.quickChoice(budget)
+          else { this.lastLlmAt = Date.now(); decision = await this.thinkWhileBusy(budget) }
         }
 
         while (agent.reflexes?.busy && this.running) await this.idle(100) // a save in progress finishes first
@@ -3632,7 +3652,7 @@ ${said ? `${name} just said: ${said}
     if (!x) return
     if (!given) this.lastExchange = null
     const file = path.join(path.dirname(path.resolve(__dirname, this.agent.config.learning.file)), 'training', 'decisions.jsonl')
-    const line = { at: new Date(x.at).toISOString(), model: x.source ? 'code' : this.agent.config.llm.model, level: this.agent.config.intelligence.level, messages: x.messages, short: x.short, answer: x.out, ok: result.ok, code: result.code || null, result: String(result.message || '').slice(0, 200) }
+    const line = { at: new Date(x.at).toISOString(), model: x.source ? 'code' : this.agent.config.llm.model, level: this.agent.config.intelligence.level, messages: x.messages, short: x.short, compact: x.compact, answer: x.out, ok: result.ok, code: result.code || null, result: String(result.message || '').slice(0, 200) }
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true })
       fs.appendFileSync(file, JSON.stringify(line) + '\n')
@@ -3640,11 +3660,11 @@ ${said ? `${name} just said: ${said}
   }
 
   /** A decision the code made, written like the model's answer, with the prompt the model would have seen. */
-  recordCodeExample ({ messages }, decision, result) {
+  recordCodeExample ({ messages, compact }, decision, result) {
     const agent = this.agent
     const step = agent.goals?.current?.steps?.[agent.goals.current.now]?.text || ''
     const answer = { thought: String(decision.thought || '').slice(0, 120), goal: agent.memory.goal || agent.goals?.current?.text || '', subgoal: step, goalStatus: 'working', action: decision.action, next: [] }
-    this.recordTraining(decision, result, { messages, out: answer, at: Date.now(), short: safe(() => buildTrainedPrompt(agent, agent.executor.describeTools('names'))), source: decision.source })
+    this.recordTraining(decision, result, { messages, out: answer, at: Date.now(), short: safe(() => buildTrainedPrompt(agent, agent.executor.describeTools('names'))), compact, source: decision.source })
   }
 
   /** The early-game ladder by rules (see basics.js), only when nothing else needs the bot. */
@@ -3943,17 +3963,110 @@ ${said ? `${name} just said: ${said}
     return { source: 'plan', thought: 'Carrying on with my plan.', emotion: 'calm', emotionIntensity: 4, action: step }
   }
 
-  async thinkWhileBusy () {
+  /**
+   * How much thinking this moment allows, like a player: nobody deliberates with a creeper next to them, and nobody
+   * stands still for 20 s on a calm afternoon either.
+   *   instant: something urgent and only one sensible answer (or danger is high): the best option at once, no model.
+   *   quick:   danger nearby or something urgent with a real choice: the small model picks an option number from a
+   *            tiny prompt (a few hundred tokens, ~3 tokens out), with a hard deadline; past it, the best option.
+   *   full:    calm: the normal decision (goals, chat, plans), with a deadline after which the best option goes
+   *            ahead and the late answer is kept for right after it (anytime thinking).
+   */
+  thinkingBudget () {
+    const agent = this.agent
+    const t = { enabled: true, quickMs: 1500, fullMs: 12000, ...(agent.config.loop.thinking || {}) }
+    if (!t.enabled) return { mode: 'full', ms: 0 }
+    const danger = agent.dangerInfo()
+    if (!agent.perception?.latest) safe(() => agent.perception.snapshot()) // the very first decision: look around first
+    const options = agent.strategyOptions()
+    const urgent = options.filter((o) => o.urgent)
+    if (danger.level === 'high' && urgent.length) return { mode: 'instant', options: urgent, why: danger.reason }
+    // Something urgent (hunger, dusk, a fight worth taking, a full inventory): a quick pick, not a long think.
+    if (urgent.length) {
+      if (options.length === 1 || !t.quickMs) return { mode: 'instant', options, why: danger.reason || options[0].why }
+      return { mode: 'quick', ms: t.quickMs, options, why: danger.reason || urgent[0].why }
+    }
+    return { mode: 'full', ms: t.fullMs || 0, options }
+  }
+
+  /** An option from strategy.js as a decision. */
+  optionDecision (opt, thought, source = 'quick') {
+    return { source, chosen: opt.id, thought: thought || opt.why, emotion: opt.urgent ? 'focused' : 'calm', emotionIntensity: opt.urgent ? 6 : 4, action: { ...opt.action } }
+  }
+
+  /**
+   * A split-second choice: which of these options, now? A tiny prompt (who it is, health, food, the threats, the last
+   * thing that happened, the numbered options) to the small model, answered with one number. Never longer than the
+   * budget: the best option goes ahead if the model is late or unsure.
+   */
+  async quickChoice (budget) {
+    const agent = this.agent
+    const { bot, memory, log } = agent
+    const opts = budget.options
+    const started = Date.now()
+    const th = safe(() => agent.threat())
+    const ev = memory.events.at(-1)
+    const last = ev && Date.now() - ev.at < 15000 ? ev.text : ''
+    const level = agent.intelligence?.name || ''
+    const system = `You play Minecraft as ${bot.username}${level ? ` (${level} player)` : ''}. Something needs a decision right now. Pick the option a good player of your level would pick. Answer ONLY JSON: {"choose": <number>}`
+    const user = [
+      `Health ${Math.round(bot.health)}/20, food ${bot.food}/20.${budget.why ? ` ${budget.why}.` : ''}`,
+      th?.list?.length ? `Around you: ${(safe(() => threat.describe(th, 4)) || []).join('; ')}` : '',
+      last ? `Just now: ${String(last).slice(0, 160)}` : '',
+      `Options:\n${strategy.describe(opts).join('\n')}`
+    ].filter(Boolean).join('\n')
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), budget.ms)
+    const interrupted = new Promise((resolve) => { this.interruptFn = resolve })
+    try {
+      const asked = agent.llm.chat([{ role: 'system', content: system }, { role: 'user', content: user }], {
+        schema: { type: 'object', properties: { choose: { type: 'integer', minimum: 1, maximum: opts.length } }, required: ['choose'] },
+        priority: PRIORITY.reaction, fast: true, maxTokens: 12, temperature: 0.2, label: 'quick-choice', signal: ctrl.signal
+      }).then((out) => ({ out }))
+      asked.catch(() => {})
+      const got = await Promise.race([asked, interrupted])
+      if (got?.action) return got // a reflex took over
+      const n = Number(got?.out?.choose)
+      const opt = Number.isInteger(n) && opts[n - 1] ? opts[n - 1] : opts[0]
+      log.debug(`quick choice in ${Date.now() - started} ms: ${opt.id}`)
+      return this.optionDecision(opt, opt.why)
+    } catch {
+      log.debug(`quick choice took over ${budget.ms} ms: going with ${opts[0].id}`)
+      return this.optionDecision(opts[0], `${opts[0].why} (no time to weigh it up)`)
+    } finally {
+      clearTimeout(timer)
+      this.interruptFn = null
+    }
+  }
+
+  async thinkWhileBusy (budget = {}) {
     const agent = this.agent
     const busy = agent.config.busyWork.enabled ? this.pickBusyWork() : null
     const work = busy ? agent.executor.execute(busy.name, busy.args) : null
     this.lastBusyName = busy ? busy.name : null
+    const startedAt = { at: Date.now(), chat: agent.memory.chat.length, hp: agent.bot.health, goal: agent.memory.goal }
     const deciding = this.decide()
     deciding.catch(() => {}) // if a reflex wins the race, nobody waits for this any more
     const interrupted = new Promise((resolve) => { this.interruptFn = resolve })
+    // Live events while thinking: a monster walking up, a player starting a fight. Checked 5 times a second; the
+    // reflexes answer without waiting for the model (the late answer is dropped).
+    const watch = setInterval(() => { if (this.interruptFn && agent.dangerLevel() === 'high') { const now = this.reflex(); if (now) this.interruptFn(now) } }, 200)
+    // Taking too long on a calm decision: the best option goes ahead, and the answer is used right after it (prethought).
+    let late = null
+    const best = budget.options?.[0]
+    if (budget.ms > 0 && best) {
+      late = setTimeout(() => {
+        if (!this.interruptFn) return
+        agent.log.info(`Still thinking after ${(budget.ms / 1000).toFixed(0)} s, so meanwhile: ${best.why} (the answer is used right after).`)
+        this.prethought = { promise: deciding, ...startedAt }
+        this.interruptFn(this.optionDecision(best, `${best.why} (while I think)`, 'auto'))
+      }, budget.ms)
+    }
     try {
       return await Promise.race([deciding, interrupted])
     } finally {
+      clearInterval(watch)
+      clearTimeout(late)
       this.interruptFn = null
       if (work) {
         agent.executor.abort('done thinking', { quiet: true })
@@ -4155,10 +4268,10 @@ ${said ? `${name} just said: ${said}
     const agent = this.agent
     const { log, executor, config, emotions } = agent
     agent.goals.maybePlan() // step back and plan in the background when it's time
-    const { messages, tools, options } = this.decisionMessages({ upcoming })
+    const { messages, tools, options, compact } = this.decisionMessages({ upcoming })
     const out = await agent.llm.chat(messages, { schema: config.llm.decisionSchema ? decisionSchema(tools) : undefined, priority: PRIORITY.decision, label: 'decision', temperature: config.mind.decisionTemperature ?? undefined })
-    // The short system prompt a fine-tuned model would get instead (TRAINING.md): kept with each example.
-    this.lastExchange = { messages, out, at: Date.now(), short: safe(() => buildTrainedPrompt(agent, executor.describeTools('names'))) }
+    // The short system prompt and state a fine-tuned model would get instead (TRAINING.md): kept with each example.
+    this.lastExchange = { messages, out, at: Date.now(), short: safe(() => buildTrainedPrompt(agent, executor.describeTools('names'))), compact }
     return this.finishDecision(out, tools, options)
   }
 
@@ -4191,8 +4304,19 @@ ${said ? `${name} just said: ${said}
     const lastThought = memory.actions.at(-1)?.thought
     if (lastThought) nudges.push(`Your previous thought: "${lastThought}" Stay on your plan and keep your goal text the same unless something changed.`)
 
+    // The short description of the moment (observe.js) a fine-tuned model reads: also kept with every recorded
+    // example, so the bot's decisions, the code's and recordings of a person's play all teach the same format.
+    const step = agent.goals?.current?.steps?.[agent.goals.current.now]?.text || null
+    const compact = safe(() => observe.compact({ ...state, status: { ...state.status, threats: state.status.threats } }, { coords: agent.coordsKnown(), options: strategy.describe(options), step })) || ''
+    if (config.llm.trained) {
+      const messages = [
+        { role: 'system', content: buildTrainedPrompt(agent, executor.describeTools('names')) },
+        { role: 'user', content: `${compact}\n${upcoming ? `You are in the middle of ${upcoming.name}(${JSON.stringify(upcoming.args)}): choose what comes right after it.\n` : ''}Choose your next action.` }
+      ]
+      return { messages, tools, options, compact }
+    }
     const messages = [
-      { role: 'system', content: config.llm.trained ? buildTrainedPrompt(agent, executor.describeTools('names')) : buildDecisionPrompt(agent, executor.describeTools(usesCompactPrompt(config))) },
+      { role: 'system', content: buildDecisionPrompt(agent, executor.describeTools(usesCompactPrompt(config))) },
       {
         role: 'user',
         // Slow-changing parts first, the state last (and inside it, what changes every second last): Ollama re-reads
@@ -4205,7 +4329,7 @@ ${said ? `${name} just said: ${said}
           `${nudges.join('\n')}\nChoose your next action.`
       }
     ]
-    return { messages, tools, options }
+    return { messages, tools, options, compact }
   }
 
   /** Turn the model's answer into a decision (and let goals, feelings and tasks hear about it). */
@@ -4896,10 +5020,13 @@ ${s?.contraptions?.length ? `Contraptions here: ${s.contraptions.join(' | ')}
     log.info(`Spawned in ${bot.game.dimension} at ${bot.entity.position.floored()} (Minecraft ${bot.version}).`)
     if (config.viewer.enabled) this.viewer.start()
     // Mouse and keyboard like a person (look.js): flicks with Fitts timing, tracking in fights, WASD steering on paths.
+    // With behavior.aimProfile (npm run analyze-motion on recordings of your play), it turns at your speed and accuracy.
+    const aim = config.behavior.aimProfile ? safe(() => readJson(path.resolve(__dirname, config.behavior.aimProfile))) : null
+    if (config.behavior.aimProfile && !Number.isFinite(aim?.aimSkill)) log.warn(`behavior.aimProfile: no usable aim measurements in ${config.behavior.aimProfile} (run npm run analyze-motion after recording some play).`)
     installHumanInput(bot, {
       enabled: () => config.behavior.smoothTurning !== false,
       keyboard: () => config.behavior.humanKeys !== false,
-      skill: () => safe(() => this.intelligence.skill('parkour')) ?? 0.5,
+      skill: () => (Number.isFinite(aim?.aimSkill) ? aim.aimSkill : safe(() => this.intelligence.skill('parkour')) ?? 0.5),
       precise: () => Boolean(this.reflexes?.busy || this.executor?.current?.name === 'parkour'),
       combat: () => this.executor?.current?.name === 'attackTarget',
       // Standing around (thinking, waiting): glance at people and things nearby now and then, as players do.

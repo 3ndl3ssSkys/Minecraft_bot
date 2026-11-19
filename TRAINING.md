@@ -2,6 +2,36 @@
 
 Short answer: **not a "plays like a player at super speed" model from scratch, but a small fine-tune of the model you already use is realistic, and worth it once the bot has played for a while.** Most of the speed and skill come from code, and that part is already built.
 
+## A good model without good data to start from
+
+The problem: a fine-tune copies its examples. The bot's own decisions with today's model aren't good enough to copy, and a model trained on them can't be better than them. So the examples have to come from somewhere better. In order of value:
+
+1. **You, playing (`npm run record`).** The best examples there are: a real player's decisions, at a real player's pace, in real situations. You play through a pass-through on your own PC; it writes down each thing you decide to do, in the bot's own action words (mine 12 stone, craft a pickaxe, eat, fight that zombie, store things...), together with the moment you decided it. That moment is described exactly the way the bot sees a moment (`observe.js`). Say `goal: ...` in chat now and then so it learns why, not only what. Decisions that led to dying within 15 s are marked bad and left out.
+2. **A big model as teacher (distillation).** For situations you don't play much (chat, judging people, odd requests): let a large hosted model drive for a few hours and record its decisions (see step 1 below).
+3. **The code's own decisions.** The early-game routine, `obtainItem` steps and finished searches are recorded too, capped at half the set so the model doesn't only learn to chop trees.
+4. **Only what worked.** Every source is filtered by outcome: the action succeeded, no dying soon after, no repeats, no standing around.
+
+All four use the same short prompt and the same compact description of the moment, so the model learns one format, and that is also what it reads when it plays (`llm.trained: true`).
+
+## A, B and C: what can do each, on your PC
+
+**A. Realistic player decisions.** A fine-tuned `qwen3:1.7b` on the examples above, mostly your own play: it learns what a player does in a situation, which no prompt can teach a small model. Each example carries its level, so recording at several levels (you playing carefully vs. fast and loose, or bots at set levels) teaches one model all of them. Until it's trained, the bot gets a short menu of good options worked out in code each decision (`strategy.js`), so even today's model mostly picks rather than invents.
+
+**B. Playing, moving and acting like a player.** Hands are code, 20 times a second; no language model can steer at that rate on a home card. What makes the hands human is measured, not guessed:
+- `npm run record` also logs every look and move packet, your keys, swings and hits (`data/training/motion/`);
+- `npm run analyze-motion` turns that into numbers: how long your turns take for their size, how many corrections you make, clicks per second, strafing while hitting, sprinting, jumps. It compares your turning to the bot's mouse model (`look.js`, built on the aimed-movement research) and finds the skill that turns like you;
+- `npm run set -- behavior.aimProfile data/training/motion/profile.json` makes the bot aim at your speed and accuracy.
+
+A learned movement network (behaviour cloning on your inputs) is the step after that, once there are many hours of recordings; the motion log is the data it would need.
+
+**C. Fast decisions that take as long as the moment allows.** A 1660 Super can't read a 2,000-token prompt in 300 ms, whatever the model. So the time to think is chosen per moment (`loop.thinking`):
+- **instant (code, under 50 ms):** a fall, lava, a hit, a creeper, an urgent need with one sensible answer: reflexes and the best option, no model at all;
+- **quick (the small model, a few hundred ms to `quickMs`):** something urgent with a real choice (hungry at dusk with a zombie coming): the small model gets a tiny prompt (health, food, threats, the last thing that happened, the numbered options) and answers one number. Past `quickMs` (1.5 s by default) the best option goes ahead;
+- **full (seconds):** calm moments: goals, plans, chat, the full decision. Past `fullMs` (12 s) it doesn't stand still: the best option goes ahead and the late answer is used right after it;
+- while it thinks, a monster walking up or a player starting a fight is checked 5 times a second and answered by reflex at once.
+
+With a fine-tuned 1.7B and the short prompt, full decisions get to about 1–2 s on your card, and quick ones to a few hundred milliseconds. Fighting itself (aiming, clicking, strafing, blocking) never waits on a model.
+
 ## What each part of "playing like a player" needs
 
 | Part | What does it | Speed |
@@ -58,6 +88,16 @@ Asked for: a model that decides very fast and understands Minecraft at its level
 A fine-tune copies the examples it's given, so how good it gets depends almost entirely on what you record. Plan on two weekends: one to record, one evening to train and test.
 
 ### 1. Record good examples (the part that matters)
+
+**Your own play first.** On your local test server (online-mode=false: an online-mode connection is encrypted and can't be read):
+
+```
+npm run record -- --server localhost:25565 --level advanced
+```
+
+Then in Minecraft: Multiplayer → Direct Connection → `localhost:25566`. Play normally. Say `goal: get iron armor` (or whatever you're doing) in chat when you start something. `--level` is how good a player you're playing as; record a careful session as `advanced` and a sloppy one as `beginner` if you want both. Every session goes to `data/training/demos/` and is picked up by `npm run training-set -- --short`. An hour of play gives roughly 150–300 decisions.
+
+**Then the bot's own decisions:**
 
 Turn recording on: `npm run set -- logging.trainingData true`. Every decision goes to `data/training/decisions.jsonl` (or the profile's folder) with:
 - the long prompt and the short one (`llm.trained`);

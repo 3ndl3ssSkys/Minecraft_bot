@@ -75,7 +75,7 @@ Environment variables also override the config, which is handy for scripts:
 | [SETUP.md](SETUP.md) | everything else: hardware and models, friends' servers, online-mode servers (FastLogin), Bedrock accounts, running it all the time, voice from another PC |
 | [CONFIGURING.md](CONFIGURING.md) | making the bot yours |
 | this README | how each part works, every command and option, troubleshooting |
-| [TRAINING.md](TRAINING.md) | fine-tuning the small model on the bot's own good decisions |
+| [TRAINING.md](TRAINING.md) | getting a good, fast model: recording your own play, fine-tuning a small model, thinking time by situation |
 | [HISTORY.md](HISTORY.md) | how it was built, request by request |
 | [CLAUDE.md](CLAUDE.md) | design notes and lessons learned, for whoever works on the code |
 
@@ -281,6 +281,9 @@ You can also pin a version with `"server": { "version": "26.1" }`. If you're kic
 | `containers.js` | Chest classification, contents memory, signs |
 | `util.js` | Small shared helpers |
 | `doctor.js` | `npm run doctor`: checks Node, config, Ollama (with a speed/VRAM benchmark) and the server |
+| `observe.js` | The compact description of a moment that a fine-tuned model reads, and that every training example (the bot's, the code's, yours) is written in |
+| `scripts/record.js` | `npm run record`: plays you through to your server and records your decisions and movement as training data |
+| `scripts/analyze-motion.js` | `npm run analyze-motion`: your aim, clicking and movement as numbers; the bot can aim like you (`behavior.aimProfile`) |
 | `scripts/` | `start-bot.bat` / `start-bot.sh` (auto-restart), a systemd service file, `regen-config.js` |
 | `test/` | `npm test` unit suites; `test/tools/` live-test tools (mock Ollama, test server, test player, scenario harness) |
 | `SETUP.md` / `CLAUDE.md` | step-by-step setup guide / design notes and lessons learned |
@@ -904,6 +907,11 @@ The bot knows Minecraft the way an experienced player does:
   - When it goes strip mining, it keeps tunnelling until ore turns up.
   - It thinks again when the routine is done or stuck, or something happens: danger, a request, the plan changing.
 - **Thinking while moving:** while an action runs, it already works out the next one (`loop.prethink`) and uses that answer if nothing changed meanwhile. Busy work fills the rest.
+- **As long as the moment allows** (`loop.thinking`):
+  - **No time (code, instantly):** danger with an urgent option (a fight worth taking, running away, eating) or something urgent with only one sensible answer: done at once, no model.
+  - **A split second (`quickMs`, 1.5 s by default):** something urgent with a real choice: the small model gets a tiny prompt (health, food, threats, the last thing that happened, the numbered options) and answers with one number; if it's late, the best option goes ahead.
+  - **Calm:** the full decision. Past `fullMs` (12 s) it stops waiting: the best option goes ahead, and the late answer is used right after it if nothing changed.
+  - While it thinks, a monster walking up or a player starting a fight is checked 5 times a second and answered by reflex right away.
 - **Fast to re-read:** the decision prompt puts what changes slowly first and what changes every second last, so Ollama reuses most of it from its cache. In a test, the reusable share of the state went from 8% to about half.
 
 - **While it thinks:** during every LLM call it does something small and useful — picks up items lying around, checks an unchecked chest (and remembers its contents: `status.knownContainers`), mines a visible ore or something its task needs, or hops around doing parkour (more often for restless personalities: `restlessness`). It stops the moment the decision arrives, and skips all of this in danger.

@@ -2,8 +2,9 @@
 /**
  * npm run training-set [-- path/to/decisions.jsonl] [--short] [--max-code 0.5] [--level master]
  *
- * Turns the decisions the bot recorded while playing (logging.trainingData) into a fine-tuning file: only the ones
- * that worked, no failures or repeats, no broken or emoji answers. Output: train.jsonl next to the input, one chat per
+ * Turns the decisions the bot recorded while playing (logging.trainingData), and with --short also recordings of
+ * people playing (npm run record → data/training/demos/), into a fine-tuning file: only the ones that worked, no
+ * failures or repeats, no broken or emoji answers. Output: train.jsonl next to the input, one chat per
  * line ({"messages": [system, user, assistant]}), the format Unsloth's notebooks and most trainers read.
  */
 const fs = require('fs')
@@ -18,16 +19,19 @@ const opt = (name, def) => { const i = args.indexOf(name); return i >= 0 ? args[
 const maxCode = Number(opt('--max-code', 0.5))
 const onlyLevel = opt('--level', null)
 const input = args.find((a, i) => !a.startsWith('--') && !['--max-code', '--level'].includes(args[i - 1])) || path.join(__dirname, '..', 'data', 'training', 'decisions.jsonl')
-if (!fs.existsSync(input)) {
+if (!fs.existsSync(input) && !fs.existsSync(path.join(path.dirname(input), 'demos'))) {
   console.log(`No recorded decisions at ${input}.\nTurn on "logging": { "trainingData": true } in config.local.json and let the bot play for a while first.`)
   process.exit(1)
 }
 const EMOJI = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u
-const lines = fs.readFileSync(input, 'utf8').split('\n').filter(Boolean)
+const lines = fs.existsSync(input) ? fs.readFileSync(input, 'utf8').split('\n').filter(Boolean) : []
+// Recordings of people playing (npm run record): data/training/demos/*.jsonl, the best examples there are.
+const demoDir = path.join(path.dirname(input), 'demos')
+if (fs.existsSync(demoDir)) for (const f of fs.readdirSync(demoDir).filter((x) => x.endsWith('.jsonl'))) lines.push(...fs.readFileSync(path.join(demoDir, f), 'utf8').split('\n').filter(Boolean))
 const seen = new Set()
 const why = { kept: 0, failed: 0, broken: 0, repeat: 0, emoji: 0, waiting: 0, level: 0, code: 0 }
 const byLevel = {}
-const bySource = { model: 0, code: 0 }
+const bySource = { model: 0, code: 0, people: 0 }
 const code = []
 const out = []
 let last = ''
@@ -37,26 +41,35 @@ for (const l of lines) {
   const a = d.answer
   if (!d.ok) { why.failed++; continue }
   if (onlyLevel && d.level !== onlyLevel) { why.level++; continue }
-  if (!a?.action?.name || !Array.isArray(d.messages) || d.messages.length < 2) { why.broken++; continue }
+  // Short form: the short system prompt and the compact state (observe.js), the same for all three sources.
+  // People's recordings only come in this form.
+  const human = d.model === 'human'
+  if (!a?.action?.name || (!human && (!Array.isArray(d.messages) || d.messages.length < 2))) { why.broken++; continue }
+  if (human && !(short && d.short && d.compact)) { why.broken++; continue }
   const text = JSON.stringify(a)
   if (EMOJI.test(text)) { why.emoji++; continue }
   if (a.action.name === 'wait') { why.waiting++; continue } // standing around teaches nothing
   const act = `${a.action.name}${JSON.stringify(a.action.args || {})}`
-  const key = `${act}|${String(d.messages[1].content).slice(-400)}`
-  if (act === last || seen.has(key)) { why.repeat++; continue }
+  const key = `${act}|${String(d.compact || d.messages?.[1]?.content || '').slice(-400)}`
+  if ((act === last && !human) || seen.has(key)) { why.repeat++; continue }
   last = act
   seen.add(key)
-  const msgs = d.messages.map((m) => ({ role: m.role, content: m.content }))
-  if (short) { if (!d.short) { why.broken++; continue } msgs[0] = { role: 'system', content: d.short } }
+  let msgs
+  if (short) {
+    if (!d.short) { why.broken++; continue }
+    const user = d.compact ? `${d.compact}\nChoose your next action.` : d.messages[1].content
+    msgs = [{ role: 'system', content: d.short }, { role: 'user', content: user }]
+  } else msgs = d.messages.map((m) => ({ role: m.role, content: m.content }))
   const line = JSON.stringify({ messages: [...msgs, { role: 'assistant', content: text }] })
   if (d.model === 'code') { code.push({ line, level: d.level }); continue }
   out.push(line)
-  bySource.model++
+  bySource[human ? 'people' : 'model']++
   byLevel[d.level || '?'] = (byLevel[d.level || '?'] || 0) + 1
   why.kept++
 }
 // The code's examples: no more than maxCode of the whole (spread evenly through the recording).
 const room = maxCode >= 1 ? code.length : Math.floor((maxCode * out.length) / Math.max(0.01, 1 - maxCode))
+if (!short && fs.existsSync(demoDir)) console.log('Recordings of people playing are only used with --short (they come in the short form).')
 const step = code.length > room && room > 0 ? code.length / room : 1
 for (let i = 0; i < code.length && bySource.code < room; i += step) {
   const c = code[Math.floor(i)]
@@ -74,6 +87,6 @@ const test = out.splice(0, nTest)
 fs.writeFileSync(file, out.join('\n') + (out.length ? '\n' : ''))
 if (test.length) fs.writeFileSync(file.replace(/train(-short)?\.jsonl$/, 'test$1.jsonl'), test.join('\n') + '\n')
 console.log(`${lines.length} recorded decisions → ${out.length} examples in ${file}${test.length ? ` (+ ${test.length} held back for npm run eval-model)` : ''}`)
-console.log(`from the model: ${bySource.model}, from the code: ${bySource.code} | by level: ${Object.entries(byLevel).map(([k, v]) => `${k} ${v}`).join(', ') || '-'}`)
+console.log(`from the model: ${bySource.model}, from the code: ${bySource.code}, from people playing: ${bySource.people} | by level: ${Object.entries(byLevel).map(([k, v]) => `${k} ${v}`).join(', ') || '-'}`)
 console.log(`left out: ${why.failed} failed, ${why.repeat} repeats, ${why.waiting} waits, ${why.broken} broken, ${why.emoji} with emojis${why.code ? `, ${why.code} extra code examples (--max-code)` : ''}${why.level ? `, ${why.level} other levels` : ''}`)
 if (why.kept < 1000) console.log('A useful fine-tune wants a few thousand examples: let it play more (with people around, if you can).')

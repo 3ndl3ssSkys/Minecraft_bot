@@ -229,6 +229,18 @@ You can also put the whole object inline: `"personality": { "name": "...", ... }
 - **`menuTime`:** crafting, furnaces, chests and armor take menu time, about 2 s for a beginner and a blink for a master.
 - **`nightShelter`:** at dusk it heads home to its bed, or digs in if it has none.
 - **`humanKeys`:** walk paths with WASD like a person (the camera leads, W+A/D around corners). Off = exact bot steering.
+- **`aimProfile`:** aim like you. Record yourself playing (`npm run record`), run `npm run analyze-motion`, then `npm run set -- behavior.aimProfile data/training/motion/profile.json`. It turns at your measured speed and accuracy instead of its level's (TRAINING.md).
+
+**How long it may think** (`loop.thinking`):
+
+```json
+"loop": { "thinking": { "enabled": true, "quickMs": 1500, "fullMs": 12000 } }
+```
+
+- In danger with an urgent option, or when there's only one sensible thing to do: no model, it acts at once.
+- Something urgent with a choice: the small model picks an option number with a tiny prompt, within `quickMs` (0 = never ask, take the best option).
+- Calm: the full decision; after `fullMs` the best option goes ahead and the answer is used right after it (0 = always wait).
+- `enabled: false` = always the full decision, no deadline (the old behaviour).
 
 **Voice** (`voice`; the page is `/voice` on the viewer):
 
