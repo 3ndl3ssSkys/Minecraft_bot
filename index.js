@@ -953,46 +953,7 @@ class Perception {
    * The shape of the place, in a few words: outdoors / under a roof / underground, which ways are
    * blocked or open, drop-offs, a door close by, darkness. Cheap (a few hundred block reads).
    */
-  layout () {
-    const { bot } = this
-    const p = bot.entity.position.floored()
-    const solid = (b) => b && b.boundingBox === 'block'
-    const out = []
-    let roof = null
-    for (let dy = 2; dy <= 24; dy++) if (solid(bot.blockAt(p.offset(0, dy, 0)))) { roof = dy; break }
-    if (roof === null) out.push('outdoors')
-    else if (p.y < 56 && roof > 0) out.push(`underground (y ${p.y}, rock ${roof} above)`)
-    else out.push(`under a roof ${roof} blocks up`)
-    const dirs = { north: [0, -1], south: [0, 1], east: [1, 0], west: [-1, 0] }
-    const blocked = []
-    const drops = []
-    for (const [name, [dx, dz]] of Object.entries(dirs)) {
-      let free = 0
-      for (let i = 1; i <= 6; i++) {
-        if (solid(bot.blockAt(p.offset(dx * i, 0, dz * i))) || solid(bot.blockAt(p.offset(dx * i, 1, dz * i)))) break
-        free++
-      }
-      if (free === 0) blocked.push(name)
-      for (let i = 1; i <= Math.min(3, free); i++) {
-        let depth = 0
-        while (depth < 10 && !solid(bot.blockAt(p.offset(dx * i, -1 - depth, dz * i)))) depth++
-        if (depth >= 4) { drops.push(`${name} (${depth >= 10 ? '10+' : depth} down)`); break }
-      }
-    }
-    if (blocked.length === 4) out.push('walled in on all sides')
-    else if (blocked.length) out.push(`blocked to the ${blocked.join(' and ')}`)
-    if (drops.length) out.push(`drop-off to the ${drops.join(', ')}`)
-    const doorIds = this.doorIds || (this.doorIds = bot.registry.blocksArray.filter((b) => /_door$/.test(b.name)).map((b) => b.id))
-    const door = bot.findBlock({ matching: doorIds, maxDistance: 8 })
-    if (door) {
-      const d = door.position.minus(p)
-      const side = Math.abs(d.x) > Math.abs(d.z) ? (d.x > 0 ? 'east' : 'west') : (d.z > 0 ? 'south' : 'north')
-      out.push(`a door ${Math.round(door.position.distanceTo(p))} blocks ${side}`)
-    }
-    const light = bot.blockAt(p.offset(0, 1, 0))?.light
-    if (roof !== null && Number.isFinite(light) && light < 8) out.push('dark here (monsters can spawn)')
-    return out.join('; ')
-  }
+  layout () { return observe.layout(this.bot) }
 
   /** Farms, generators and machines around, understood as far as its knowledge goes (mechanics.js). Cached. */
   contraptions () {
@@ -1426,6 +1387,9 @@ function parseJsonLoose (text) {
   const start = text.indexOf('{')
   const end = text.lastIndexOf('}')
   if (start !== -1 && end > start) { try { return JSON.parse(text.slice(start, end + 1)) } catch { /* fall through */ } }
+  // A model trained for Mindcraft (the Andy models) answers "sentence !command(args)": read that (mindcraft.js).
+  const cmd = mindcraft.find(text)
+  if (cmd) return { thought: cmd.thought, mindcraft: cmd }
   throw Object.assign(new Error(`Model did not return valid JSON: ${text.slice(0, 120)}`), { retryable: true })
 }
 
@@ -3163,6 +3127,7 @@ const threat = require('./threat')
 const routines = require('./routines')
 const strategy = require('./strategy')
 const observe = require('./observe')
+const mindcraft = require('./mindcraft')
 const normalizeArg = (v) => String(v || '').toLowerCase().trim().replace(/\s+/g, '_').replace(/^minecraft:/, '')
 
 /**
@@ -4346,6 +4311,13 @@ ${said ? `${name} just said: ${said}
     decision.next = (Array.isArray(out.next) ? out.next : []).slice(0, 2)
       .map((n) => ({ name: String(n?.name || ''), args: isPlainObject(n?.args) ? n.args : {} }))
       .filter((n) => tools.includes(n.name) && n.name !== decision.action.name && !['attackTarget', 'chatMessage'].includes(n.name) && Object.keys(n.args).length > 0)
+    // A Mindcraft command instead of an action (models trained for Mindcraft): its counterpart here.
+    // (With Ollama's JSON mode such a model still writes JSON, but puts "!collectBlocks(...)" in some text field.)
+    const mc = out.mindcraft || (!tools.includes(decision.action.name) && Object.values(out).filter((v) => typeof v === 'string').map((v) => mindcraft.find(v)).find(Boolean))
+    if (mc) {
+      const a = mindcraft.toAction(mc, agent.mindcraftLookup())
+      if (a) { decision.action = a; decision.mindcraft = `!${mc.name}` } else log.warn(`The model answered with a Mindcraft command (!${mc.name}) that has no counterpart here.`)
+    }
     // It picked one of the options: take that option's ready action (vetted, arguments filled in).
     const pickN = Number(out.choose)
     if (Number.isInteger(pickN) && pickN >= 1 && options[pickN - 1]) {
@@ -4499,6 +4471,23 @@ class Agent {
   }
 
   dangerLevel () { return this.dangerInfo().level }
+
+  /** Finding what a Mindcraft command names (mindcraft.js): the nearest creature, player or block of that kind. */
+  mindcraftLookup () {
+    const bot = this.bot
+    const me = bot.entity?.position
+    const nearest = (pred) => Object.values(bot.entities).filter((e) => e !== bot.entity && e.position && pred(e)).sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me))[0]
+    return {
+      entity: (type) => nearest((e) => e.name === type || e.username === type)?.id,
+      player: (name) => nearest((e) => e.type === 'player' && e.username?.toLowerCase() === String(name).toLowerCase())?.id,
+      block: (type) => {
+        const ids = bot.registry.blocksArray.filter((b) => b.name === type || (type === 'log' && b.name.endsWith('_log'))).map((b) => b.id)
+        const p = ids.length ? safe(() => bot.findBlock({ matching: ids, maxDistance: 64 })?.position) : null
+        return p ? { x: p.x, y: p.y, z: p.z } : null
+      },
+      here: () => { const p = me?.floored(); return p ? { x: p.x + 1, y: p.y, z: p.z } : null }
+    }
+  }
 
   /** The best few concrete options right now (strategy.js), from what it perceives and knows. */
   strategyOptions () {

@@ -888,6 +888,32 @@ It also had a stray line that reset the autopilot after nearly every action. Tha
 
 **Not verified:** the recorder against Paper 26.1 and a real vanilla client; crafting, furnace and chest detection (flying-squid can't do windows); the quick lane's real speed on the 1660 Super.
 
+## 36. Andy 3.6 and other Mindcraft models: beat them or build on them?
+
+**Asked:** the user hasn't trained a model yet. There's a model called Andy 3.6 (and others): could we beat it in performance and reasoning, or use it and make it better for this bot?
+
+**Found** (model cards on Hugging Face and Ollama; Hugging Face itself is blocked from the cloud session, so this came through search results):
+- Andy-3.6: ~7B, Qwen2 / DeepSeek-R1-Distill-Qwen-7B, reasons out loud, ~22k curated Mindcraft prompts, Apache-2.0, Mindcraft only.
+- Andy-4: 8B Llama 3.1, 4.9 GB Q4_K_M, 6–8 GB VRAM; trained on the published Andy-4-base and Andy-4-ft datasets, on one RTX 3090 for about three weeks.
+- Andy-4-micro: 1.5B Qwen2.5. Andy-4-tiny: 360M SmolLM2.
+- No published benchmarks.
+
+**Answer given:**
+- Their weights speak Mindcraft's command language and prompt.
+- The 7–8B ones don't fit the 1660 Super, and 3.6 thinks before every answer.
+- So build on their data, not their weights: fine-tune Qwen3 on our recordings plus their converted examples (check the dataset licences), then measure.
+
+**Built:**
+- `mindcraft.js` plus hooks in `parseJsonLoose` and `finishDecision`: an Andy model can run as `llm.model`, and its commands become our actions.
+- `npm run compare-models`: the same knowledge, judgment and decision questions for every model, with speed and format rate.
+- **Bug found while doing this:** the recorder's layout text didn't match the bot's ("Outdoors." vs "outdoors; blocked to the north…"). `Perception.layout` moved to `observe.layout`, and both use it now.
+
+**Tested:**
+- `test/mindcraft.test.js`: command parsing and mapping, commands inside JSON fields of a decision, the questions are deterministic with 4 distinct choices, game-data answers, lenient answer parsing.
+- compare-models ran against a fake Ollama: a JSON model and a Mindcraft-text model; the unreachable-Ollama message.
+
+**Not verified:** any real Andy model's output or scores; whether the Andy datasets convert cleanly to this bot's actions (not downloadable from here).
+
 ## Where it stands now
 
 **Next for the user:**
@@ -896,7 +922,8 @@ It also had a stray line that reset the autopilot after nearly every action. Tha
 3. `npm run doctor`, to see the new real timings with the compact prompt.
 4. Set up the local Paper test server (START-HERE step 4: Java 21, Paper 1.21.4, EULA, `online-mode=false` on that fresh world only).
 5. `npm start`, then join and talk to it.
-6. For good training data: `npm run record -- --server localhost:25565 --level advanced`, join `localhost:25566`, play, say `goal: ...` in chat (TRAINING.md). Then `npm run analyze-motion`.
+6. Measure the models you have, with Andy-4-micro for comparison: `ollama pull sweaterdog/andy-4:micro-q8_0`, then `npm run compare-models -- qwen3:4b-instruct qwen3:1.7b sweaterdog/andy-4:micro-q8_0`.
+7. For good training data: `npm run record -- --server localhost:25565 --level advanced`, join `localhost:25566`, play, say `goal: ...` in chat (TRAINING.md). Then `npm run analyze-motion`.
 
 **After that:**
 - Watch real play and tune prompts from the real logs. Nothing has run on a real server or with a real model yet; every live test used flying-squid and a mock LLM.

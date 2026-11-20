@@ -110,8 +110,6 @@ function miniSnapshot (bot, x = {}) {
       if (!blocks[b.name] || d < blocks[b.name].distance) blocks[b.name] = { distance: Math.round(d * 10) / 10 }
     }
   } catch {}
-  const sky = (() => { try { return bot.blockAt(me.offset(0, 1, 0))?.skyLight ?? 15 } catch { return 15 } })()
-  const layout = sky >= 12 ? 'Outdoors.' : me.y < 50 ? 'Underground.' : 'Under a roof.'
   return {
     self: { position: { x: me.x, y: me.y, z: me.z }, health: bot.health, food: bot.food, dimension: bot.game?.dimension, gameMode: bot.game?.gameMode },
     world: { timeOfDay: bot.time?.timeOfDay ?? 6000, phase: phaseOf(bot.time?.timeOfDay ?? 6000), raining: bot.isRaining },
@@ -119,12 +117,56 @@ function miniSnapshot (bot, x = {}) {
     inventory: { items, freeSlots: bot.inventory.emptySlotCount() },
     nearbyEntities: entities,
     nearbyBlocks: blocks,
-    layout,
+    layout: (() => { try { return layout(bot) } catch { return '' } })(),
     status: { goal: x.goal || null },
     recentActions: x.recentActions || [],
     recentChat: x.recentChat || [],
     recentEvents: x.recentEvents || []
   }
+}
+
+/**
+ * Where it is, in a player's words: outdoors / underground / under a roof, blocked sides, drop-offs, a door, darkness.
+ * The bot's perception and the recorder both use this, so recorded and live moments read the same.
+ */
+function layout (bot) {
+  const p = bot.entity.position.floored()
+  const solid = (b) => b && b.boundingBox === 'block'
+  const out = []
+  let roof = null
+  for (let dy = 2; dy <= 24; dy++) if (solid(bot.blockAt(p.offset(0, dy, 0)))) { roof = dy; break }
+  if (roof === null) out.push('outdoors')
+  else if (p.y < 56 && roof > 0) out.push(`underground (y ${p.y}, rock ${roof} above)`)
+  else out.push(`under a roof ${roof} blocks up`)
+  const dirs = { north: [0, -1], south: [0, 1], east: [1, 0], west: [-1, 0] }
+  const blocked = []
+  const drops = []
+  for (const [name, [dx, dz]] of Object.entries(dirs)) {
+    let free = 0
+    for (let i = 1; i <= 6; i++) {
+      if (solid(bot.blockAt(p.offset(dx * i, 0, dz * i))) || solid(bot.blockAt(p.offset(dx * i, 1, dz * i)))) break
+      free++
+    }
+    if (free === 0) blocked.push(name)
+    for (let i = 1; i <= Math.min(3, free); i++) {
+      let depth = 0
+      while (depth < 10 && !solid(bot.blockAt(p.offset(dx * i, -1 - depth, dz * i)))) depth++
+      if (depth >= 4) { drops.push(`${name} (${depth >= 10 ? '10+' : depth} down)`); break }
+    }
+  }
+  if (blocked.length === 4) out.push('walled in on all sides')
+  else if (blocked.length) out.push(`blocked to the ${blocked.join(' and ')}`)
+  if (drops.length) out.push(`drop-off to the ${drops.join(', ')}`)
+  const doorIds = bot._doorIds || (bot._doorIds = bot.registry.blocksArray.filter((b) => /_door$/.test(b.name)).map((b) => b.id))
+  const door = bot.findBlock({ matching: doorIds, maxDistance: 8 })
+  if (door) {
+    const d = door.position.minus(p)
+    const side = Math.abs(d.x) > Math.abs(d.z) ? (d.x > 0 ? 'east' : 'west') : (d.z > 0 ? 'south' : 'north')
+    out.push(`a door ${Math.round(door.position.distanceTo(p))} blocks ${side}`)
+  }
+  const light = bot.blockAt(p.offset(0, 1, 0))?.light
+  if (roof !== null && Number.isFinite(light) && light < 8) out.push('dark here (monsters can spawn)')
+  return out.join('; ')
 }
 
 /** The short system prompt of a fine-tuned model (llm.trained): the same words for the bot and for recordings. */
@@ -134,4 +176,4 @@ Answer with one JSON decision: thought, choose (a good option's number, or 0), g
 Actions: ${String(toolNames).split('\n').join(' ')}`
 }
 
-module.exports = { compact, miniSnapshot, trainedPrompt, HOSTILE, NOTABLE }
+module.exports = { compact, miniSnapshot, layout, trainedPrompt, HOSTILE, NOTABLE }

@@ -283,6 +283,8 @@ You can also pin a version with `"server": { "version": "26.1" }`. If you're kic
 | `doctor.js` | `npm run doctor`: checks Node, config, Ollama (with a speed/VRAM benchmark) and the server |
 | `observe.js` | The compact description of a moment that a fine-tuned model reads, and that every training example (the bot's, the code's, yours) is written in |
 | `scripts/record.js` | `npm run record`: plays you through to your server and records your decisions and movement as training data |
+| `mindcraft.js` | Reads answers from models trained for Mindcraft (like the Andy models): "!collectBlocks(...)" becomes this bot's own action |
+| `scripts/compare-models.js` | `npm run compare-models -- <model> <model> ...`: the same knowledge questions, situations and recorded decisions for each model, plus speed |
 | `scripts/analyze-motion.js` | `npm run analyze-motion`: your aim, clicking and movement as numbers; the bot can aim like you (`behavior.aimProfile`) |
 | `scripts/` | `start-bot.bat` / `start-bot.sh` (auto-restart), a systemd service file, `regen-config.js` |
 | `test/` | `npm test` unit suites; `test/tools/` live-test tools (mock Ollama, test server, test player, scenario harness) |

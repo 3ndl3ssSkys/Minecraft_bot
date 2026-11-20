@@ -32,6 +32,27 @@ A learned movement network (behaviour cloning on your inputs) is the step after 
 
 With a fine-tuned 1.7B and the short prompt, full decisions get to about 1–2 s on your card, and quick ones to a few hundred milliseconds. Fighting itself (aiming, clicking, strafing, blocking) never waits on a model.
 
+## Andy and other ready-made Minecraft models
+
+Sweaterdog's **Andy** models are fine-tunes made for [Mindcraft](https://github.com/kolbytn/mindcraft), another LLM Minecraft bot. According to their model cards:
+- **Andy-3.6:** about 7B, Qwen2-based, with reasoning built on DeepSeek-R1-Distill-Qwen-7B; ~22,000 curated Mindcraft prompts; Apache-2.0; "only for use with Mindcraft".
+- **Andy-4:** 8B (Llama 3.1), ~4.9 GB at Q4_K_M; the card asks for 6–8 GB VRAM.
+- **Andy-4-micro:** 1.5B (Qwen2.5).
+- **Andy-4-tiny:** 360M (SmolLM2).
+- **Training data:** Andy-4 was trained on the Andy-4-base and Andy-4-ft datasets, published on Hugging Face.
+
+**What that means here:**
+- **They speak Mindcraft, not this bot.** They answer "a sentence !collectBlocks("oak_log", 10)" and were trained on Mindcraft's prompt and its state format. This bot reads those commands now (`mindcraft.js` turns them into its own actions), so you can try one as `llm.model`. But they will never use this bot's options menu, goals, feelings or chat judgment, which they weren't trained on.
+- **The sizes that are good don't fit, and the ones that fit are small.** Andy-3.6 and Andy-4 (7–8B) spill onto the CPU on a 1660 Super, like `qwen2.5:7b` did, and Andy-3.6 reasons out loud before answering, which is slow. Andy-4-micro fits easily but is a 1.5B on an older base.
+- **Best use: their data, not their weights.** Starting a fine-tune from Qwen3 (a newer, stronger base at the same size) and adding Andy's published examples, converted to this bot's actions, gives more Minecraft experience than our own recordings alone. Check the datasets' licences before mixing them in.
+- **Measure, don't guess:** `npm run compare-models -- qwen3:4b-instruct qwen3:1.7b sweaterdog/andy-4:micro-q8_0` asks every model the same things:
+  - knowledge questions checked against the game's own data (the pickaxe a block needs, recipe ingredients, food, mob drops);
+  - clear-cut situations described the way the bot sees them;
+  - your recorded decisions, once you have a training set;
+  - speed and how often it answers in the format asked for.
+  
+  Run it again after fine-tuning to see whether your model beat theirs.
+
 ## What each part of "playing like a player" needs
 
 | Part | What does it | Speed |
